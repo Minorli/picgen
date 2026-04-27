@@ -37,6 +37,8 @@ The following settings should be enabled in GitHub repository settings for `main
 
 - Require a pull request before merging
 - Require at least 1 approval
+- Require status checks to pass before merging
+- Select the `CI` workflow as a required status check
 - Dismiss stale approvals when new commits are pushed
 - Require conversation resolution before merging
 - Restrict direct pushes to maintainers only
