@@ -42,6 +42,7 @@ export PICGEN_DEFAULT_GENERATE_URL="https://example.com/v1/images/generations"
 export PICGEN_DEFAULT_EDIT_URL="https://sub.tidba.com/v1/images/edits"
 export PICGEN_DEFAULT_MODEL="gpt-image-2"
 export PICGEN_DEFAULT_SIZE="1024x1024"
+export PICGEN_UPSTREAM_USER_AGENT="Mozilla/5.0 ..."
 python3 app.py
 ```
 
@@ -50,6 +51,7 @@ python3 app.py
 - `PICGEN_DEFAULT_API_KEY` 只作为服务端默认值，不会写入仓库
 - 如果服务端已设置默认 key，页面里的 API Key 可以留空
 - 生成接口 URL 和编辑接口 URL 可以分别配置，适配不同上游域名
+- `PICGEN_UPSTREAM_USER_AGENT` 可覆盖本地代理访问上游接口时使用的 User-Agent。遇到 Cloudflare `Error 1010: browser_signature_banned` 时，可以用它和上游要求的请求头保持一致
 
 ## 落盘位置
 
@@ -119,6 +121,14 @@ python3 app.py
 - 历史记录列表本身只保存参数摘要，不是完整图册；但当前工作区会保留最近一次图像和页面状态
 - 前端默认只上传一张原图，不带 mask
 - 如果你的生成接口域名不是示例值，需要在页面里填入真实 URL
+
+## 常见上游错误
+
+### Cloudflare Error 1010
+
+如果原始响应里出现 `Error 1010: Access denied`、`browser_signature_banned` 或 `owner_action_required: true`，说明请求被上游站点的 Cloudflare 规则按浏览器签名拦截了。这通常不是提示词、API Key 或本地页面的问题，也不建议自动重试。
+
+可先尝试用 `PICGEN_UPSTREAM_USER_AGENT` 调整本地代理访问上游时使用的 User-Agent；如果仍然被拒绝，需要联系上游站点/API 服务方放行当前访问方式，或换用他们认可的接口域名/代理通道。
 
 ## 协作与开源
 

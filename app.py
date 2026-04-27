@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import sys
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -40,6 +41,29 @@ DEFAULT_CONFIG = DefaultConfig(
     size=os.environ.get("PICGEN_DEFAULT_SIZE", "1024x1024").strip() or "1024x1024",
     api_key=os.environ.get("PICGEN_DEFAULT_API_KEY", "").strip(),
 )
+
+UPSTREAM_USER_AGENT = (
+    os.environ.get("PICGEN_UPSTREAM_USER_AGENT", "").strip()
+    or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def upstream_headers(extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": UPSTREAM_USER_AGENT,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers
+
+
+def debug_log(event: str, **fields: Any) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    field_text = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+    print(f"[picgen] {timestamp} {event} {field_text}".rstrip(), file=sys.stderr, flush=True)
 
 
 class APIError(Exception):
@@ -86,10 +110,9 @@ def storage_url_for_path(file_path: Path) -> str:
 def fetch_remote_image(image_url: str) -> tuple[bytes, str]:
     req = request.Request(
         image_url,
-        headers={
+        headers=upstream_headers({
             "Accept": "image/*",
-            "User-Agent": "PicGen/1.0",
-        },
+        }),
         method="GET",
     )
 
@@ -216,6 +239,23 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
         return message, response_body.strip() or None
 
     if isinstance(parsed_body, dict):
+        if parsed_body.get("cloudflare_error") is True and parsed_body.get("error_code") == 1010:
+            message = "上游接口被 Cloudflare 拒绝访问: Error 1010"
+            detail_text = str(parsed_body.get("detail") or "The site owner has blocked access based on your browser's signature.")
+            ray_id = str(parsed_body.get("ray_id") or parsed_body.get("instance") or "").strip()
+            zone = str(parsed_body.get("zone") or "").strip()
+            owner_hint = str(parsed_body.get("what_you_should_do") or "").replace("**", "").strip()
+            detail_lines = [
+                detail_text,
+                "这通常不是提示词、API Key 或本地页面的问题，而是上游站点的 Cloudflare 规则拦截了当前代理请求签名。",
+            ]
+            if owner_hint:
+                detail_lines.append(owner_hint)
+            if zone or ray_id:
+                detail_lines.append(f"Zone: {zone or '-'}; Ray ID: {ray_id or '-'}")
+            details = "\n".join(detail_lines)
+            return message, details
+
         error_block = parsed_body.get("error")
         if isinstance(error_block, dict):
             message = str(error_block.get("message") or message)
@@ -286,14 +326,23 @@ def prepare_image_payload(upstream: dict[str, Any], *, save_context: dict[str, A
 
 def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     request_body = json.dumps(payload).encode("utf-8")
+    started_at = time.perf_counter()
+    debug_log(
+        "upstream_json_start",
+        url=url,
+        model=payload.get("model"),
+        size=payload.get("size"),
+        prompt_chars=len(str(payload.get("prompt") or "")),
+        body_bytes=len(request_body),
+    )
     req = request.Request(
         url,
         data=request_body,
-        headers={
+        headers=upstream_headers({
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-        },
+        }),
         method="POST",
     )
 
@@ -302,10 +351,30 @@ def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[s
             body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        debug_log(
+            "upstream_json_http_error",
+            url=url,
+            status=exc.code,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            body_chars=len(body),
+        )
         message, details = extract_error_message(body)
         raise APIError(exc.code, message, details) from exc
     except error.URLError as exc:
+        debug_log(
+            "upstream_json_url_error",
+            url=url,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            reason=exc.reason,
+        )
         raise APIError(HTTPStatus.BAD_GATEWAY, f"无法连接上游接口: {exc.reason}") from exc
+
+    debug_log(
+        "upstream_json_ok",
+        url=url,
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        body_chars=len(body),
+    )
 
     try:
         parsed = json.loads(body)
@@ -316,14 +385,23 @@ def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[s
 
 def run_upstream_multipart(url: str, api_key: str, fields: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, Any]:
     body, content_type = encode_multipart(fields, files)
+    started_at = time.perf_counter()
+    debug_log(
+        "upstream_multipart_start",
+        url=url,
+        model=fields.get("model"),
+        prompt_chars=len(str(fields.get("prompt") or "")),
+        files=",".join(str(file_part.get("filename")) for file_part in files),
+        body_bytes=len(body),
+    )
     req = request.Request(
         url,
         data=body,
-        headers={
+        headers=upstream_headers({
             "Authorization": f"Bearer {api_key}",
             "Content-Type": content_type,
             "Accept": "application/json",
-        },
+        }),
         method="POST",
     )
 
@@ -332,10 +410,30 @@ def run_upstream_multipart(url: str, api_key: str, fields: dict[str, Any], files
             response_body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
+        debug_log(
+            "upstream_multipart_http_error",
+            url=url,
+            status=exc.code,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            body_chars=len(body_text),
+        )
         message, details = extract_error_message(body_text)
         raise APIError(exc.code, message, details) from exc
     except error.URLError as exc:
+        debug_log(
+            "upstream_multipart_url_error",
+            url=url,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            reason=exc.reason,
+        )
         raise APIError(HTTPStatus.BAD_GATEWAY, f"无法连接上游接口: {exc.reason}") from exc
+
+    debug_log(
+        "upstream_multipart_ok",
+        url=url,
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        body_chars=len(response_body),
+    )
 
     try:
         parsed = json.loads(response_body)
@@ -418,16 +516,39 @@ class PicGenHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        request_id = uuid.uuid4().hex[:8]
+        started_at = time.perf_counter()
+        debug_log("local_post_start", request_id=request_id, path=path)
         try:
             payload = self.read_json_body()
+            debug_log(
+                "local_post_payload",
+                request_id=request_id,
+                path=path,
+                keys=",".join(sorted(payload.keys())),
+            )
             if path == "/api/generate":
                 response_payload = self.handle_generate(payload)
             elif path == "/api/edit":
                 response_payload = self.handle_edit(payload)
             else:
                 raise APIError(HTTPStatus.NOT_FOUND, "未知接口")
+            debug_log(
+                "local_post_ok",
+                request_id=request_id,
+                path=path,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            )
             self.write_json(HTTPStatus.OK, response_payload)
         except APIError as exc:
+            debug_log(
+                "local_post_api_error",
+                request_id=request_id,
+                path=path,
+                status=exc.status,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                message=exc.message,
+            )
             self.write_json(
                 exc.status,
                 {
@@ -437,6 +558,13 @@ class PicGenHandler(SimpleHTTPRequestHandler):
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
             traceback.print_exc()
+            debug_log(
+                "local_post_internal_error",
+                request_id=request_id,
+                path=path,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                message=exc,
+            )
             self.write_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {
@@ -530,12 +658,14 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         mask_part = parse_file_payload(payload.get("mask"), "mask", required=False)
 
         files = [part for part in [image_part, mask_part] if part is not None]
+        size = str(payload.get("size") or "").strip()
         upstream_response = run_upstream_multipart(
             endpoint_url,
             api_key,
             fields={
                 "model": model,
                 "prompt": prompt,
+                "size": size,
             },
             files=files,
         )
@@ -544,6 +674,7 @@ class PicGenHandler(SimpleHTTPRequestHandler):
             "mode": "edit",
             "prompt": prompt,
             "model": model,
+            "size": size or None,
             "endpoint_url": endpoint_url,
             "source_image_name": image_part["filename"],
             "mask_image_name": mask_part["filename"] if mask_part else None,
@@ -553,6 +684,7 @@ class PicGenHandler(SimpleHTTPRequestHandler):
                     "mode": "edit",
                     "prompt": prompt,
                     "model": model,
+                    "size": size or None,
                     "endpoint_url": endpoint_url,
                     "source_image_name": image_part["filename"],
                     "mask_image_name": mask_part["filename"] if mask_part else None,

@@ -541,6 +541,48 @@ textarea {
   line-height: 1.6;
 }
 
+.reference-dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 86px;
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1.5px dashed rgba(31, 138, 82, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(248, 253, 250, 0.86);
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+}
+
+.reference-dropzone:hover,
+.reference-dropzone:focus,
+.reference-dropzone.dragging,
+.reference-dropzone.ready {
+  border-style: solid;
+  border-color: rgba(31, 138, 82, 0.38);
+  background: rgba(237, 249, 242, 0.9);
+}
+
+.reference-dropzone.dragging {
+  transform: scale(1.01);
+}
+
+.reference-dropzone strong {
+  display: block;
+  margin: 3px 0 4px;
+  font-size: 15px;
+}
+
+.reference-label {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .size-stack {
   display: grid;
   gap: 10px;
@@ -682,6 +724,7 @@ textarea {
   background:
     linear-gradient(180deg, rgba(31, 138, 82, 0.02), rgba(15, 45, 31, 0.04)),
     repeating-linear-gradient(45deg, rgba(31, 138, 82, 0.03) 0 10px, rgba(255, 255, 255, 0.03) 10px 20px);
+  overflow: hidden;
 }
 
 .preview-frame-hero {
@@ -732,6 +775,85 @@ textarea {
 .preview-frame.preview-frame-clickable:focus .preview-hint {
   opacity: 1;
   transform: translateY(0);
+}
+
+.preview-frame-busy::before {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background:
+    linear-gradient(115deg, transparent 0%, rgba(255, 255, 255, 0.5) 42%, transparent 58%),
+    radial-gradient(circle at 50% 42%, rgba(34, 167, 102, 0.12), transparent 44%);
+  background-size: 240% 100%, auto;
+  animation: progressSweep 2.6s ease-in-out infinite;
+}
+
+.generation-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  gap: 18px;
+  padding: 24px;
+  background: rgba(247, 253, 249, 0.76);
+  backdrop-filter: blur(5px);
+}
+
+.generation-orbit {
+  position: relative;
+  width: 126px;
+  height: 126px;
+  border-radius: 50%;
+  border: 1px solid rgba(31, 138, 82, 0.16);
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.96) 0 34%, rgba(34, 167, 102, 0.08) 35% 100%);
+  animation: orbitPulse 1.8s ease-in-out infinite;
+}
+
+.generation-orbit span {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 12px 26px rgba(31, 138, 82, 0.22);
+  animation: dotOrbit 2.2s linear infinite;
+  transform-origin: 63px 63px;
+}
+
+.generation-orbit span:nth-child(1) {
+  left: 54px;
+  top: -9px;
+}
+
+.generation-orbit span:nth-child(2) {
+  left: 54px;
+  top: -9px;
+  animation-delay: -0.72s;
+  background: #22a766;
+}
+
+.generation-orbit span:nth-child(3) {
+  left: 54px;
+  top: -9px;
+  animation-delay: -1.44s;
+  background: #5eb18e;
+}
+
+.generation-overlay-copy {
+  display: grid;
+  gap: 6px;
+  max-width: 340px;
+  text-align: center;
+}
+
+.generation-overlay-copy strong {
+  font-size: 22px;
+}
+
+.generation-overlay-copy span {
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .empty-placeholder {
@@ -800,6 +922,35 @@ textarea {
   word-break: break-word;
 }
 
+.progress-inspector {
+  border: 1px solid rgba(31, 138, 82, 0.16);
+  border-radius: 14px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.request-progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(31, 138, 82, 0.12);
+}
+
+.request-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1f8a52, #22a766, #80c7a8);
+  transition: width 180ms ease;
+}
+
+.progress-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 #resultPrompt {
   font-size: 16px;
   line-height: 1.75;
@@ -825,19 +976,61 @@ textarea {
 .status-badge.working {
   background: var(--accent-soft);
   color: var(--accent-strong);
+  animation: badgePulse 1.35s ease-in-out infinite;
 }
 
+@keyframes progressSweep {
+  0% {
+    background-position: 180% 0, center;
+  }
+  100% {
+    background-position: -80% 0, center;
+  }
+}
+
+@keyframes orbitPulse {
+  0%,
+  100% {
+    transform: scale(0.97);
+  }
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes dotOrbit {
+  from {
+    transform: rotate(0deg) translateY(63px) rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg) translateY(63px) rotate(-360deg);
+  }
+}
+
+@keyframes badgePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(31, 138, 82, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(31, 138, 82, 0);
+  }
+}
+
+.debug-panel,
 .raw-response {
   margin-top: 18px;
   border-top: 1px solid var(--line);
   padding-top: 14px;
 }
 
+.debug-panel summary,
 .raw-response summary {
   cursor: pointer;
   font-weight: 600;
 }
 
+.debug-panel pre,
 .raw-response pre {
   margin: 14px 0 0;
   max-height: 260px;
@@ -849,6 +1042,12 @@ textarea {
   font-family: "SFMono-Regular", "Consolas", monospace;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.debug-panel pre {
+  background: #f7fdf9;
+  color: var(--ink);
+  border: 1px solid rgba(31, 138, 82, 0.14);
 }
 
 .history-list {
