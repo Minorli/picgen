@@ -1,0 +1,9 @@
+__pycache__/
+.DS_Store
+.env
+.codex
+.playwright-mcp/
+*.pyc
+picgen-*.png
+reference-agent6.png
+data/outputs/
