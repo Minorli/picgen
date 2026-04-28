@@ -4,194 +4,130 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23cf5a3c'/%3E%3Ccircle cx='22' cy='24' r='10' fill='%23fff7ef'/%3E%3Cpath d='M16 46c5-8 12-12 19-12 7 0 14 4 19 12' fill='none' stroke='%23fff7ef' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="page-shell">
-      <aside class="sidebar">
-        <section class="panel-card brand-card">
-          <p class="eyebrow">Local Proxy / Image Workbench</p>
-          <h1>PicGen Console</h1>
-          <p class="lede">用一句提示词生成图片，或把现有图片丢进来局部精修。请求经由本地代理发往上游模型接口。</p>
-        </section>
-
-        <section class="panel-card">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">连接设置</p>
-              <h2>接口与密钥</h2>
-            </div>
-            <button id="saveSettingsButton" class="tiny-button" type="button">保存本地配置</button>
+    <div class="desktop-shell">
+      <header class="app-topbar">
+        <div class="brand-area">
+          <div class="brand-icon" aria-hidden="true"></div>
+          <div>
+            <h1>PicGen Console</h1>
+            <p>本地AI图像工作台</p>
           </div>
+        </div>
+        <div class="topbar-tools">
+          <div class="system-pill">
+            <span class="live-dot"></span>
+            <strong id="requestStatus">空闲</strong>
+          </div>
+          <div class="system-pill api-pill">OpenAI Images API</div>
+        </div>
+      </header>
 
-          <label class="field">
-            <span>API Key</span>
-            <div class="secret-field">
-              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-..." spellcheck="false">
-              <button id="toggleKeyButton" class="tiny-button" type="button">显示</button>
-            </div>
-          </label>
+      <div class="app-grid">
+        <aside class="nav-rail">
+          <button id="newTaskButton" class="new-task-button" type="button">＋ 新建任务</button>
+          <nav class="side-nav" aria-label="主导航">
+            <button class="nav-link active" type="button" data-mode="generate">生成</button>
+            <button class="nav-link" type="button" data-mode="edit">编辑</button>
+            <a href="#resultPanel">结果</a>
+            <a href="#connectionSettings">设置</a>
+          </nav>
 
-          <label class="field">
-            <span>生成接口 URL</span>
-            <input id="generateUrlInput" type="url" placeholder="https://.../v1/images/generations" spellcheck="false">
-          </label>
-
-          <label class="field">
-            <span>编辑接口 URL</span>
-            <input id="editUrlInput" type="url" placeholder="https://.../v1/images/edits" spellcheck="false">
-          </label>
-
-          <p id="settingsHint" class="helper-text">设置会保存在当前浏览器。服务端如果已预设默认 key，这里可以留空。</p>
-        </section>
-
-        <section class="panel-card history-card">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">最近操作</p>
+          <section class="rail-section">
+            <div class="rail-heading">
               <h2>历史记录</h2>
+              <button id="clearHistoryButton" class="text-button" type="button">清空</button>
             </div>
-            <button id="clearHistoryButton" class="tiny-button" type="button">清空</button>
-          </div>
-          <div id="historyList" class="history-list"></div>
-          <p id="historyEmpty" class="helper-text">还没有历史记录。完成一次生成或编辑后，这里会记录参数。</p>
-        </section>
-      </aside>
+            <div id="historyList" class="history-list"></div>
+            <p id="historyEmpty" class="empty-history">还没有历史记录。完成一次生成或编辑后，这里会记录参数。</p>
+          </section>
 
-      <main class="main-stage">
-        <section class="hero-card">
-          <div class="hero-copy">
-            <p class="eyebrow">Creative Studio</p>
-            <h2>像在工作台里推图，而不是填后台表单</h2>
-            <p class="lede">把生成、续改、对比、落盘和导出串成一条连续操作链。你应该总能知道下一步该做什么，而不是在一堆卡片里找按钮。</p>
-            <div class="hero-tags">
-              <span class="hero-tag">连续编辑</span>
-              <span class="hero-tag">落盘归档</span>
-              <span class="hero-tag">4K 与自定义尺寸</span>
-              <span class="hero-tag">对比与放大预览</span>
-            </div>
-          </div>
-          <div class="hero-meta">
-            <div class="stat-chip">
-              <span>状态</span>
-              <strong id="requestStatus">空闲</strong>
-            </div>
-            <div class="stat-chip">
-              <span>快捷键</span>
-              <strong>Cmd/Ctrl + Enter / Alt+1 / Alt+2</strong>
-            </div>
-          </div>
-        </section>
+        </aside>
 
-        <section class="workflow-ribbon panel-card" aria-label="工作流进度">
-          <div id="flowConnect" class="flow-node">
-            <span class="flow-index">01</span>
-            <div>
-              <strong>连接</strong>
-              <p>接口与密钥已就绪</p>
+        <main class="workbench">
+          <section class="control-panel">
+            <div class="mode-tabs" aria-label="模式切换">
+              <button id="generateTab" class="mode-tab active" type="button" data-mode="generate">生成图像</button>
+              <button id="editTab" class="mode-tab" type="button" data-mode="edit">编辑图像</button>
             </div>
-          </div>
-          <div id="flowGenerate" class="flow-node">
-            <span class="flow-index">02</span>
-            <div>
-              <strong>生成</strong>
-              <p>把第一张图推出来</p>
-            </div>
-          </div>
-          <div id="flowEdit" class="flow-node">
-            <span class="flow-index">03</span>
-            <div>
-              <strong>续改</strong>
-              <p>围绕当前结果继续修</p>
-            </div>
-          </div>
-          <div id="flowCompare" class="flow-node">
-            <span class="flow-index">04</span>
-            <div>
-              <strong>比对</strong>
-              <p>确认前后差异是否正确</p>
-            </div>
-          </div>
-          <div id="flowExport" class="flow-node">
-            <span class="flow-index">05</span>
-            <div>
-              <strong>导出</strong>
-              <p>落盘并下载最终图</p>
-            </div>
-          </div>
-        </section>
 
-        <section class="workspace-grid">
-          <section class="command-deck">
-            <section class="mode-switch panel-card" aria-label="模式切换">
-              <div class="mode-switch-copy">
-                <p class="eyebrow">Workbench</p>
-                <h2>命令台</h2>
-              </div>
-              <div class="mode-switch-tabs">
-                <button id="generateTab" class="mode-tab active" type="button" data-mode="generate">生成图片</button>
-                <button id="editTab" class="mode-tab" type="button" data-mode="edit">编辑图片</button>
-              </div>
-            </section>
-
-            <section id="generatePanel" class="panel-card workspace-panel">
-              <div class="section-heading">
-                <div>
-                  <p class="eyebrow">Generation</p>
-                  <h2>生成工作台</h2>
-                </div>
-                <div class="panel-chip">从一句目标开始</div>
+            <section id="generatePanel" class="studio-card command-card">
+              <div class="section-title">
+                <h2>提示词</h2>
               </div>
 
-              <section class="intent-rail" aria-label="生成方式">
+              <label class="prompt-field">
+                <textarea id="generatePromptInput" rows="6" placeholder="宁静的山间湖泊，清晨薄雾，湖边有一座木屋，周围是茂密的松树，远处是雪山，自然光，超写实，细节丰富"></textarea>
+                <strong id="generatePromptCount" class="field-meter">0 字</strong>
+              </label>
+
+              <div class="tag-row" aria-label="生成提示词快捷片段">
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="背景干净，主体清晰">背景干净</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="山间湖泊，清晨薄雾">山间湖泊</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="木屋，暖光，真实材质">木屋</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="清晨自然光，空气通透">清晨</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="薄雾，远山，层次分明">薄雾</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="电影感构图，色彩克制">电影感</button>
+              </div>
+
+              <div class="intent-rail" aria-label="生成方式">
                 <button id="freshGenerateMode" class="intent-tab active" type="button">全新开题</button>
                 <button id="variantGenerateMode" class="intent-tab" type="button">基于当前结果延展</button>
-              </section>
+              </div>
               <p id="generateIntentHint" class="helper-text">全新开题会忽略当前结果，适合重新换题。若只是想换风格、光线、材质或色调，请用“基于当前结果延展”。</p>
               <div id="variantSourceCard" class="variant-source-card hidden">
-                <span class="variant-source-label">当前参考图</span>
+                <span>当前参考图</span>
                 <strong id="variantSourceName">尚未生成结果</strong>
                 <p id="variantSourceHint" class="helper-text">延展会优先保留主体和构图关系，只调整你这次说的变化方向。</p>
               </div>
               <p id="variantSuggestion" class="inline-hint hidden">检测到你像是在做续改。如果你希望“还是同一张图，只是换个风格/灯光/氛围”，请切到“基于当前结果延展”。</p>
 
-              <div id="generateReferenceDropzone" class="reference-dropzone" tabindex="0" role="button" aria-label="上传或替换生成参考图">
-                <input id="generateReferenceInput" type="file" accept="image/*" hidden>
-                <div>
-                  <span class="reference-label">参考图</span>
-                  <strong id="generateReferenceTitle">可选：添加参考图</strong>
-                  <p id="generateReferenceMeta" class="helper-text">全新开题也可以带一张参考图；有参考图时会使用编辑接口发送。</p>
+              <section class="studio-block">
+                <div class="section-title">
+                  <h2>参考图（可选）</h2>
+                  <button id="clearGenerateReferenceButton" class="icon-button hidden" type="button" aria-label="移除参考图">×</button>
                 </div>
-                <button id="clearGenerateReferenceButton" class="tiny-button hidden" type="button">移除</button>
-              </div>
-
-              <label class="field">
-                <div class="field-head">
-                  <span>提示词</span>
-                  <strong id="generatePromptCount" class="field-meter">0 字</strong>
+                <div id="generateReferenceDropzone" class="reference-dropzone" tabindex="0" role="button" aria-label="上传或替换生成参考图">
+                  <input id="generateReferenceInput" type="file" accept="image/*" hidden>
+                  <div class="upload-icon" aria-hidden="true">▧</div>
+                  <div>
+                    <strong id="generateReferenceTitle">拖拽图像到此处　或　点击上传</strong>
+                    <p id="generateReferenceMeta" class="helper-text">支持 JPG / PNG，最大 10MB。有参考图时会使用编辑接口发送。</p>
+                  </div>
                 </div>
-                <textarea id="generatePromptInput" rows="8" placeholder="例如：生成一张海报感很强的照片，一个人站在逆光的站台边缘，风衣微微被吹起。"></textarea>
-              </label>
+              </section>
 
-              <div class="chip-strip" aria-label="生成提示词快捷片段">
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="电影感布光，层次分明">电影感</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="主体突出，背景干净">主体突出</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="高细节，皮肤与布料纹理自然">高细节</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="海报级构图，留出视觉呼吸区">海报构图</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="真实摄影感，不要插画感">真实摄影</button>
-              </div>
-
-              <div class="stack-grid">
-                <label class="field">
-                  <span>模型</span>
-                  <input id="generateModelInput" type="text" placeholder="gpt-image-2" spellcheck="false">
+              <section class="studio-block model-block">
+                <div class="section-title">
+                  <h2>模型</h2>
+                </div>
+                <label class="select-shell">
+                  <input id="generateModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImageModels">
+                  <span>本地</span>
                 </label>
+                <datalist id="openaiImageModels">
+                  <option value="gpt-image-2"></option>
+                  <option value="gpt-image-1.5"></option>
+                  <option value="gpt-image-1"></option>
+                </datalist>
+
+                <h2 class="compact-title">图像尺寸</h2>
+                <div class="size-picker">
+                  <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1024x1536"><span>2:3<small>1024x1536</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1536x1024"><span>3:2<small>1536x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="3840x2160"><span>16:9<small>3840x2160</small></span></label>
+                  <label><input type="radio" name="visualSize" value="custom"><span>自定义<small>W × H</small></span></label>
+                </div>
 
                 <div class="field size-field">
                   <span>尺寸</span>
                   <div class="size-stack">
                     <select id="generateSizePreset">
+                      <option value="auto">自动</option>
                       <option value="128x128">超小 128 x 128</option>
                       <option value="256x256">256 x 256</option>
                       <option value="512x512">512 x 512</option>
@@ -202,50 +138,98 @@
                       <option value="2048x2048">2K 2048 x 2048</option>
                       <option value="3840x2160">4K 横版 3840 x 2160</option>
                       <option value="2160x3840">4K 竖版 2160 x 3840</option>
-                      <option value="4096x4096">4K 方图 4096 x 4096</option>
                       <option value="custom">自定义尺寸</option>
                     </select>
                     <div class="size-manual-row">
-                      <input id="generateWidthInput" type="number" min="64" max="4096" step="64" placeholder="宽">
+                      <input id="generateWidthInput" type="number" min="64" max="3840" step="16" placeholder="宽">
                       <span class="size-divider" aria-hidden="true">×</span>
-                      <input id="generateHeightInput" type="number" min="64" max="4096" step="64" placeholder="高">
+                      <input id="generateHeightInput" type="number" min="64" max="3840" step="16" placeholder="高">
                     </div>
                   </div>
-                  <p class="helper-text">支持从 64 到 4096。若上游不接受某个尺寸，会直接把上游错误原样返回。</p>
                 </div>
-              </div>
 
-              <div class="action-row action-row-strong">
-                <button id="generateButton" class="primary-button" type="button">开始生成</button>
-                <button id="clearGenerateButton" class="ghost-button" type="button">清空输入</button>
+                <h2 class="compact-title">OpenAI 输出参数</h2>
+                <div class="param-grid">
+                  <label>
+                    <span>质量</span>
+                    <select id="qualitySelect">
+                      <option value="auto">Auto</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>背景</span>
+                    <select id="backgroundSelect">
+                      <option value="auto">Auto</option>
+                      <option value="opaque">Opaque</option>
+                      <option value="transparent">Transparent</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>输出格式</span>
+                    <select id="outputFormatSelect">
+                      <option value="png">PNG</option>
+                      <option value="jpeg">JPEG</option>
+                      <option value="webp">WebP</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>压缩质量</span>
+                    <input id="outputCompressionInput" type="number" min="0" max="100" step="1" value="100">
+                  </label>
+                  <label>
+                    <span>内容审核</span>
+                    <select id="moderationSelect">
+                      <option value="auto">Auto</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>生成数量</span>
+                    <input id="imageCountInput" type="number" min="1" max="10" step="1" value="1">
+                  </label>
+                </div>
+              </section>
+
+              <div class="primary-run-row">
+                <button id="generateButton" class="primary-button" type="button">▶ 开始生成 <kbd>Ctrl ↵</kbd></button>
+                <button id="clearGenerateButton" class="ghost-button" type="button">清空</button>
               </div>
             </section>
 
-            <section id="editPanel" class="panel-card workspace-panel hidden">
-              <div class="section-heading">
-                <div>
-                  <p class="eyebrow">Editing</p>
-                  <h2>编辑工作台</h2>
-                </div>
-                <div class="panel-chip">围绕当前结果继续细化</div>
+            <section id="editPanel" class="studio-card command-card hidden">
+              <div class="section-title">
+                <h2>编辑图像</h2>
+                <span class="soft-label">围绕当前结果继续细化</span>
               </div>
 
               <div id="imageDropzone" class="dropzone" tabindex="0" role="button" aria-label="上传或替换要编辑的图片">
                 <input id="editImageInput" type="file" accept="image/*" hidden>
+                <div class="upload-icon" aria-hidden="true">▧</div>
                 <p id="imageDropzoneTitle" class="dropzone-title">拖拽图片到这里，或点击选择</p>
                 <p id="imageDropzoneSubtitle" class="dropzone-subtitle">也支持在编辑模式下直接粘贴剪贴板图片</p>
                 <p id="editImageMeta" class="helper-text"></p>
               </div>
 
-              <label class="field">
-                <div class="field-head">
-                  <span>编辑指令</span>
-                  <strong id="editPromptCount" class="field-meter">0 字</strong>
+              <div id="maskDropzone" class="dropzone mask-dropzone" tabindex="0" role="button" aria-label="上传或替换编辑 mask">
+                <input id="editMaskInput" type="file" accept="image/*" hidden>
+                <div class="upload-icon" aria-hidden="true">◩</div>
+                <div>
+                  <p id="maskDropzoneTitle" class="dropzone-title">可选：上传透明区域 mask</p>
+                  <p id="maskDropzoneSubtitle" class="dropzone-subtitle">透明区域会被模型重新生成；留空则按整图编辑。</p>
+                  <p id="editMaskMeta" class="helper-text"></p>
                 </div>
-                <textarea id="editPromptInput" rows="8" placeholder="例如：把背景改成纯白，主体不变，保留人物边缘和衣服细节。"></textarea>
+                <button id="clearEditMaskButton" class="icon-button hidden" type="button" aria-label="移除 mask">×</button>
+              </div>
+
+              <label class="prompt-field">
+                <textarea id="editPromptInput" rows="8" placeholder="把背景改成纯白，主体不变，保留边缘和材质细节。"></textarea>
+                <strong id="editPromptCount" class="field-meter">0 字</strong>
               </label>
 
-              <div class="chip-strip" aria-label="编辑提示词快捷片段">
+              <div class="tag-row" aria-label="编辑提示词快捷片段">
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="只改背景，主体保持不变">只改背景</button>
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="去掉多余元素，构图不要变化">去杂物</button>
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="边缘干净，过渡自然，不要穿帮">边缘干净</button>
@@ -253,103 +237,136 @@
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="色调更统一，整体更克制">统一色调</button>
               </div>
 
-              <label class="field">
+              <label class="select-shell edit-model">
+                <input id="editModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImageModels">
                 <span>模型</span>
-                <input id="editModelInput" type="text" placeholder="gpt-image-2" spellcheck="false">
               </label>
 
-              <div class="action-row action-row-strong">
-                <button id="editButton" class="primary-button" type="button">开始编辑</button>
+              <div class="primary-run-row">
+                <button id="editButton" class="primary-button" type="button">▶ 开始编辑</button>
                 <button id="clearEditButton" class="ghost-button" type="button">清空输入</button>
               </div>
             </section>
           </section>
 
-          <section class="panel-card result-panel">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow">Canvas</p>
-                <h2>结果画布</h2>
-              </div>
-              <div id="requestBadge" class="status-badge idle">空闲</div>
-            </div>
-
-            <div class="canvas-grid">
-              <article id="resultPreviewCard" class="preview-card preview-card-hero">
-                <div id="resultPreviewLabel" class="preview-label">输出</div>
-                <div id="resultPreviewTrigger" class="preview-frame preview-frame-hero" tabindex="0" role="button" aria-label="放大预览输出图片">
-                  <img id="resultImage" alt="结果预览">
-                  <p id="resultPreviewEmpty" class="empty-placeholder">生成或编辑成功后，这里会显示输出结果。</p>
-                  <div id="generationOverlay" class="generation-overlay hidden" aria-live="polite">
-                    <div class="generation-orbit" aria-hidden="true">
-                      <span></span>
-                      <span></span>
-                      <span></span>
-                    </div>
-                    <div class="generation-overlay-copy">
-                      <strong id="generationOverlayTitle">正在生成</strong>
-                      <span id="generationOverlaySubtitle">请求已发出，等待上游返回图像。</span>
-                    </div>
-                  </div>
-                  <span class="preview-hint">点击放大</span>
+          <section class="canvas-area">
+            <section id="resultPanel" class="studio-card result-panel">
+              <div class="canvas-header">
+                <div>
+                  <h2>结果对比</h2>
+                  <p>并排查看源图与结果图</p>
                 </div>
-              </article>
+                <div class="canvas-actions">
+                  <div id="requestBadge" class="status-badge idle">空闲</div>
+                </div>
+              </div>
 
-              <div class="canvas-side">
-                <article id="sourcePreviewCard" class="preview-card subtle">
-                  <div id="sourcePreviewLabel" class="preview-label">原图</div>
-                  <div id="sourcePreviewTrigger" class="preview-frame preview-frame-side" tabindex="0" role="button" aria-label="放大预览左侧图片">
+              <div class="comparison-grid">
+                <article id="sourcePreviewCard" class="preview-card source-card">
+                  <div id="sourcePreviewLabel" class="preview-label">源图</div>
+                  <div id="sourcePreviewTrigger" class="preview-frame source-frame" tabindex="0" role="button" aria-label="放大预览左侧图片">
                     <img id="sourcePreviewImage" alt="原图预览">
-                    <p id="sourcePreviewEmpty" class="empty-placeholder">切到编辑模式并上传图片后，这里会显示原图。</p>
+                    <p id="sourcePreviewEmpty" class="empty-placeholder">等待输入图像</p>
                     <span class="preview-hint">点击放大</span>
                   </div>
                 </article>
 
-                <section class="inspector-card">
-                  <p class="eyebrow">Inspector</p>
-                  <div class="inspector-grid">
-                    <div class="inspector-item">
-                      <span>当前文案</span>
-                      <strong id="resultPrompt" class="result-prompt">还没有结果。</strong>
-                    </div>
-                    <div class="inspector-item">
-                      <span>元信息</span>
-                      <strong id="resultMeta"> </strong>
-                    </div>
-                    <div class="inspector-item">
-                      <span>请求耗时</span>
-                      <strong id="resultTiming"> </strong>
-                    </div>
-                    <div id="progressInspectorItem" class="inspector-item progress-inspector hidden">
-                      <span id="progressStageLabel">等待阶段</span>
-                      <strong id="progressElapsed">0.0s</strong>
-                      <div class="request-progress-track" aria-hidden="true">
-                        <div id="requestProgressFill" class="request-progress-fill"></div>
+                <article id="resultPreviewCard" class="preview-card result-card">
+                  <div id="resultPreviewLabel" class="preview-label">结果图</div>
+                  <div id="resultPreviewTrigger" class="preview-frame result-frame" tabindex="0" role="button" aria-label="放大预览输出图片">
+                    <img id="resultImage" alt="结果预览">
+                    <p id="resultPreviewEmpty" class="empty-placeholder">生成或编辑成功后，这里会显示输出结果。</p>
+                    <div id="generationOverlay" class="generation-overlay hidden" aria-live="polite">
+                      <div class="generation-orbit" aria-hidden="true">
+                        <span></span>
+                        <span></span>
+                        <span></span>
                       </div>
-                      <p id="progressHint" class="progress-hint">准备发送请求。</p>
+                      <div class="generation-overlay-copy">
+                        <strong id="generationOverlayTitle">正在生成</strong>
+                        <span id="generationOverlaySubtitle">请求已发出，等待上游返回图像。</span>
+                      </div>
                     </div>
-                    <div class="inspector-item">
-                      <span>本地落盘</span>
-                      <strong id="resultStorage"> </strong>
-                    </div>
+                    <span class="preview-hint">点击放大</span>
                   </div>
-                </section>
+                  <div class="result-actions">
+                    <a id="downloadButton" class="ghost-button disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载图像</a>
+                    <button id="continueEditButton" class="ghost-button" type="button" disabled>继续编辑</button>
+                    <button id="startVariantButton" class="ghost-button" type="button" disabled>基于结果再生成</button>
+                    <button id="previewCompareButton" class="ghost-button" type="button" disabled>前后对比</button>
+                    <button id="copyPromptButton" class="ghost-button" type="button">复制提示词</button>
+                  </div>
+                </article>
               </div>
-            </div>
+            </section>
 
-            <div class="action-row action-row-spread">
-              <a id="downloadButton" class="primary-button disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载结果</a>
-              <button id="continueEditButton" class="ghost-button" type="button" disabled>继续编辑当前结果</button>
-              <button id="startVariantButton" class="ghost-button" type="button" disabled>换风格保持主体</button>
-              <button id="previewCompareButton" class="ghost-button" type="button" disabled>前后对比预览</button>
-              <button id="copyPromptButton" class="ghost-button" type="button">复制本次提示词</button>
-            </div>
+            <section class="dashboard-row">
+              <section class="studio-card progress-card">
+                <h2>请求进度</h2>
+                <div id="progressInspectorItem" class="progress-inspector hidden">
+                  <span id="progressStageLabel">等待阶段</span>
+                  <strong id="progressElapsed">0.0s</strong>
+                  <div class="request-progress-track" aria-hidden="true">
+                    <div id="requestProgressFill" class="request-progress-fill"></div>
+                  </div>
+                  <p id="progressHint" class="progress-hint">准备发送请求。</p>
+                </div>
+                <p class="idle-note">发起请求后，这里显示本地代理与上游响应进度。</p>
+              </section>
+
+              <section class="studio-card inspector-card">
+                <h2>参数摘要</h2>
+                <div class="inspector-grid">
+                  <div class="inspector-item">
+                    <span>当前文案</span>
+                    <strong id="resultPrompt" class="result-prompt">还没有结果。</strong>
+                  </div>
+                  <div class="inspector-item">
+                    <span>元信息</span>
+                    <strong id="resultMeta"> </strong>
+                  </div>
+                  <div class="inspector-item">
+                    <span>请求耗时</span>
+                    <strong id="resultTiming"> </strong>
+                  </div>
+                  <div class="inspector-item">
+                    <span>本地落盘</span>
+                    <strong id="resultStorage"> </strong>
+                  </div>
+                </div>
+              </section>
+            </section>
+
+            <section id="connectionSettings" class="studio-card settings-drawer">
+              <div class="section-title">
+                <h2>连接设置</h2>
+                <button id="saveSettingsButton" class="ghost-button" type="button">保存本地配置</button>
+              </div>
+              <div class="settings-grid">
+                <label>
+                  <span>API Key</span>
+                  <div class="secret-field">
+                    <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-..." spellcheck="false">
+                    <button id="toggleKeyButton" class="ghost-button" type="button">显示</button>
+                  </div>
+                </label>
+                <label>
+                  <span>生成接口 URL</span>
+                  <input id="generateUrlInput" type="url" placeholder="https://.../v1/images/generations" spellcheck="false">
+                </label>
+                <label>
+                  <span>编辑接口 URL</span>
+                  <input id="editUrlInput" type="url" placeholder="https://.../v1/images/edits" spellcheck="false">
+                </label>
+              </div>
+              <p id="settingsHint" class="helper-text">设置会保存在当前浏览器。服务端如果已预设默认 key，这里可以留空。</p>
+            </section>
 
             <div class="feedback-strip">
               <p id="errorMessage" class="error-text" role="alert"></p>
             </div>
 
-            <details class="debug-panel" open>
+            <details class="debug-panel">
               <summary>调试信息</summary>
               <pre id="debugOutput">等待操作。</pre>
             </details>
@@ -359,8 +376,13 @@
               <pre id="rawResponseOutput">{}</pre>
             </details>
           </section>
-        </section>
-      </main>
+        </main>
+      </div>
+
+      <footer class="system-footer">
+        <span>PicGen Console　v0.9.0</span>
+        <span>本地代理保存结果到 <strong>data/outputs</strong></span>
+      </footer>
     </div>
 
     <div id="previewModal" class="preview-modal hidden" aria-hidden="true">
@@ -373,9 +395,9 @@
             <p id="previewModalMeta" class="helper-text"></p>
           </div>
           <div class="preview-modal-actions">
-            <button id="previewSingleModeButton" class="tiny-button active-toggle" type="button">单张预览</button>
-            <button id="previewCompareModeButton" class="tiny-button" type="button">前后对比</button>
-            <button id="closePreviewButton" class="tiny-button" type="button">关闭</button>
+            <button id="previewSingleModeButton" class="ghost-button active-toggle" type="button">单张预览</button>
+            <button id="previewCompareModeButton" class="ghost-button" type="button">前后对比</button>
+            <button id="closePreviewButton" class="ghost-button" type="button">关闭</button>
           </div>
         </div>
 

@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个本地 Web 应用，用来把上游图片生成/编辑接口包装成可交互的工作台。
+一个本地 Web 应用，用来把 OpenAI 图片生成/编辑接口包装成可交互的工作台。
 
 特点：
 
@@ -10,8 +10,9 @@
 - 切到编辑模式时，会优先自动带入最新生成/编辑结果作为下一轮输入
 - 本地代理转发上游请求，避免浏览器跨域问题
 - 提示词按原文直发上游，不在前端或代理层做改写
+- 对齐 OpenAI Images API 的真实参数：模型、尺寸、质量、背景、输出格式、压缩、审核严格度、生成数量
 - 支持从很小尺寸到 4K 的预设尺寸，也支持自定义宽高
-- 支持拖拽上传、粘贴图片、单张放大预览、编辑前后对比、下载结果、复制本次提示词
+- 支持拖拽上传、粘贴图片、可选编辑 mask、单张放大预览、编辑前后对比、下载结果、复制本次提示词
 - 浏览器本地保存接口 URL / API Key / 最近操作记录
 - 当前工作区会保存在浏览器本地，刷新页面后会恢复最近一次的图和输入状态
 - 每次生成/编辑成功后，输出图片会落盘到本地目录，并生成对应的元数据 JSON
@@ -38,10 +39,10 @@ python3 app.py --host 0.0.0.0 --port 8080
 
 ```bash
 export PICGEN_DEFAULT_API_KEY="sk-..."
-export PICGEN_DEFAULT_GENERATE_URL="https://example.com/v1/images/generations"
-export PICGEN_DEFAULT_EDIT_URL="https://sub.tidba.com/v1/images/edits"
+export PICGEN_DEFAULT_GENERATE_URL="https://api.openai.com/v1/images/generations"
+export PICGEN_DEFAULT_EDIT_URL="https://api.openai.com/v1/images/edits"
 export PICGEN_DEFAULT_MODEL="gpt-image-2"
-export PICGEN_DEFAULT_SIZE="1024x1024"
+export PICGEN_DEFAULT_SIZE="auto"
 export PICGEN_UPSTREAM_USER_AGENT="Mozilla/5.0 ..."
 python3 app.py
 ```
@@ -50,7 +51,7 @@ python3 app.py
 
 - `PICGEN_DEFAULT_API_KEY` 只作为服务端默认值，不会写入仓库
 - 如果服务端已设置默认 key，页面里的 API Key 可以留空
-- 生成接口 URL 和编辑接口 URL 可以分别配置，适配不同上游域名
+- 默认生成接口 URL 和编辑接口 URL 指向 OpenAI 官方 Images API；也可以分别配置，适配兼容 OpenAI 格式的上游域名
 - `PICGEN_UPSTREAM_USER_AGENT` 可覆盖本地代理访问上游接口时使用的 User-Agent。遇到 Cloudflare `Error 1010: browser_signature_banned` 时，可以用它和上游要求的请求头保持一致
 
 ## 落盘位置
@@ -82,7 +83,12 @@ python3 app.py
 {
   "model": "gpt-image-2",
   "prompt": "生成一张图，一个人站在那里没有戴护士帽",
-  "size": "1024x1024",
+  "size": "auto",
+  "quality": "auto",
+  "background": "auto",
+  "output_format": "png",
+  "output_compression": 100,
+  "moderation": "auto",
   "n": 1
 }
 ```
@@ -91,9 +97,9 @@ python3 app.py
 
 - `model`
 - `prompt`
-- `image`
-
-如果后续上游支持 `mask`，后端代码已经预留了解析入口，前端再加一个上传控件即可。
+- `image[]`
+- `mask`（可选）
+- `size`、`quality`、`background`、`output_format`、`output_compression`、`moderation`、`n`
 
 ## 使用方式
 
@@ -119,8 +125,8 @@ python3 app.py
 ## 当前限制
 
 - 历史记录列表本身只保存参数摘要，不是完整图册；但当前工作区会保留最近一次图像和页面状态
-- 前端默认只上传一张原图，不带 mask
-- 如果你的生成接口域名不是示例值，需要在页面里填入真实 URL
+- 页面当前只展示和落盘上游返回的第一张图片；如果 `n > 1`，完整响应仍可在“查看上游响应”里看到
+- 如果你使用的不是 OpenAI 官方接口，需要确认它兼容 OpenAI Images API 的字段名
 
 ## 常见上游错误
 

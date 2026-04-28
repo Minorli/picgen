@@ -35,10 +35,10 @@ class DefaultConfig:
 
 
 DEFAULT_CONFIG = DefaultConfig(
-    generate_url=os.environ.get("PICGEN_DEFAULT_GENERATE_URL", "").strip(),
-    edit_url=os.environ.get("PICGEN_DEFAULT_EDIT_URL", "https://sub.tidba.com/v1/images/edits").strip(),
+    generate_url=os.environ.get("PICGEN_DEFAULT_GENERATE_URL", "https://api.openai.com/v1/images/generations").strip(),
+    edit_url=os.environ.get("PICGEN_DEFAULT_EDIT_URL", "https://api.openai.com/v1/images/edits").strip(),
     model=os.environ.get("PICGEN_DEFAULT_MODEL", "gpt-image-2").strip() or "gpt-image-2",
-    size=os.environ.get("PICGEN_DEFAULT_SIZE", "1024x1024").strip() or "1024x1024",
+    size=os.environ.get("PICGEN_DEFAULT_SIZE", "auto").strip() or "auto",
     api_key=os.environ.get("PICGEN_DEFAULT_API_KEY", "").strip(),
 )
 
@@ -291,6 +291,67 @@ def validate_url(url: str, field_name: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise APIError(HTTPStatus.BAD_REQUEST, f"{field_name} 不是有效的 URL")
     return cleaned
+
+
+def optional_string(payload: dict[str, Any], name: str, allowed: set[str] | None = None) -> str | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if allowed is not None and cleaned not in allowed:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 不支持: {cleaned}")
+    return cleaned
+
+
+def optional_int(payload: dict[str, Any], name: str, minimum: int, maximum: int) -> int | None:
+    value = payload.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 必须是整数") from exc
+    if parsed < minimum or parsed > maximum:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 必须在 {minimum} 到 {maximum} 之间")
+    return parsed
+
+
+def openai_image_options(payload: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    allowed_values = {
+        "quality": {"auto", "low", "medium", "high"},
+        "background": {"auto", "opaque", "transparent"},
+        "output_format": {"png", "jpeg", "webp"},
+        "moderation": {"auto", "low"},
+    }
+
+    for name, allowed in allowed_values.items():
+        value = optional_string(payload, name, allowed)
+        if value is not None:
+            options[name] = value
+
+    output_compression = optional_int(payload, "output_compression", 0, 100)
+    if output_compression is not None and options.get("output_format") in {"jpeg", "webp"}:
+        options["output_compression"] = output_compression
+
+    n = optional_int(payload, "n", 1, 10)
+    if n is not None:
+        options["n"] = n
+
+    return options
+
+
+def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if size:
+        metadata["size"] = size
+    for key in ["quality", "background", "output_format", "output_compression", "moderation", "n"]:
+        value = payload.get(key)
+        if value is not None and value != "":
+            metadata[key] = value
+    return metadata
 
 
 def extract_error_message(response_body: str) -> tuple[str, str | None]:
@@ -669,10 +730,7 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         model = str(payload.get("model") or DEFAULT_CONFIG.model).strip() or DEFAULT_CONFIG.model
         size = str(payload.get("size") or DEFAULT_CONFIG.size).strip() or DEFAULT_CONFIG.size
         api_key = str(payload.get("api_key") or DEFAULT_CONFIG.api_key).strip()
-        try:
-            n = int(payload.get("n") or 1)
-        except (TypeError, ValueError) as exc:
-            raise APIError(HTTPStatus.BAD_REQUEST, "参数 n 必须是整数") from exc
+        image_options = openai_image_options(payload)
 
         if not api_key:
             raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key")
@@ -680,16 +738,19 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         upstream_payload = {
             "model": model,
             "prompt": prompt,
-            "size": size,
-            "n": n,
+            **image_options,
         }
+        if size and size != "auto":
+            upstream_payload["size"] = size
+
         upstream_response = run_upstream_json(endpoint_url, api_key, upstream_payload)
+        metadata = request_metadata({**payload, **image_options}, size=size)
 
         return {
             "mode": "generate",
             "prompt": prompt,
             "model": model,
-            "size": size,
+            **metadata,
             "endpoint_url": endpoint_url,
             **prepare_image_payload(
                 upstream_response,
@@ -697,8 +758,8 @@ class PicGenHandler(SimpleHTTPRequestHandler):
                     "mode": "generate",
                     "prompt": prompt,
                     "model": model,
-                    "size": size,
                     "endpoint_url": endpoint_url,
+                    **metadata,
                 },
             ),
         }
@@ -718,27 +779,33 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         if not api_key:
             raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key")
 
-        image_part = parse_file_payload(payload.get("image"), "image", required=True)
+        image_part = parse_file_payload(payload.get("image"), "image[]", required=True)
         mask_part = parse_file_payload(payload.get("mask"), "mask", required=False)
 
         files = [part for part in [image_part, mask_part] if part is not None]
         size = str(payload.get("size") or "").strip()
+        image_options = openai_image_options(payload)
+        fields: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            **image_options,
+        }
+        if size and size != "auto":
+            fields["size"] = size
+
         upstream_response = run_upstream_multipart(
             endpoint_url,
             api_key,
-            fields={
-                "model": model,
-                "prompt": prompt,
-                "size": size,
-            },
+            fields=fields,
             files=files,
         )
+        metadata = request_metadata({**payload, **image_options}, size=size or None)
 
         return {
             "mode": "edit",
             "prompt": prompt,
             "model": model,
-            "size": size or None,
+            **metadata,
             "endpoint_url": endpoint_url,
             "source_image_name": image_part["filename"],
             "mask_image_name": mask_part["filename"] if mask_part else None,
@@ -748,10 +815,10 @@ class PicGenHandler(SimpleHTTPRequestHandler):
                     "mode": "edit",
                     "prompt": prompt,
                     "model": model,
-                    "size": size or None,
                     "endpoint_url": endpoint_url,
                     "source_image_name": image_part["filename"],
                     "mask_image_name": mask_part["filename"] if mask_part else None,
+                    **metadata,
                 },
             ),
         }
