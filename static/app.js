@@ -642,6 +642,21 @@ function formatSizeValue(width, height) {
   return `${width}x${height}`
 }
 
+function formatActualSize(payload) {
+  const width = Number(payload.saved_image_width)
+  const height = Number(payload.saved_image_height)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return ""
+  }
+  return formatSizeValue(width, height)
+}
+
+function isSameSize(requestedSize, actualSize) {
+  const requested = parseSizeValue(requestedSize)
+  const actual = parseSizeValue(actualSize)
+  return Boolean(requested && actual && requested.width === actual.width && requested.height === actual.height)
+}
+
 function setGenerateSize(size) {
   const parsed = parseSizeValue(size) || { width: 1024, height: 1024 }
   refs.generateWidthInput.value = String(parsed.width)
@@ -1183,9 +1198,22 @@ function setResult(payload, durationMs, requestSource = null) {
   if (payload.size) {
     metaParts.push(payload.size)
   }
+  const actualSize = formatActualSize(payload)
+  if (actualSize) {
+    metaParts.push(`实际 ${actualSize}`)
+  }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
-  refs.resultStorage.textContent = payload.saved_image_path ? `已落盘到 ${payload.saved_image_path}` : ""
+  refs.resultStorage.textContent = payload.saved_image_path
+    ? `已落盘到 ${payload.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+    : actualSize
+      ? `实际尺寸 ${actualSize}`
+      : ""
+  if (payload.size && actualSize && !isSameSize(payload.size, actualSize)) {
+    setError(`上游返回尺寸为 ${actualSize}，与请求尺寸 ${payload.size} 不一致。图片已按上游原始返回保存，本地没有缩放。`)
+  } else {
+    setError("")
+  }
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
 
