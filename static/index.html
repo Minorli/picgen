@@ -148,7 +148,7 @@
                   </div>
                 </div>
 
-                <h2 class="compact-title">OpenAI 输出参数</h2>
+                <h2 class="compact-title">生成与延展参数</h2>
                 <div class="param-grid">
                   <label>
                     <span>质量</span>
@@ -185,10 +185,6 @@
                       <option value="auto">Auto</option>
                       <option value="low">Low</option>
                     </select>
-                  </label>
-                  <label>
-                    <span>生成数量</span>
-                    <input id="imageCountInput" type="number" min="1" max="10" step="1" value="1">
                   </label>
                 </div>
               </section>
@@ -241,6 +237,8 @@
                 <input id="editModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImageModels">
                 <span>模型</span>
               </label>
+
+              <p class="helper-text">编辑模式只发送提示词、模型和可选 mask，避免误带生成区的隐藏输出参数。需要改尺寸或做风格延展，请回到生成模式。</p>
 
               <div class="primary-run-row">
                 <button id="editButton" class="primary-button" type="button">▶ 开始编辑</button>

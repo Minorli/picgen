@@ -336,10 +336,6 @@ def openai_image_options(payload: dict[str, Any]) -> dict[str, Any]:
     if output_compression is not None and options.get("output_format") in {"jpeg", "webp"}:
         options["output_compression"] = output_compression
 
-    n = optional_int(payload, "n", 1, 10)
-    if n is not None:
-        options["n"] = n
-
     return options
 
 
@@ -347,7 +343,7 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
     metadata: dict[str, Any] = {}
     if size:
         metadata["size"] = size
-    for key in ["quality", "background", "output_format", "output_compression", "moderation", "n"]:
+    for key in ["quality", "background", "output_format", "output_compression", "moderation"]:
         value = payload.get(key)
         if value is not None and value != "":
             metadata[key] = value

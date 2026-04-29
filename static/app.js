@@ -97,7 +97,6 @@ const refs = {
   outputFormatSelect: document.querySelector("#outputFormatSelect"),
   outputCompressionInput: document.querySelector("#outputCompressionInput"),
   moderationSelect: document.querySelector("#moderationSelect"),
-  imageCountInput: document.querySelector("#imageCountInput"),
   visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
@@ -277,7 +276,6 @@ function summarizePayloadForDebug(payload) {
     outputFormat: payload.output_format,
     outputCompression: payload.output_compression,
     moderation: payload.moderation,
-    n: payload.n,
     promptChars: String(payload.prompt || "").length,
     hasApiKey: Boolean(payload.api_key),
     imageName: payload.image?.name,
@@ -317,7 +315,6 @@ function createWorkspaceSnapshot() {
       outputFormat: refs.outputFormatSelect.value,
       outputCompression: refs.outputCompressionInput.value,
       moderation: refs.moderationSelect.value,
-      imageCount: refs.imageCountInput.value,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
     },
@@ -384,7 +381,6 @@ async function restoreWorkspaceState() {
   refs.outputFormatSelect.value = forms.outputFormat || "png"
   refs.outputCompressionInput.value = forms.outputCompression || "100"
   refs.moderationSelect.value = forms.moderation || "auto"
-  refs.imageCountInput.value = forms.imageCount || "1"
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
@@ -616,8 +612,8 @@ function loadSettings() {
   const local = loadJSON(STORAGE_KEY, {})
   const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
   refs.apiKeyInput.value = local.apiKey || legacy.apiKey || ""
-  refs.generateUrlInput.value = local.generateUrl || state.serverConfig.generate_url || ""
-  refs.editUrlInput.value = local.editUrl || state.serverConfig.edit_url || ""
+  refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
+  refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
 
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
@@ -766,14 +762,9 @@ function updateVisualSizePicker(value) {
 function getOpenAIImageOptions() {
   const outputFormat = refs.outputFormatSelect.value || "png"
   const outputCompression = Number.parseInt(refs.outputCompressionInput.value, 10)
-  const imageCount = Number.parseInt(refs.imageCountInput.value, 10)
 
   if (!Number.isInteger(outputCompression) || outputCompression < 0 || outputCompression > 100) {
     throw new Error("输出压缩质量必须在 0 到 100 之间。")
-  }
-
-  if (!Number.isInteger(imageCount) || imageCount < 1 || imageCount > 10) {
-    throw new Error("生成数量必须在 1 到 10 之间。")
   }
 
   const options = {
@@ -781,7 +772,6 @@ function getOpenAIImageOptions() {
     background: refs.backgroundSelect.value || "auto",
     output_format: outputFormat,
     moderation: refs.moderationSelect.value || "auto",
-    n: imageCount,
   }
 
   if (["jpeg", "webp"].includes(outputFormat)) {
@@ -796,7 +786,7 @@ function updateOpenAIOptionUI() {
   refs.outputCompressionInput.disabled = !supportsCompression
   refs.outputCompressionInput.closest("label")?.classList.toggle("is-disabled", !supportsCompression)
 
-  const model = refs.generateModelInput.value.trim() || refs.editModelInput.value.trim()
+  const model = refs.generateModelInput.value.trim()
   const isGptImage2 = model === "gpt-image-2"
   if (isGptImage2 && refs.backgroundSelect.value === "transparent") {
     refs.backgroundSelect.value = "auto"
@@ -1357,9 +1347,6 @@ function setResult(payload, durationMs, requestSource = null) {
   if (payload.background && payload.background !== "auto") {
     metaParts.push(`背景 ${payload.background}`)
   }
-  if (payload.n && Number(payload.n) > 1) {
-    metaParts.push(`${payload.n} 张`)
-  }
   const actualSize = formatActualSize(payload)
   if (actualSize) {
     metaParts.push(`实际 ${actualSize}`)
@@ -1865,8 +1852,6 @@ async function submitEdit() {
   const prompt = refs.editPromptInput.value
   const model = refs.editModelInput.value.trim()
   const settings = getSettings()
-  let imageOptions
-  let size
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -1888,15 +1873,6 @@ async function submitEdit() {
     return
   }
 
-  try {
-    imageOptions = getOpenAIImageOptions()
-    size = getGenerateSize()
-  } catch (error) {
-    appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
-    setError(error.message)
-    return
-  }
-
   saveSettings()
   setError("")
   closePreview()
@@ -1907,7 +1883,6 @@ async function submitEdit() {
     mode: "edit",
     prompt,
     model,
-    size,
     sourceName: requestSource.name || "输入图",
   })
   const startedAt = performance.now()
@@ -1921,8 +1896,6 @@ async function submitEdit() {
       endpoint_url: settings.editUrl,
       prompt,
       model,
-      size,
-      ...imageOptions,
       image: {
         name: requestSource.name,
         type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
@@ -1950,8 +1923,6 @@ async function submitEdit() {
       mode: "edit",
       prompt,
       model,
-      size,
-      ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
@@ -1972,7 +1943,6 @@ function clearGenerateForm() {
   refs.outputFormatSelect.value = "png"
   refs.outputCompressionInput.value = "100"
   refs.moderationSelect.value = "auto"
-  refs.imageCountInput.value = "1"
   if (!state.lastResultImage) {
     state.generateIntent = "fresh"
   }
@@ -2167,7 +2137,6 @@ function bindEvents() {
     refs.outputFormatSelect,
     refs.outputCompressionInput,
     refs.moderationSelect,
-    refs.imageCountInput,
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updateOpenAIOptionUI()

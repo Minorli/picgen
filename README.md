@@ -10,7 +10,7 @@
 - 切到编辑模式时，会优先自动带入最新生成/编辑结果作为下一轮输入
 - 本地代理转发上游请求，避免浏览器跨域问题
 - 提示词按原文直发上游，不在前端或代理层做改写
-- 对齐 OpenAI Images API 的真实参数：模型、尺寸、质量、背景、输出格式、压缩、审核严格度、生成数量
+- 对齐 OpenAI Images API 的常用参数：模型、尺寸、质量、背景、输出格式、压缩、审核严格度
 - 支持从很小尺寸到 4K 的预设尺寸，也支持自定义宽高
 - 支持拖拽上传、粘贴图片、可选编辑 mask、单张放大预览、编辑前后对比、下载结果、复制本次提示词
 - 浏览器本地保存接口 URL / API Key / 最近操作记录
@@ -88,18 +88,16 @@ python3 app.py
   "background": "auto",
   "output_format": "png",
   "output_compression": 100,
-  "moderation": "auto",
-  "n": 1
+  "moderation": "auto"
 }
 ```
 
-编辑接口走 `multipart/form-data`，程序会把上传图片转成 multipart 转发给上游：
+编辑接口走 `multipart/form-data`，程序会把上传图片转成 multipart 转发给上游。为避免把生成区的隐藏状态误带到编辑请求里，编辑模式默认只发送这些字段：
 
 - `model`
 - `prompt`
 - `image[]`
 - `mask`（可选）
-- `size`、`quality`、`background`、`output_format`、`output_compression`、`moderation`、`n`
 
 ## 使用方式
 
@@ -125,7 +123,7 @@ python3 app.py
 ## 当前限制
 
 - 历史记录列表本身只保存参数摘要，不是完整图册；但当前工作区会保留最近一次图像和页面状态
-- 页面当前只展示和落盘上游返回的第一张图片；如果 `n > 1`，完整响应仍可在“查看上游响应”里看到
+- 页面当前固定请求单张输出；如果后续要支持多图，需要补结果画廊和多图继续编辑链路
 - 如果你使用的不是 OpenAI 官方接口，需要确认它兼容 OpenAI Images API 的字段名
 
 ## 常见上游错误
