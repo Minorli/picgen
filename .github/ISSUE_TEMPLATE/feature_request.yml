@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a new workflow, capability, or UX improvement.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What user need or limitation does this address?
+      placeholder: Today it is hard to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the preferred behavior or workflow.
+      placeholder: I want the app to ...
+    validations:
+      required: true
+  - type: textarea
+    id: ux
+    attributes:
+      label: UI and interaction notes
+      description: If this changes the interface, describe the intended user path.
+      placeholder: Entry point, states, edge cases, and expected feedback.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: Other approaches or tradeoffs you considered.
+  - type: textarea
+    id: validation
+    attributes:
+      label: How should this be verified?
+      placeholder: Success criteria, test cases, or before/after examples.

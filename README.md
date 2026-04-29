@@ -140,4 +140,6 @@ python3 app.py
 
 - 仓库面向公开协作，任何人都可以 fork 后提交 Pull Request
 - 贡献说明见 `CONTRIBUTING.md`
+- 审核、合并和维护规则见 `GOVERNANCE.md`
+- 社区行为预期见 `CODE_OF_CONDUCT.md`
 - 开源许可采用 `MIT License`

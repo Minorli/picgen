@@ -1,0 +1,14 @@
+# Default review owner.
+* @Minorli
+
+# Core application and UX flow.
+/app.py @Minorli
+/static/ @Minorli
+
+# Project governance and community docs.
+/README.md @Minorli
+/CONTRIBUTING.md @Minorli
+/GOVERNANCE.md @Minorli
+/CODE_OF_CONDUCT.md @Minorli
+/LICENSE @Minorli
+/.github/ @Minorli
