@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import sys
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -34,12 +35,35 @@ class DefaultConfig:
 
 
 DEFAULT_CONFIG = DefaultConfig(
-    generate_url=os.environ.get("PICGEN_DEFAULT_GENERATE_URL", "").strip(),
-    edit_url=os.environ.get("PICGEN_DEFAULT_EDIT_URL", "https://sub.tidba.com/v1/images/edits").strip(),
+    generate_url=os.environ.get("PICGEN_DEFAULT_GENERATE_URL", "https://api.openai.com/v1/images/generations").strip(),
+    edit_url=os.environ.get("PICGEN_DEFAULT_EDIT_URL", "https://api.openai.com/v1/images/edits").strip(),
     model=os.environ.get("PICGEN_DEFAULT_MODEL", "gpt-image-2").strip() or "gpt-image-2",
-    size=os.environ.get("PICGEN_DEFAULT_SIZE", "1024x1024").strip() or "1024x1024",
+    size=os.environ.get("PICGEN_DEFAULT_SIZE", "auto").strip() or "auto",
     api_key=os.environ.get("PICGEN_DEFAULT_API_KEY", "").strip(),
 )
+
+UPSTREAM_USER_AGENT = (
+    os.environ.get("PICGEN_UPSTREAM_USER_AGENT", "").strip()
+    or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def upstream_headers(extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": UPSTREAM_USER_AGENT,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers
+
+
+def debug_log(event: str, **fields: Any) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    field_text = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+    print(f"[picgen] {timestamp} {event} {field_text}".rstrip(), file=sys.stderr, flush=True)
 
 
 class APIError(Exception):
@@ -79,6 +103,59 @@ def detect_image_mime(image_bytes: bytes) -> str:
     return "image/png"
 
 
+def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n") and len(image_bytes) >= 24:
+        return int.from_bytes(image_bytes[16:20], "big"), int.from_bytes(image_bytes[20:24], "big")
+
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")) and len(image_bytes) >= 10:
+        return int.from_bytes(image_bytes[6:8], "little"), int.from_bytes(image_bytes[8:10], "little")
+
+    if image_bytes.startswith(b"\xff\xd8"):
+        index = 2
+        sof_markers = {
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        }
+        while index + 9 < len(image_bytes):
+            if image_bytes[index] != 0xFF:
+                index += 1
+                continue
+            marker = image_bytes[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                continue
+            if index + 2 > len(image_bytes):
+                break
+            segment_length = int.from_bytes(image_bytes[index:index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(image_bytes):
+                break
+            if marker in sof_markers and segment_length >= 7:
+                height = int.from_bytes(image_bytes[index + 3:index + 5], "big")
+                width = int.from_bytes(image_bytes[index + 5:index + 7], "big")
+                return width, height
+            index += segment_length
+
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP" and len(image_bytes) >= 30:
+        chunk_type = image_bytes[12:16]
+        if chunk_type == b"VP8X" and len(image_bytes) >= 30:
+            width = int.from_bytes(image_bytes[24:27], "little") + 1
+            height = int.from_bytes(image_bytes[27:30], "little") + 1
+            return width, height
+
+    return None
+
+
 def storage_url_for_path(file_path: Path) -> str:
     return f"/files/{file_path.relative_to(DATA_DIR).as_posix()}"
 
@@ -86,10 +163,9 @@ def storage_url_for_path(file_path: Path) -> str:
 def fetch_remote_image(image_url: str) -> tuple[bytes, str]:
     req = request.Request(
         image_url,
-        headers={
+        headers=upstream_headers({
             "Accept": "image/*",
-            "User-Agent": "PicGen/1.0",
-        },
+        }),
         method="GET",
     )
 
@@ -124,10 +200,19 @@ def save_output_image(
     stem = f"{mode}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
     metadata_path = day_dir / f"{stem}.json"
+    image_dimensions = detect_image_dimensions(image_bytes)
 
     image_path.write_bytes(image_bytes)
     metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                **metadata,
+                "saved_image_width": image_dimensions[0] if image_dimensions else None,
+                "saved_image_height": image_dimensions[1] if image_dimensions else None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -136,6 +221,8 @@ def save_output_image(
         "saved_image_url": storage_url_for_path(image_path),
         "saved_image_name": image_path.name,
         "saved_image_mime": image_mime,
+        "saved_image_width": image_dimensions[0] if image_dimensions else None,
+        "saved_image_height": image_dimensions[1] if image_dimensions else None,
         "saved_metadata_path": str(metadata_path),
         "saved_metadata_url": storage_url_for_path(metadata_path),
     }
@@ -206,6 +293,63 @@ def validate_url(url: str, field_name: str) -> str:
     return cleaned
 
 
+def optional_string(payload: dict[str, Any], name: str, allowed: set[str] | None = None) -> str | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if allowed is not None and cleaned not in allowed:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 不支持: {cleaned}")
+    return cleaned
+
+
+def optional_int(payload: dict[str, Any], name: str, minimum: int, maximum: int) -> int | None:
+    value = payload.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 必须是整数") from exc
+    if parsed < minimum or parsed > maximum:
+        raise APIError(HTTPStatus.BAD_REQUEST, f"参数 {name} 必须在 {minimum} 到 {maximum} 之间")
+    return parsed
+
+
+def openai_image_options(payload: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    allowed_values = {
+        "quality": {"auto", "low", "medium", "high"},
+        "background": {"auto", "opaque", "transparent"},
+        "output_format": {"png", "jpeg", "webp"},
+        "moderation": {"auto", "low"},
+    }
+
+    for name, allowed in allowed_values.items():
+        value = optional_string(payload, name, allowed)
+        if value is not None:
+            options[name] = value
+
+    output_compression = optional_int(payload, "output_compression", 0, 100)
+    if output_compression is not None and options.get("output_format") in {"jpeg", "webp"}:
+        options["output_compression"] = output_compression
+
+    return options
+
+
+def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if size:
+        metadata["size"] = size
+    for key in ["quality", "background", "output_format", "output_compression", "moderation"]:
+        value = payload.get(key)
+        if value is not None and value != "":
+            metadata[key] = value
+    return metadata
+
+
 def extract_error_message(response_body: str) -> tuple[str, str | None]:
     message = response_body.strip() or "上游接口返回了错误"
     details: str | None = None
@@ -216,6 +360,23 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
         return message, response_body.strip() or None
 
     if isinstance(parsed_body, dict):
+        if parsed_body.get("cloudflare_error") is True and parsed_body.get("error_code") == 1010:
+            message = "上游接口被 Cloudflare 拒绝访问: Error 1010"
+            detail_text = str(parsed_body.get("detail") or "The site owner has blocked access based on your browser's signature.")
+            ray_id = str(parsed_body.get("ray_id") or parsed_body.get("instance") or "").strip()
+            zone = str(parsed_body.get("zone") or "").strip()
+            owner_hint = str(parsed_body.get("what_you_should_do") or "").replace("**", "").strip()
+            detail_lines = [
+                detail_text,
+                "这通常不是提示词、API Key 或本地页面的问题，而是上游站点的 Cloudflare 规则拦截了当前代理请求签名。",
+            ]
+            if owner_hint:
+                detail_lines.append(owner_hint)
+            if zone or ray_id:
+                detail_lines.append(f"Zone: {zone or '-'}; Ray ID: {ray_id or '-'}")
+            details = "\n".join(detail_lines)
+            return message, details
+
         error_block = parsed_body.get("error")
         if isinstance(error_block, dict):
             message = str(error_block.get("message") or message)
@@ -286,14 +447,23 @@ def prepare_image_payload(upstream: dict[str, Any], *, save_context: dict[str, A
 
 def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     request_body = json.dumps(payload).encode("utf-8")
+    started_at = time.perf_counter()
+    debug_log(
+        "upstream_json_start",
+        url=url,
+        model=payload.get("model"),
+        size=payload.get("size"),
+        prompt_chars=len(str(payload.get("prompt") or "")),
+        body_bytes=len(request_body),
+    )
     req = request.Request(
         url,
         data=request_body,
-        headers={
+        headers=upstream_headers({
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-        },
+        }),
         method="POST",
     )
 
@@ -302,10 +472,30 @@ def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[s
             body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        debug_log(
+            "upstream_json_http_error",
+            url=url,
+            status=exc.code,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            body_chars=len(body),
+        )
         message, details = extract_error_message(body)
         raise APIError(exc.code, message, details) from exc
     except error.URLError as exc:
+        debug_log(
+            "upstream_json_url_error",
+            url=url,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            reason=exc.reason,
+        )
         raise APIError(HTTPStatus.BAD_GATEWAY, f"无法连接上游接口: {exc.reason}") from exc
+
+    debug_log(
+        "upstream_json_ok",
+        url=url,
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        body_chars=len(body),
+    )
 
     try:
         parsed = json.loads(body)
@@ -316,14 +506,23 @@ def run_upstream_json(url: str, api_key: str, payload: dict[str, Any]) -> dict[s
 
 def run_upstream_multipart(url: str, api_key: str, fields: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, Any]:
     body, content_type = encode_multipart(fields, files)
+    started_at = time.perf_counter()
+    debug_log(
+        "upstream_multipart_start",
+        url=url,
+        model=fields.get("model"),
+        prompt_chars=len(str(fields.get("prompt") or "")),
+        files=",".join(str(file_part.get("filename")) for file_part in files),
+        body_bytes=len(body),
+    )
     req = request.Request(
         url,
         data=body,
-        headers={
+        headers=upstream_headers({
             "Authorization": f"Bearer {api_key}",
             "Content-Type": content_type,
             "Accept": "application/json",
-        },
+        }),
         method="POST",
     )
 
@@ -332,10 +531,30 @@ def run_upstream_multipart(url: str, api_key: str, fields: dict[str, Any], files
             response_body = response.read().decode("utf-8")
     except error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
+        debug_log(
+            "upstream_multipart_http_error",
+            url=url,
+            status=exc.code,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            body_chars=len(body_text),
+        )
         message, details = extract_error_message(body_text)
         raise APIError(exc.code, message, details) from exc
     except error.URLError as exc:
+        debug_log(
+            "upstream_multipart_url_error",
+            url=url,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            reason=exc.reason,
+        )
         raise APIError(HTTPStatus.BAD_GATEWAY, f"无法连接上游接口: {exc.reason}") from exc
+
+    debug_log(
+        "upstream_multipart_ok",
+        url=url,
+        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+        body_chars=len(response_body),
+    )
 
     try:
         parsed = json.loads(response_body)
@@ -418,16 +637,39 @@ class PicGenHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        request_id = uuid.uuid4().hex[:8]
+        started_at = time.perf_counter()
+        debug_log("local_post_start", request_id=request_id, path=path)
         try:
             payload = self.read_json_body()
+            debug_log(
+                "local_post_payload",
+                request_id=request_id,
+                path=path,
+                keys=",".join(sorted(payload.keys())),
+            )
             if path == "/api/generate":
                 response_payload = self.handle_generate(payload)
             elif path == "/api/edit":
                 response_payload = self.handle_edit(payload)
             else:
                 raise APIError(HTTPStatus.NOT_FOUND, "未知接口")
+            debug_log(
+                "local_post_ok",
+                request_id=request_id,
+                path=path,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            )
             self.write_json(HTTPStatus.OK, response_payload)
         except APIError as exc:
+            debug_log(
+                "local_post_api_error",
+                request_id=request_id,
+                path=path,
+                status=exc.status,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                message=exc.message,
+            )
             self.write_json(
                 exc.status,
                 {
@@ -437,6 +679,13 @@ class PicGenHandler(SimpleHTTPRequestHandler):
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
             traceback.print_exc()
+            debug_log(
+                "local_post_internal_error",
+                request_id=request_id,
+                path=path,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                message=exc,
+            )
             self.write_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {
@@ -477,10 +726,7 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         model = str(payload.get("model") or DEFAULT_CONFIG.model).strip() or DEFAULT_CONFIG.model
         size = str(payload.get("size") or DEFAULT_CONFIG.size).strip() or DEFAULT_CONFIG.size
         api_key = str(payload.get("api_key") or DEFAULT_CONFIG.api_key).strip()
-        try:
-            n = int(payload.get("n") or 1)
-        except (TypeError, ValueError) as exc:
-            raise APIError(HTTPStatus.BAD_REQUEST, "参数 n 必须是整数") from exc
+        image_options = openai_image_options(payload)
 
         if not api_key:
             raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key")
@@ -488,16 +734,19 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         upstream_payload = {
             "model": model,
             "prompt": prompt,
-            "size": size,
-            "n": n,
+            **image_options,
         }
+        if size and size != "auto":
+            upstream_payload["size"] = size
+
         upstream_response = run_upstream_json(endpoint_url, api_key, upstream_payload)
+        metadata = request_metadata({**payload, **image_options}, size=size)
 
         return {
             "mode": "generate",
             "prompt": prompt,
             "model": model,
-            "size": size,
+            **metadata,
             "endpoint_url": endpoint_url,
             **prepare_image_payload(
                 upstream_response,
@@ -505,8 +754,8 @@ class PicGenHandler(SimpleHTTPRequestHandler):
                     "mode": "generate",
                     "prompt": prompt,
                     "model": model,
-                    "size": size,
                     "endpoint_url": endpoint_url,
+                    **metadata,
                 },
             ),
         }
@@ -526,24 +775,33 @@ class PicGenHandler(SimpleHTTPRequestHandler):
         if not api_key:
             raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key")
 
-        image_part = parse_file_payload(payload.get("image"), "image", required=True)
+        image_part = parse_file_payload(payload.get("image"), "image[]", required=True)
         mask_part = parse_file_payload(payload.get("mask"), "mask", required=False)
 
         files = [part for part in [image_part, mask_part] if part is not None]
+        size = str(payload.get("size") or "").strip()
+        image_options = openai_image_options(payload)
+        fields: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            **image_options,
+        }
+        if size and size != "auto":
+            fields["size"] = size
+
         upstream_response = run_upstream_multipart(
             endpoint_url,
             api_key,
-            fields={
-                "model": model,
-                "prompt": prompt,
-            },
+            fields=fields,
             files=files,
         )
+        metadata = request_metadata({**payload, **image_options}, size=size or None)
 
         return {
             "mode": "edit",
             "prompt": prompt,
             "model": model,
+            **metadata,
             "endpoint_url": endpoint_url,
             "source_image_name": image_part["filename"],
             "mask_image_name": mask_part["filename"] if mask_part else None,
@@ -556,6 +814,7 @@ class PicGenHandler(SimpleHTTPRequestHandler):
                     "endpoint_url": endpoint_url,
                     "source_image_name": image_part["filename"],
                     "mask_image_name": mask_part["filename"] if mask_part else None,
+                    **metadata,
                 },
             ),
         }

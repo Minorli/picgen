@@ -1,4 +1,5 @@
-const STORAGE_KEY = "picgen-console-settings-v1"
+const STORAGE_KEY = "picgen-console-settings-v2"
+const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
@@ -7,6 +8,7 @@ const WORKSPACE_KEY = "current-workspace"
 const WORKSPACE_VERSION = 1
 
 const SIZE_PRESETS = [
+  "auto",
   "128x128",
   "256x256",
   "512x512",
@@ -17,7 +19,6 @@ const SIZE_PRESETS = [
   "2048x2048",
   "3840x2160",
   "2160x3840",
-  "4096x4096",
 ]
 
 const state = {
@@ -25,6 +26,8 @@ const state = {
   generateIntent: "fresh",
   serverConfig: null,
   editImage: null,
+  editMaskImage: null,
+  generateReferenceImage: null,
   displayedSourceImage: null,
   history: [],
   lastResultPrompt: "",
@@ -33,11 +36,16 @@ const state = {
   lastResultMode: null,
   currentComparisonSource: null,
   resultPreview: null,
+  progressTimer: null,
+  progressStartedAt: 0,
+  progressPhase: "idle",
+  progressLabel: "",
   preview: {
     mode: "single",
     target: "result",
   },
   rawResponsePreview: null,
+  debugLines: [],
   persistTimer: null,
   persistenceReady: false,
   isBusy: false,
@@ -51,6 +59,8 @@ const refs = {
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   toggleKeyButton: document.querySelector("#toggleKeyButton"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
+  newTaskButton: document.querySelector("#newTaskButton"),
+  navModeButtons: Array.from(document.querySelectorAll(".nav-link[data-mode]")),
   historyList: document.querySelector("#historyList"),
   historyEmpty: document.querySelector("#historyEmpty"),
   requestStatus: document.querySelector("#requestStatus"),
@@ -71,12 +81,23 @@ const refs = {
   variantSourceName: document.querySelector("#variantSourceName"),
   variantSourceHint: document.querySelector("#variantSourceHint"),
   variantSuggestion: document.querySelector("#variantSuggestion"),
+  generateReferenceDropzone: document.querySelector("#generateReferenceDropzone"),
+  generateReferenceInput: document.querySelector("#generateReferenceInput"),
+  generateReferenceTitle: document.querySelector("#generateReferenceTitle"),
+  generateReferenceMeta: document.querySelector("#generateReferenceMeta"),
+  clearGenerateReferenceButton: document.querySelector("#clearGenerateReferenceButton"),
   generatePromptInput: document.querySelector("#generatePromptInput"),
   generatePromptCount: document.querySelector("#generatePromptCount"),
   generateModelInput: document.querySelector("#generateModelInput"),
   generateSizePreset: document.querySelector("#generateSizePreset"),
   generateWidthInput: document.querySelector("#generateWidthInput"),
   generateHeightInput: document.querySelector("#generateHeightInput"),
+  qualitySelect: document.querySelector("#qualitySelect"),
+  backgroundSelect: document.querySelector("#backgroundSelect"),
+  outputFormatSelect: document.querySelector("#outputFormatSelect"),
+  outputCompressionInput: document.querySelector("#outputCompressionInput"),
+  moderationSelect: document.querySelector("#moderationSelect"),
+  visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
   imageDropzone: document.querySelector("#imageDropzone"),
@@ -84,6 +105,12 @@ const refs = {
   imageDropzoneSubtitle: document.querySelector("#imageDropzoneSubtitle"),
   editImageInput: document.querySelector("#editImageInput"),
   editImageMeta: document.querySelector("#editImageMeta"),
+  maskDropzone: document.querySelector("#maskDropzone"),
+  editMaskInput: document.querySelector("#editMaskInput"),
+  maskDropzoneTitle: document.querySelector("#maskDropzoneTitle"),
+  maskDropzoneSubtitle: document.querySelector("#maskDropzoneSubtitle"),
+  editMaskMeta: document.querySelector("#editMaskMeta"),
+  clearEditMaskButton: document.querySelector("#clearEditMaskButton"),
   editPromptInput: document.querySelector("#editPromptInput"),
   editPromptCount: document.querySelector("#editPromptCount"),
   editModelInput: document.querySelector("#editModelInput"),
@@ -99,9 +126,17 @@ const refs = {
   resultPreviewTrigger: document.querySelector("#resultPreviewTrigger"),
   resultImage: document.querySelector("#resultImage"),
   resultPreviewEmpty: document.querySelector("#resultPreviewEmpty"),
+  generationOverlay: document.querySelector("#generationOverlay"),
+  generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
+  generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
   resultPrompt: document.querySelector("#resultPrompt"),
   resultMeta: document.querySelector("#resultMeta"),
   resultTiming: document.querySelector("#resultTiming"),
+  progressInspectorItem: document.querySelector("#progressInspectorItem"),
+  progressStageLabel: document.querySelector("#progressStageLabel"),
+  progressElapsed: document.querySelector("#progressElapsed"),
+  requestProgressFill: document.querySelector("#requestProgressFill"),
+  progressHint: document.querySelector("#progressHint"),
   resultStorage: document.querySelector("#resultStorage"),
   downloadButton: document.querySelector("#downloadButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
@@ -109,6 +144,7 @@ const refs = {
   previewCompareButton: document.querySelector("#previewCompareButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
+  debugOutput: document.querySelector("#debugOutput"),
   rawResponseOutput: document.querySelector("#rawResponseOutput"),
   previewModal: document.querySelector("#previewModal"),
   previewModalBackdrop: document.querySelector("#previewModalBackdrop"),
@@ -213,6 +249,55 @@ function renderRawResponsePreview() {
   refs.rawResponseOutput.textContent = JSON.stringify(state.rawResponsePreview || {}, null, 2)
 }
 
+function appendDebugLine(message, fields = {}) {
+  const timestamp = new Date().toLocaleTimeString("zh-CN", { hour12: false })
+  const fieldText = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ")
+  const line = `[${timestamp}] ${message}${fieldText ? ` ${fieldText}` : ""}`
+  state.debugLines = [...state.debugLines, line].slice(-80)
+  refs.debugOutput.textContent = state.debugLines.join("\n")
+}
+
+function resetDebugLog(message = "开始新的请求") {
+  state.debugLines = []
+  refs.debugOutput.textContent = ""
+  appendDebugLine(message)
+}
+
+function summarizePayloadForDebug(payload) {
+  return {
+    endpoint: payload.endpoint_url,
+    model: payload.model,
+    size: payload.size,
+    quality: payload.quality,
+    background: payload.background,
+    outputFormat: payload.output_format,
+    outputCompression: payload.output_compression,
+    moderation: payload.moderation,
+    promptChars: String(payload.prompt || "").length,
+    hasApiKey: Boolean(payload.api_key),
+    imageName: payload.image?.name,
+    imageType: payload.image?.type,
+    imageBytesApprox: payload.image?.data_url ? Math.round((payload.image.data_url.length * 3) / 4) : undefined,
+    maskName: payload.mask?.name,
+  }
+}
+
+window.addEventListener("error", (event) => {
+  appendDebugLine("前端脚本错误", {
+    message: event.message,
+    source: event.filename ? `${event.filename}:${event.lineno}` : "",
+  })
+})
+
+window.addEventListener("unhandledrejection", (event) => {
+  appendDebugLine("前端异步错误", {
+    reason: event.reason?.message || event.reason,
+  })
+})
+
 function createWorkspaceSnapshot() {
   return {
     version: WORKSPACE_VERSION,
@@ -225,6 +310,11 @@ function createWorkspaceSnapshot() {
       generateSizePreset: refs.generateSizePreset.value,
       generateWidth: refs.generateWidthInput.value,
       generateHeight: refs.generateHeightInput.value,
+      quality: refs.qualitySelect.value,
+      background: refs.backgroundSelect.value,
+      outputFormat: refs.outputFormatSelect.value,
+      outputCompression: refs.outputCompressionInput.value,
+      moderation: refs.moderationSelect.value,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
     },
@@ -246,6 +336,8 @@ function createWorkspaceSnapshot() {
       labelText: refs.sourcePreviewLabel.textContent,
       displayedSourceImage: state.displayedSourceImage,
       editImage: state.editImage,
+      editMaskImage: state.editMaskImage,
+      generateReferenceImage: state.generateReferenceImage,
     },
   }
 }
@@ -284,10 +376,15 @@ async function restoreWorkspaceState() {
   refs.generateWidthInput.value = forms.generateWidth || ""
   refs.generateHeightInput.value = forms.generateHeight || ""
   refs.generateSizePreset.value = forms.generateSizePreset || "custom"
+  refs.qualitySelect.value = forms.quality || "auto"
+  refs.backgroundSelect.value = forms.background || "auto"
+  refs.outputFormatSelect.value = forms.outputFormat || "png"
+  refs.outputCompressionInput.value = forms.outputCompression || "100"
+  refs.moderationSelect.value = forms.moderation || "auto"
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
-    setGenerateSize(state.serverConfig.default_size || "1024x1024")
+    setGenerateSize(state.serverConfig.default_size || "auto")
   }
 
   refs.editPromptInput.value = forms.editPrompt || ""
@@ -325,6 +422,8 @@ async function restoreWorkspaceState() {
 
   const source = snapshot.source || {}
   state.editImage = cloneImageAsset(source.editImage)
+  state.editMaskImage = cloneImageAsset(source.editMaskImage)
+  state.generateReferenceImage = cloneImageAsset(source.generateReferenceImage)
 
   if (getAssetDisplaySrc(source.displayedSourceImage)) {
     applySourcePreview(source.displayedSourceImage, source.labelText || "输入图")
@@ -335,7 +434,10 @@ async function restoreWorkspaceState() {
   renderRawResponsePreview()
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateGenerateIntentUI()
+  updateGenerateReferenceUI()
   updateEditSourceUI()
+  updateEditMaskUI()
+  updateOpenAIOptionUI()
   updatePreviewAvailability()
   updateWorkflowStatus()
   return true
@@ -408,6 +510,7 @@ function setGenerateIntent(intent) {
 function updateGenerateIntentUI() {
   const hasResultAnchor = Boolean(state.lastResultImage)
   const isVariant = state.generateIntent === "variant"
+  const hasReference = Boolean(state.generateReferenceImage)
 
   refs.freshGenerateMode.classList.toggle("active", !isVariant)
   refs.variantGenerateMode.classList.toggle("active", isVariant)
@@ -427,14 +530,20 @@ function updateGenerateIntentUI() {
 
   refs.generateIntentHint.textContent = state.generateIntent === "variant"
     ? "当前会拿最新结果做参考图，适合“换个风格、改灯光、换质感”，尽量保持上一张图的主体关系。"
-    : "全新开题会忽略当前结果，适合重新换题。若只是想换风格、光线、材质或色调，请用“基于当前结果延展”。"
+    : hasReference
+      ? "全新开题会带上你添加的参考图，经由编辑接口生成；提示词仍按新主题处理。"
+      : "全新开题会忽略当前结果，适合重新换题。若只是想换风格、光线、材质或色调，请用“基于当前结果延展”。"
 
   refs.variantSuggestion.classList.toggle(
     "hidden",
     !(hasResultAnchor && state.generateIntent === "fresh" && isLikelyVariationPrompt(refs.generatePromptInput.value)),
   )
 
-  refs.generateButton.textContent = state.generateIntent === "variant" ? "基于当前结果延展" : "开始生成"
+  refs.generateButton.textContent = state.generateIntent === "variant"
+    ? "基于当前结果延展"
+    : hasReference
+      ? "参考图生成"
+      : "开始生成"
 }
 
 function setFlowState(element, stateName) {
@@ -501,13 +610,14 @@ function saveSettings() {
 
 function loadSettings() {
   const local = loadJSON(STORAGE_KEY, {})
-  refs.apiKeyInput.value = local.apiKey || ""
-  refs.generateUrlInput.value = local.generateUrl || state.serverConfig.generate_url || ""
-  refs.editUrlInput.value = local.editUrl || state.serverConfig.edit_url || ""
+  const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
+  refs.apiKeyInput.value = local.apiKey || legacy.apiKey || ""
+  refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
+  refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
 
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
-  setGenerateSize(state.serverConfig.default_size || "1024x1024")
+  setGenerateSize(state.serverConfig.default_size || "auto")
 
   if (state.serverConfig.has_default_api_key && !local.apiKey) {
     refs.settingsHint.textContent = "服务端已预设默认 API Key。你也可以在这里覆盖它。"
@@ -569,13 +679,36 @@ function formatSizeValue(width, height) {
   return `${width}x${height}`
 }
 
+function formatActualSize(payload) {
+  const width = Number(payload.saved_image_width)
+  const height = Number(payload.saved_image_height)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return ""
+  }
+  return formatSizeValue(width, height)
+}
+
+function isSameSize(requestedSize, actualSize) {
+  const requested = parseSizeValue(requestedSize)
+  const actual = parseSizeValue(actualSize)
+  return Boolean(requested && actual && requested.width === actual.width && requested.height === actual.height)
+}
+
 function setGenerateSize(size) {
+  if (String(size || "").trim() === "auto") {
+    refs.generateWidthInput.value = ""
+    refs.generateHeightInput.value = ""
+    refs.generateSizePreset.value = "auto"
+    updateVisualSizePicker("auto")
+    return
+  }
   const parsed = parseSizeValue(size) || { width: 1024, height: 1024 }
   refs.generateWidthInput.value = String(parsed.width)
   refs.generateHeightInput.value = String(parsed.height)
   refs.generateSizePreset.value = SIZE_PRESETS.includes(formatSizeValue(parsed.width, parsed.height))
     ? formatSizeValue(parsed.width, parsed.height)
     : "custom"
+  updateVisualSizePicker(refs.generateSizePreset.value)
 }
 
 function syncSizePresetFromInputs() {
@@ -587,9 +720,14 @@ function syncSizePresetFromInputs() {
   }
   const value = formatSizeValue(width, height)
   refs.generateSizePreset.value = SIZE_PRESETS.includes(value) ? value : "custom"
+  updateVisualSizePicker(refs.generateSizePreset.value === "custom" ? value : refs.generateSizePreset.value)
 }
 
 function getGenerateSize() {
+  if (refs.generateSizePreset.value === "auto" && !refs.generateWidthInput.value && !refs.generateHeightInput.value) {
+    return "auto"
+  }
+
   const width = Number.parseInt(refs.generateWidthInput.value, 10)
   const height = Number.parseInt(refs.generateHeightInput.value, 10)
 
@@ -601,11 +739,66 @@ function getGenerateSize() {
     throw new Error("宽高都不能小于 64。")
   }
 
-  if (width > 4096 || height > 4096) {
-    throw new Error("宽高都不能超过 4096。")
+  if (width > 3840 || height > 3840) {
+    throw new Error("宽高都不能超过 3840。")
+  }
+
+  const ratio = Math.max(width, height) / Math.min(width, height)
+  if (ratio > 3) {
+    throw new Error("宽高比例不能超过 3:1。")
   }
 
   return formatSizeValue(width, height)
+}
+
+function updateVisualSizePicker(value) {
+  refs.visualSizeInputs.forEach((input) => {
+    const selected = input.value === value
+    input.checked = selected
+    input.closest("label")?.classList.toggle("selected", selected)
+  })
+}
+
+function getOpenAIImageOptions() {
+  const outputFormat = refs.outputFormatSelect.value || "png"
+  const outputCompression = Number.parseInt(refs.outputCompressionInput.value, 10)
+
+  if (!Number.isInteger(outputCompression) || outputCompression < 0 || outputCompression > 100) {
+    throw new Error("输出压缩质量必须在 0 到 100 之间。")
+  }
+
+  const options = {
+    quality: refs.qualitySelect.value || "auto",
+    background: refs.backgroundSelect.value || "auto",
+    output_format: outputFormat,
+    moderation: refs.moderationSelect.value || "auto",
+  }
+
+  if (["jpeg", "webp"].includes(outputFormat)) {
+    options.output_compression = outputCompression
+  }
+
+  return options
+}
+
+function updateOpenAIOptionUI() {
+  const supportsCompression = ["jpeg", "webp"].includes(refs.outputFormatSelect.value)
+  refs.outputCompressionInput.disabled = !supportsCompression
+  refs.outputCompressionInput.closest("label")?.classList.toggle("is-disabled", !supportsCompression)
+
+  const model = refs.generateModelInput.value.trim()
+  const isGptImage2 = model === "gpt-image-2"
+  if (isGptImage2 && refs.backgroundSelect.value === "transparent") {
+    refs.backgroundSelect.value = "auto"
+    setError("gpt-image-2 不支持透明背景，已切回 Auto。需要透明 PNG 时请选择支持透明背景的图片模型。")
+  }
+}
+
+function applyOpenAIOptions(payload) {
+  return {
+    ...payload,
+    ...getOpenAIImageOptions(),
+  }
 }
 
 function inferMimeFromDataUrl(dataUrl) {
@@ -613,7 +806,98 @@ function inferMimeFromDataUrl(dataUrl) {
   return matched?.[1] || "image/png"
 }
 
-function setBusy(isBusy, label) {
+function estimateProgress(elapsedMs, phase) {
+  if (phase === "preparing") {
+    return Math.min(18, 6 + elapsedMs / 180)
+  }
+  if (phase === "uploading") {
+    return Math.min(34, 18 + elapsedMs / 240)
+  }
+  if (phase === "waiting") {
+    return Math.min(78, 34 + elapsedMs / 1250)
+  }
+  if (phase === "receiving") {
+    return Math.min(92, 78 + elapsedMs / 500)
+  }
+  return 0
+}
+
+function progressHintForPhase(phase, label) {
+  if (phase === "preparing") {
+    return "正在整理参数和本地输入。"
+  }
+  if (phase === "uploading") {
+    return "请求已交给本地代理，正在连接上游接口。"
+  }
+  if (phase === "waiting") {
+    return "上游正在生成图像，较大尺寸通常需要更久。"
+  }
+  if (phase === "receiving") {
+    return "上游已响应，正在解析结果并保存到本地。"
+  }
+  return label || "等待操作。"
+}
+
+function renderProgress() {
+  if (!state.progressStartedAt) {
+    return
+  }
+
+  const elapsedMs = performance.now() - state.progressStartedAt
+  const progress = estimateProgress(elapsedMs, state.progressPhase)
+  refs.requestProgressFill.style.width = `${progress.toFixed(1)}%`
+  refs.progressElapsed.textContent = `${(elapsedMs / 1000).toFixed(1)}s`
+  refs.resultTiming.textContent = `请求进行中 ${(elapsedMs / 1000).toFixed(1)}s`
+  refs.progressStageLabel.textContent = state.progressLabel || "处理中"
+  refs.progressHint.textContent = progressHintForPhase(state.progressPhase, state.progressLabel)
+}
+
+function setProgressPhase(phase, label) {
+  if (!state.isBusy) {
+    return
+  }
+  state.progressPhase = phase
+  state.progressLabel = label
+  refs.generationOverlayTitle.textContent = label
+  refs.generationOverlaySubtitle.textContent = progressHintForPhase(phase, label)
+  renderProgress()
+}
+
+function startProgress(label) {
+  window.clearInterval(state.progressTimer)
+  state.progressStartedAt = performance.now()
+  state.progressPhase = "preparing"
+  state.progressLabel = label
+  refs.progressInspectorItem.classList.remove("hidden")
+  refs.generationOverlay.classList.remove("hidden")
+  refs.resultPreviewTrigger.classList.add("preview-frame-busy")
+  refs.requestProgressFill.style.width = "6%"
+  refs.progressElapsed.textContent = "0.0s"
+  refs.progressStageLabel.textContent = label
+  refs.progressHint.textContent = progressHintForPhase("preparing", label)
+  refs.generationOverlayTitle.textContent = label
+  refs.generationOverlaySubtitle.textContent = progressHintForPhase("preparing", label)
+  state.progressTimer = window.setInterval(renderProgress, 100)
+}
+
+function stopProgress() {
+  window.clearInterval(state.progressTimer)
+  state.progressTimer = null
+  state.progressStartedAt = 0
+  state.progressPhase = "idle"
+  refs.requestProgressFill.style.width = "100%"
+  window.setTimeout(() => {
+    if (state.isBusy) {
+      return
+    }
+    refs.progressInspectorItem.classList.add("hidden")
+    refs.generationOverlay.classList.add("hidden")
+    refs.resultPreviewTrigger.classList.remove("preview-frame-busy")
+    refs.requestProgressFill.style.width = "0%"
+  }, 420)
+}
+
+function setBusy(isBusy, label, options = {}) {
   state.isBusy = isBusy
   refs.generateButton.disabled = isBusy
   refs.editButton.disabled = isBusy
@@ -622,10 +906,52 @@ function setBusy(isBusy, label) {
   refs.requestStatus.textContent = label
   refs.requestBadge.textContent = label
   refs.requestBadge.className = `status-badge ${isBusy ? "working" : "idle"}`
+  if (isBusy) {
+    startProgress(options.progressLabel || label)
+  } else {
+    stopProgress()
+  }
 }
 
 function setError(message = "", details = "") {
   refs.errorMessage.textContent = details ? `${message} ${details}` : message
+}
+
+function updateGenerateReferenceUI() {
+  const hasReference = Boolean(state.generateReferenceImage)
+  refs.generateReferenceDropzone.classList.toggle("ready", hasReference)
+  refs.clearGenerateReferenceButton.classList.toggle("hidden", !hasReference)
+
+  if (hasReference) {
+    refs.generateReferenceTitle.textContent = "已加载参考图"
+    refs.generateReferenceMeta.textContent = state.generateReferenceImage.description || state.generateReferenceImage.name
+  } else {
+    refs.generateReferenceTitle.textContent = "可选：添加参考图"
+    refs.generateReferenceMeta.textContent = "全新开题也可以带一张参考图；有参考图时会使用编辑接口发送。"
+  }
+
+  updateGenerateIntentUI()
+}
+
+function setGenerateReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+  state.generateReferenceImage = cloneImageAsset(asset)
+  updateGenerateReferenceUI()
+  if (showPreview && getAssetDisplaySrc(state.generateReferenceImage)) {
+    applySourcePreview(state.generateReferenceImage, "参考图")
+  }
+  scheduleWorkspacePersist()
+}
+
+function clearGenerateReferenceImage({ clearInput = true } = {}) {
+  state.generateReferenceImage = null
+  if (clearInput) {
+    refs.generateReferenceInput.value = ""
+  }
+  updateGenerateReferenceUI()
+  if (state.activeMode === "generate") {
+    clearSourcePreview("原图")
+  }
+  scheduleWorkspacePersist()
 }
 
 function clearSourcePreview(label = state.activeMode === "edit" ? "输入图" : "原图") {
@@ -684,6 +1010,23 @@ function updateEditSourceUI() {
   updateWorkflowStatus()
 }
 
+function updateEditMaskUI() {
+  const hasMask = Boolean(state.editMaskImage)
+  refs.maskDropzone.classList.toggle("ready", hasMask)
+  refs.clearEditMaskButton.classList.toggle("hidden", !hasMask)
+
+  if (hasMask) {
+    refs.maskDropzoneTitle.textContent = "已加载编辑 mask"
+    refs.maskDropzoneSubtitle.textContent = "透明区域会被重新生成；不透明区域用于约束保留。"
+    refs.editMaskMeta.textContent = state.editMaskImage.description || state.editMaskImage.name
+    return
+  }
+
+  refs.maskDropzoneTitle.textContent = "可选：上传透明区域 mask"
+  refs.maskDropzoneSubtitle.textContent = "透明区域会被模型重新生成；留空则按整图编辑。"
+  refs.editMaskMeta.textContent = ""
+}
+
 function setEditImage(asset, { showPreview = state.activeMode === "edit", previewLabel = "输入图" } = {}) {
   state.editImage = cloneImageAsset(asset)
   updateEditSourceUI()
@@ -692,6 +1035,21 @@ function setEditImage(asset, { showPreview = state.activeMode === "edit", previe
     applySourcePreview(state.editImage, previewLabel)
   }
 
+  scheduleWorkspacePersist()
+}
+
+function setEditMaskImage(asset) {
+  state.editMaskImage = cloneImageAsset(asset)
+  updateEditMaskUI()
+  scheduleWorkspacePersist()
+}
+
+function clearEditMaskImage({ clearInput = true } = {}) {
+  state.editMaskImage = null
+  if (clearInput) {
+    refs.editMaskInput.value = ""
+  }
+  updateEditMaskUI()
   scheduleWorkspacePersist()
 }
 
@@ -724,12 +1082,17 @@ function setMode(mode, options = {}) {
 
   refs.generateTab.classList.toggle("active", mode === "generate")
   refs.editTab.classList.toggle("active", mode === "edit")
+  refs.navModeButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === mode)
+  })
   refs.generatePanel.classList.toggle("hidden", mode !== "generate")
   refs.editPanel.classList.toggle("hidden", mode !== "edit")
   refs.sourcePreviewCard.classList.toggle("subtle", mode !== "edit")
 
   if (mode === "edit" && previousMode !== "edit" && options.autoLoadLatest !== false && state.lastResultImage) {
     useLastResultAsEditSource({ showPreview: true })
+  } else if (mode === "generate" && getAssetDisplaySrc(state.generateReferenceImage)) {
+    applySourcePreview(state.generateReferenceImage, "参考图")
   } else if (mode !== "edit" && state.lastResultMode !== "edit") {
     clearSourcePreview("原图")
   }
@@ -839,11 +1202,13 @@ function clearResult() {
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
   refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
   refs.resultPrompt.textContent = "还没有结果。"
   refs.resultMeta.textContent = ""
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = ""
   refs.rawResponseOutput.textContent = "{}"
+  refs.debugOutput.textContent = "等待操作。"
   refs.downloadButton.classList.add("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
@@ -855,6 +1220,7 @@ function clearResult() {
   state.currentComparisonSource = null
   state.resultPreview = null
   state.rawResponsePreview = null
+  state.debugLines = []
   state.generateIntent = "fresh"
 
   closePreview()
@@ -865,17 +1231,56 @@ function clearResult() {
   scheduleWorkspacePersist()
 }
 
+function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
+  const label = mode === "variant"
+    ? "延展中"
+    : mode === "edit"
+      ? "编辑中"
+      : mode === "reference"
+        ? "参考生成中"
+        : "生成中"
+  const metaLabel = mode === "variant" ? "延展" : mode === "edit" ? "编辑" : mode === "reference" ? "参考生成" : "生成"
+  const metaParts = [metaLabel, model]
+
+  if (size) {
+    metaParts.push(size)
+  }
+  if (sourceName) {
+    metaParts.push(`参考图 ${sourceName}`)
+  }
+
+  refs.resultPreviewLabel.textContent = label
+  refs.resultImage.removeAttribute("src")
+  refs.resultImage.classList.remove("visible")
+  refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.textContent = "请求已提交，正在等待上游返回新图。"
+  refs.resultPrompt.textContent = prompt || "本次请求已提交。"
+  refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
+  refs.resultTiming.textContent = "请求进行中 0.0s"
+  refs.resultStorage.textContent = ""
+  refs.downloadButton.classList.add("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "true")
+  refs.downloadButton.removeAttribute("href")
+}
+
 function setResult(payload, durationMs, requestSource = null) {
   const imageSource = payload.saved_image_url || payload.image_data_url || payload.image_url
   if (!imageSource) {
     throw new Error("上游接口没有返回可展示的图片。")
   }
 
-  const isTransformMode = payload.mode === "edit" || payload.mode === "variant"
-  refs.resultPreviewLabel.textContent = payload.mode === "variant" ? "延展后" : payload.mode === "edit" ? "编辑后" : "输出"
+  const isTransformMode = ["edit", "variant", "reference"].includes(payload.mode)
+  refs.resultPreviewLabel.textContent = payload.mode === "variant"
+    ? "延展后"
+    : payload.mode === "edit"
+      ? "编辑后"
+      : payload.mode === "reference"
+        ? "参考生成"
+        : "输出"
   refs.resultImage.src = imageSource
   refs.resultImage.classList.add("visible")
   refs.resultPreviewEmpty.classList.add("hidden")
+  refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
 
   const displayedPrompt = payload.prompt || "结果已生成"
   state.lastResultPrompt = displayedPrompt
@@ -928,14 +1333,36 @@ function setResult(payload, durationMs, requestSource = null) {
     }
   }
 
-  const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : "生成"
+  const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : payload.mode === "reference" ? "参考生成" : "生成"
   const metaParts = [metaLabel, payload.model]
-  if (payload.size) {
+  if (payload.size && payload.size !== "auto") {
     metaParts.push(payload.size)
+  }
+  if (payload.quality && payload.quality !== "auto") {
+    metaParts.push(`质量 ${payload.quality}`)
+  }
+  if (payload.output_format) {
+    metaParts.push(payload.output_format.toUpperCase())
+  }
+  if (payload.background && payload.background !== "auto") {
+    metaParts.push(`背景 ${payload.background}`)
+  }
+  const actualSize = formatActualSize(payload)
+  if (actualSize) {
+    metaParts.push(`实际 ${actualSize}`)
   }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
-  refs.resultStorage.textContent = payload.saved_image_path ? `已落盘到 ${payload.saved_image_path}` : ""
+  refs.resultStorage.textContent = payload.saved_image_path
+    ? `已落盘到 ${payload.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+    : actualSize
+      ? `实际尺寸 ${actualSize}`
+      : ""
+  if (payload.size && actualSize && !isSameSize(payload.size, actualSize)) {
+    setError(`上游返回尺寸为 ${actualSize}，与请求尺寸 ${payload.size} 不一致。图片已按上游原始返回保存，本地没有缩放。`)
+  } else {
+    setError("")
+  }
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
 
@@ -952,10 +1379,20 @@ function setResult(payload, durationMs, requestSource = null) {
 }
 
 function historySummary(item) {
-  if (item.mode === "generate" || item.mode === "variant") {
-    return item.size ? `${item.model} · ${item.size}` : item.model
+  const parts = [item.model]
+  if (item.size && item.size !== "auto") {
+    parts.push(item.size)
   }
-  return item.model
+  if (item.quality && item.quality !== "auto") {
+    parts.push(item.quality)
+  }
+  if (item.output_format) {
+    parts.push(item.output_format.toUpperCase())
+  }
+  if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
+    return parts.filter(Boolean).join(" · ")
+  }
+  return parts.filter(Boolean).join(" · ")
 }
 
 function renderHistory() {
@@ -971,7 +1408,7 @@ function renderHistory() {
     top.className = "history-item-top"
 
     const mode = document.createElement("strong")
-    mode.textContent = item.mode === "variant" ? "延展" : item.mode === "edit" ? "编辑" : "生成"
+    mode.textContent = item.mode === "variant" ? "延展" : item.mode === "edit" ? "编辑" : item.mode === "reference" ? "参考生成" : "生成"
 
     const time = document.createElement("time")
     time.textContent = formatTimestamp(item.createdAt)
@@ -987,7 +1424,7 @@ function renderHistory() {
     top.append(mode, time)
     button.append(top, prompt, meta)
     button.addEventListener("click", () => {
-      if (item.mode === "generate" || item.mode === "variant") {
+      if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
@@ -1013,22 +1450,92 @@ function pushHistory(item) {
   renderHistory()
 }
 
-async function postJSON(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+async function postJSON(url, payload, options = {}) {
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
+  const startedAt = performance.now()
+  const timeoutMs = options.timeoutMs || 190000
+  appendDebugLine("准备发送本地代理请求", {
+    requestId,
+    url,
+    mode: options.mode,
+    ...summarizePayloadForDebug(payload),
   })
+  setProgressPhase("uploading", options.progressLabel || "正在提交请求")
 
-  const data = await response.json().catch(() => {
-    throw new Error("本地服务返回了无法解析的响应。")
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => {
+    appendDebugLine("请求超过等待时间，主动中断", { requestId, timeoutMs })
+    controller.abort()
+  }, timeoutMs)
+
+  const waitingNoticeId = window.setTimeout(() => {
+    appendDebugLine("请求仍在等待响应", {
+      requestId,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    })
+  }, 5000)
+
+  let response
+  try {
+    appendDebugLine("fetch 已发出，等待本地服务响应", { requestId })
+    setProgressPhase("waiting", options.waitingLabel || "等待上游生成")
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+  } catch (error) {
+    appendDebugLine("fetch 失败", {
+      requestId,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      error: error.name === "AbortError" ? "请求超时或被中断" : error.message,
+    })
+    throw error.name === "AbortError"
+      ? new Error("请求等待超时。请查看本地服务终端日志，确认后端是否卡在上游接口。")
+      : error
+  } finally {
+    window.clearTimeout(timeoutId)
+    window.clearTimeout(waitingNoticeId)
+  }
+
+  appendDebugLine("本地服务已返回响应头", {
+    requestId,
+    status: response.status,
+    ok: response.ok,
+    elapsedMs: Math.round(performance.now() - startedAt),
   })
+  setProgressPhase("receiving", "处理上游响应")
+
+  let data
+  try {
+    data = await response.json()
+  } catch {
+    appendDebugLine("响应体不是有效 JSON", { requestId })
+    throw new Error("本地服务返回了无法解析的响应。")
+  }
+
+  appendDebugLine("响应 JSON 解析完成", {
+    requestId,
+    keys: Object.keys(data || {}).join(","),
+    elapsedMs: Math.round(performance.now() - startedAt),
+  })
+  setProgressPhase("receiving", response.ok ? "保存和展示结果" : "整理错误信息")
 
   if (!response.ok) {
+    appendDebugLine("本地代理返回错误", {
+      requestId,
+      error: data.error || "请求失败",
+    })
     throw new Error(data.details ? `${data.error}\n${data.details}` : data.error || "请求失败")
   }
+
+  appendDebugLine("请求完成", {
+    requestId,
+    elapsedMs: Math.round(performance.now() - startedAt),
+  })
 
   return data
 }
@@ -1091,57 +1598,125 @@ async function useImageFile(file) {
   )
 }
 
-async function submitVariantGenerate() {
+async function useMaskFile(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    throw new Error("请选择图片文件。")
+  }
+
+  const dataUrl = await fileToDataURL(file)
+  setEditMaskImage({
+    name: file.name,
+    type: file.type,
+    dataUrl,
+    origin: "mask",
+    description: `${file.name} · ${formatFileSize(file.size)}`,
+  })
+}
+
+async function useGenerateReferenceFile(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    throw new Error("请选择图片文件。")
+  }
+
+  const dataUrl = await fileToDataURL(file)
+  setGenerateReferenceImage(
+    {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+      origin: "reference",
+      description: `${file.name} · ${formatFileSize(file.size)}`,
+    },
+    { showPreview: true },
+  )
+}
+
+async function submitVariantGenerate({ resetLog = true } = {}) {
+  if (resetLog) {
+    resetDebugLog("点击生成按钮：基于当前结果延展")
+  }
   const prompt = refs.generatePromptInput.value
   const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
+  let imageOptions
+  let size
 
   if (!state.lastResultImage) {
+    appendDebugLine("参数校验失败：没有可延展的结果图")
     setError("还没有可延展的结果图。先生成第一张图，再基于它换风格或换方向。")
     return
   }
 
   if (!prompt.trim()) {
+    appendDebugLine("参数校验失败：延展提示词为空")
     setError("延展提示词不能为空。")
     refs.generatePromptInput.focus()
     return
   }
 
   if (!settings.editUrl) {
+    appendDebugLine("参数校验失败：编辑接口 URL 为空")
     setError("基于当前结果延展需要编辑接口 URL。")
     refs.editUrlInput.focus()
+    return
+  }
+
+  try {
+    imageOptions = getOpenAIImageOptions()
+    size = getGenerateSize()
+  } catch (error) {
+    appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
+    setError(error.message)
     return
   }
 
   saveSettings()
   setError("")
   closePreview()
-  setBusy(true, "延展中")
+  setBusy(true, "延展中", { progressLabel: "准备延展图像" })
 
   const requestSource = cloneImageAsset(state.lastResultImage)
+  previewPendingResult({
+    mode: "variant",
+    prompt,
+    model,
+    size,
+    sourceName: requestSource.name || "最新结果",
+  })
   const startedAt = performance.now()
 
   try {
+    appendDebugLine("读取延展输入图片")
+    setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
     const result = await postJSON("/api/edit", {
       api_key: settings.apiKey,
       endpoint_url: settings.editUrl,
       prompt,
       model,
+      size,
+      ...imageOptions,
       image: {
         name: requestSource.name,
         type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
         data_url: requestSourceDataUrl,
       },
+    }, {
+      mode: "variant",
+      progressLabel: "提交延展请求",
+      waitingLabel: "等待上游延展",
     })
     setResult({ ...result, mode: "variant" }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "variant",
       prompt,
       model,
+      size,
+      ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    appendDebugLine("延展请求失败", { error: error.message })
     setError(error.message)
   } finally {
     setBusy(false, "空闲")
@@ -1150,30 +1725,46 @@ async function submitVariantGenerate() {
 
 async function submitGenerate() {
   if (state.generateIntent === "variant") {
-    await submitVariantGenerate()
+    resetDebugLog("点击生成按钮：基于当前结果延展")
+    appendDebugLine("当前生成方式为延展，转入编辑接口")
+    await submitVariantGenerate({ resetLog: false })
     return
   }
+
+  resetDebugLog("点击生成按钮：生成图片")
 
   const prompt = refs.generatePromptInput.value
   const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
 
   if (!prompt.trim()) {
+    appendDebugLine("参数校验失败：生成提示词为空")
     setError("生成提示词不能为空。")
     refs.generatePromptInput.focus()
     return
   }
 
-  if (!settings.generateUrl) {
+  if (!state.generateReferenceImage && !settings.generateUrl) {
+    appendDebugLine("参数校验失败：生成接口 URL 为空")
     setError("请先填写生成接口 URL。")
     refs.generateUrlInput.focus()
     return
   }
 
+  if (state.generateReferenceImage && !settings.editUrl) {
+    appendDebugLine("参数校验失败：参考图生成缺少编辑接口 URL")
+    setError("带参考图生成需要填写编辑接口 URL，因为图片会通过 multipart 发送给上游。")
+    refs.editUrlInput.focus()
+    return
+  }
+
   let size
+  let imageOptions
   try {
     size = getGenerateSize()
+    imageOptions = getOpenAIImageOptions()
   } catch (error) {
+    appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message)
     return
   }
@@ -1181,18 +1772,63 @@ async function submitGenerate() {
   saveSettings()
   setError("")
   closePreview()
-  setBusy(true, "生成中")
+  setBusy(true, "生成中", { progressLabel: "准备生成图像" })
+  previewPendingResult({
+    mode: state.generateReferenceImage ? "reference" : "generate",
+    prompt,
+    model,
+    size,
+    sourceName: state.generateReferenceImage?.name || "",
+  })
 
   const startedAt = performance.now()
 
   try {
+    if (state.generateReferenceImage) {
+      appendDebugLine("读取生成参考图")
+      setProgressPhase("preparing", "读取参考图")
+      const referenceSource = cloneImageAsset(state.generateReferenceImage)
+      const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
+      const result = await postJSON("/api/edit", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.editUrl,
+        prompt,
+        model,
+        size,
+        ...imageOptions,
+        image: {
+          name: referenceSource.name,
+          type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
+          data_url: referenceDataUrl,
+        },
+      }, {
+        mode: "reference",
+        progressLabel: "提交参考图生成",
+        waitingLabel: "等待上游参考生成",
+      })
+      setResult({ ...result, mode: "reference", size }, performance.now() - startedAt, referenceSource)
+      pushHistory({
+        mode: "reference",
+        prompt,
+        model,
+        size,
+        ...imageOptions,
+        createdAt: new Date().toISOString(),
+      })
+      return
+    }
+
     const result = await postJSON("/api/generate", {
       api_key: settings.apiKey,
       endpoint_url: settings.generateUrl,
       prompt,
       model,
       size,
-      n: 1,
+      ...imageOptions,
+    }, {
+      mode: "generate",
+      progressLabel: "提交生成请求",
+      waitingLabel: "等待上游生成",
     })
     setResult(result, performance.now() - startedAt)
     pushHistory({
@@ -1200,9 +1836,11 @@ async function submitGenerate() {
       prompt,
       model,
       size,
+      ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    appendDebugLine("生成请求失败", { error: error.message })
     setError(error.message)
   } finally {
     setBusy(false, "空闲")
@@ -1210,22 +1848,26 @@ async function submitGenerate() {
 }
 
 async function submitEdit() {
+  resetDebugLog("点击编辑按钮：编辑图片")
   const prompt = refs.editPromptInput.value
   const model = refs.editModelInput.value.trim()
   const settings = getSettings()
 
   if (!state.editImage) {
+    appendDebugLine("参数校验失败：没有可编辑图片")
     setError("当前没有可编辑图片。先生成一张图，或手动上传一张图片。")
     return
   }
 
   if (!prompt.trim()) {
+    appendDebugLine("参数校验失败：编辑指令为空")
     setError("编辑指令不能为空。")
     refs.editPromptInput.focus()
     return
   }
 
   if (!settings.editUrl) {
+    appendDebugLine("参数校验失败：编辑接口 URL 为空")
     setError("请先填写编辑接口 URL。")
     refs.editUrlInput.focus()
     return
@@ -1234,14 +1876,22 @@ async function submitEdit() {
   saveSettings()
   setError("")
   closePreview()
-  setBusy(true, "编辑中")
+  setBusy(true, "编辑中", { progressLabel: "准备编辑图像" })
 
   const requestSource = cloneImageAsset(state.editImage)
+  previewPendingResult({
+    mode: "edit",
+    prompt,
+    model,
+    sourceName: requestSource.name || "输入图",
+  })
   const startedAt = performance.now()
 
   try {
+    appendDebugLine("读取编辑输入图片")
+    setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
-    const result = await postJSON("/api/edit", {
+    const requestPayload = {
       api_key: settings.apiKey,
       endpoint_url: settings.editUrl,
       prompt,
@@ -1251,6 +1901,22 @@ async function submitEdit() {
         type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
         data_url: requestSourceDataUrl,
       },
+    }
+
+    if (state.editMaskImage) {
+      appendDebugLine("读取编辑 mask")
+      const maskDataUrl = await ensureAssetDataUrl(state.editMaskImage)
+      requestPayload.mask = {
+        name: state.editMaskImage.name,
+        type: state.editMaskImage.type || inferMimeFromDataUrl(maskDataUrl),
+        data_url: maskDataUrl,
+      }
+    }
+
+    const result = await postJSON("/api/edit", requestPayload, {
+      mode: "edit",
+      progressLabel: "提交编辑请求",
+      waitingLabel: "等待上游编辑",
     })
     setResult(result, performance.now() - startedAt, requestSource)
     pushHistory({
@@ -1260,6 +1926,7 @@ async function submitEdit() {
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    appendDebugLine("编辑请求失败", { error: error.message })
     setError(error.message)
   } finally {
     setBusy(false, "空闲")
@@ -1269,10 +1936,17 @@ async function submitEdit() {
 function clearGenerateForm() {
   refs.generatePromptInput.value = ""
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
-  setGenerateSize(state.serverConfig.default_size || "1024x1024")
+  clearGenerateReferenceImage()
+  setGenerateSize(state.serverConfig.default_size || "auto")
+  refs.qualitySelect.value = "auto"
+  refs.backgroundSelect.value = "auto"
+  refs.outputFormatSelect.value = "png"
+  refs.outputCompressionInput.value = "100"
+  refs.moderationSelect.value = "auto"
   if (!state.lastResultImage) {
     state.generateIntent = "fresh"
   }
+  updateOpenAIOptionUI()
   updatePromptCounters()
   updateGenerateIntentUI()
   scheduleWorkspacePersist()
@@ -1282,6 +1956,7 @@ function clearEditForm() {
   refs.editPromptInput.value = ""
   refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   refs.editImageInput.value = ""
+  clearEditMaskImage()
   updatePromptCounters()
 
   if (!useLastResultAsEditSource({ showPreview: true })) {
@@ -1350,6 +2025,14 @@ function bindPreviewTrigger(element, target) {
 }
 
 function bindEvents() {
+  refs.newTaskButton.addEventListener("click", () => {
+    clearResult()
+    clearGenerateForm()
+    clearEditForm()
+    setMode("generate", { autoLoadLatest: false })
+    refs.generatePromptInput.focus()
+    setError("")
+  })
   refs.saveSettingsButton.addEventListener("click", saveSettings)
   refs.toggleKeyButton.addEventListener("click", () => {
     const isHidden = refs.apiKeyInput.type === "password"
@@ -1364,6 +2047,16 @@ function bindEvents() {
 
   refs.generateTab.addEventListener("click", () => setMode("generate"))
   refs.editTab.addEventListener("click", () => setMode("edit"))
+  refs.navModeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setMode(button.dataset.mode || "generate")
+      if (button.dataset.mode === "edit") {
+        refs.editPromptInput.focus()
+      } else {
+        refs.generatePromptInput.focus()
+      }
+    })
+  })
   refs.freshGenerateMode.addEventListener("click", () => setGenerateIntent("fresh"))
   refs.variantGenerateMode.addEventListener("click", () => {
     if (!state.lastResultImage) {
@@ -1395,8 +2088,25 @@ function bindEvents() {
   refs.generateSizePreset.addEventListener("change", () => {
     if (refs.generateSizePreset.value !== "custom") {
       setGenerateSize(refs.generateSizePreset.value)
+    } else {
+      updateVisualSizePicker("custom")
     }
     scheduleWorkspacePersist()
+  })
+
+  refs.visualSizeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      if (!input.checked) {
+        return
+      }
+      if (input.value === "custom") {
+        refs.generateSizePreset.value = "custom"
+        updateVisualSizePicker("custom")
+      } else {
+        setGenerateSize(input.value)
+      }
+      scheduleWorkspacePersist()
+    })
   })
 
   ;[refs.generateWidthInput, refs.generateHeightInput].forEach((input) => {
@@ -1416,6 +2126,24 @@ function bindEvents() {
       updatePromptCounters()
       updateWorkflowStatus()
       updateGenerateIntentUI()
+      updateOpenAIOptionUI()
+      scheduleWorkspacePersist()
+    })
+  })
+
+  ;[
+    refs.qualitySelect,
+    refs.backgroundSelect,
+    refs.outputFormatSelect,
+    refs.outputCompressionInput,
+    refs.moderationSelect,
+  ].forEach((input) => {
+    input.addEventListener("input", () => {
+      updateOpenAIOptionUI()
+      scheduleWorkspacePersist()
+    })
+    input.addEventListener("change", () => {
+      updateOpenAIOptionUI()
       scheduleWorkspacePersist()
     })
   })
@@ -1434,6 +2162,61 @@ function bindEvents() {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault()
       submitGenerate()
+    }
+  })
+
+  refs.generateReferenceDropzone.addEventListener("click", () => refs.generateReferenceInput.click())
+  refs.generateReferenceDropzone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      refs.generateReferenceInput.click()
+    }
+  })
+  refs.generateReferenceInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await useGenerateReferenceFile(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
+    }
+  })
+  refs.clearGenerateReferenceButton.addEventListener("click", (event) => {
+    event.stopPropagation()
+    clearGenerateReferenceImage()
+    setError("")
+  })
+
+  ;["dragenter", "dragover"].forEach((eventName) => {
+    refs.generateReferenceDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      refs.generateReferenceDropzone.classList.add("dragging")
+    })
+  })
+
+  ;["dragleave", "dragend", "drop"].forEach((eventName) => {
+    refs.generateReferenceDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      if (eventName !== "drop") {
+        refs.generateReferenceDropzone.classList.remove("dragging")
+      }
+    })
+  })
+
+  refs.generateReferenceDropzone.addEventListener("drop", async (event) => {
+    refs.generateReferenceDropzone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await useGenerateReferenceFile(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
     }
   })
 
@@ -1458,6 +2241,66 @@ function bindEvents() {
     }
     try {
       await useImageFile(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
+    }
+  })
+
+  refs.maskDropzone.addEventListener("click", (event) => {
+    if (event.target === refs.clearEditMaskButton) {
+      return
+    }
+    refs.editMaskInput.click()
+  })
+  refs.maskDropzone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      refs.editMaskInput.click()
+    }
+  })
+  refs.editMaskInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await useMaskFile(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
+    }
+  })
+  refs.clearEditMaskButton.addEventListener("click", (event) => {
+    event.stopPropagation()
+    clearEditMaskImage()
+    setError("")
+  })
+
+  ;["dragenter", "dragover"].forEach((eventName) => {
+    refs.maskDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      refs.maskDropzone.classList.add("dragging")
+    })
+  })
+
+  ;["dragleave", "dragend", "drop"].forEach((eventName) => {
+    refs.maskDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      if (eventName !== "drop") {
+        refs.maskDropzone.classList.remove("dragging")
+      }
+    })
+  })
+
+  refs.maskDropzone.addEventListener("drop", async (event) => {
+    refs.maskDropzone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await useMaskFile(file)
       setError("")
     } catch (error) {
       setError(error.message)
@@ -1536,6 +2379,12 @@ function bindEvents() {
       return
     }
 
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault()
+      refs.newTaskButton.click()
+      return
+    }
+
     if (isTypingElement(document.activeElement)) {
       return
     }
@@ -1585,7 +2434,9 @@ async function init() {
 
   if (!restored) {
     updateEditSourceUI()
+    updateEditMaskUI()
     updateGenerateIntentUI()
+    updateOpenAIOptionUI()
     updatePreviewAvailability()
     setMode("generate", { autoLoadLatest: false })
   }

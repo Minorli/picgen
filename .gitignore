@@ -1,6 +1,7 @@
 __pycache__/
 .DS_Store
 .env
+.idea/
 .codex
 .playwright-mcp/
 *.pyc
