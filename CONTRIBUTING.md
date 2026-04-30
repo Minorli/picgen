@@ -13,13 +13,20 @@
 ## 本地运行
 
 ```bash
-python3 app.py
+./scripts/bootstrap.sh
+./scripts/start.sh
 ```
 
 默认地址：
 
 ```text
 http://127.0.0.1:8000
+```
+
+提交前建议运行：
+
+```bash
+./scripts/check.sh
 ```
 
 ## 提交建议
