@@ -17,12 +17,13 @@
 - 当前工作区会保存在浏览器本地，刷新页面后会恢复最近一次的图和输入状态
 - 每次生成/编辑成功后，输出图片会落盘到本地目录，并生成对应的元数据 JSON
 - 界面带有工作流进度、提示词快捷片段和键盘切换，减少来回找控件
-- 只依赖 Python 3 标准库，开箱即可运行
+- 使用 `uv` 管理 Python 依赖和启动命令，后端基于 FastAPI / Uvicorn
 
 ## 启动
 
 ```bash
-python3 app.py
+./scripts/bootstrap.sh
+./scripts/start.sh
 ```
 
 默认启动在 `http://127.0.0.1:8000`。
@@ -30,7 +31,20 @@ python3 app.py
 也可以指定地址和端口：
 
 ```bash
-python3 app.py --host 0.0.0.0 --port 8080
+PICGEN_HOST=0.0.0.0 PICGEN_PORT=8080 ./scripts/start.sh
+```
+
+开发模式支持自动重载：
+
+```bash
+./scripts/dev.sh
+```
+
+运行测试和检查：
+
+```bash
+./scripts/test.sh
+./scripts/check.sh
 ```
 
 ## 可选环境变量
@@ -44,7 +58,7 @@ export PICGEN_DEFAULT_EDIT_URL="https://api.openai.com/v1/images/edits"
 export PICGEN_DEFAULT_MODEL="gpt-image-2"
 export PICGEN_DEFAULT_SIZE="auto"
 export PICGEN_UPSTREAM_USER_AGENT="Mozilla/5.0 ..."
-python3 app.py
+./scripts/start.sh
 ```
 
 说明：
@@ -59,14 +73,14 @@ python3 app.py
 输出图片会保存到：
 
 ```text
-/home/minorli/picgen/data/outputs/YYYYMMDD/
+data/outputs/YYYYMMDD/
 ```
 
 示例：
 
 ```text
-/home/minorli/picgen/data/outputs/20260425/generate-003243-a5152a7e.png
-/home/minorli/picgen/data/outputs/20260425/generate-003243-a5152a7e.json
+data/outputs/20260425/generate-003243-a5152a7e.png
+data/outputs/20260425/generate-003243-a5152a7e.json
 ```
 
 说明：
@@ -101,7 +115,7 @@ python3 app.py
 
 ## 使用方式
 
-1. 启动 `python3 app.py`
+1. 启动 `./scripts/bootstrap.sh && ./scripts/start.sh`
 2. 打开浏览器访问 `http://127.0.0.1:8000`
 3. 在左侧填好 API Key、生成接口 URL、编辑接口 URL
 4. 在“生成图片”里填提示词和模型，直接出图
