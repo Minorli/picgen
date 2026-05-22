@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 图像生成 / 编辑接口的本地工作台，**1.0** 起整体重写为企业级架构。它把
+一个面向 OpenAI 图像生成 / 编辑接口的本地工作台，**0.9.1** 起整体重写为企业级架构。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -10,7 +10,7 @@
 - 私有部署，对接兼容 OpenAI 协议的国内/自建上游
 - 嵌入企业内部工具链，作为带审计、限流、健康检查的接口网关
 
-## 1.0 主要特性
+## 0.9.1 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -60,11 +60,11 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t picgen:1.0 .
+docker build -t picgen:0.9.1 .
 docker run --rm -p 8000:8000 \
   -e PICGEN_DEFAULT_API_KEY=sk-... \
   -v $(pwd)/data:/app/data \
-  picgen:1.0
+  picgen:0.9.1
 ```
 
 或：
