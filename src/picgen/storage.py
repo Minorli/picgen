@@ -1,28 +1,43 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import shutil
+import tempfile
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from urllib import parse
 
 from .errors import APIError
+from .logging_config import get_logger, log_event
+
+logger = get_logger("picgen.storage")
+
+
+_MIME_TO_EXT: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 def extension_for_mime(image_mime: str) -> str:
     normalized = image_mime.lower().split(";", 1)[0].strip()
-    mapping = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/jpg": ".jpg",
-        "image/webp": ".webp",
-        "image/gif": ".gif",
-    }
-    return mapping.get(normalized, ".png")
+    return _MIME_TO_EXT.get(normalized, ".png")
+
+
+_FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00"})
 
 
 def sanitize_filename(name: str) -> str:
-    cleaned = "".join(char for char in name if char not in {'"', "\r", "\n", "\\"}).strip()
+    cleaned = "".join(char for char in name if char not in _FORBIDDEN_FILENAME_CHARS).strip()
+    cleaned = cleaned.replace("..", "")
+    cleaned = cleaned.replace(":", "-")
     return cleaned or "image.png"
 
 
@@ -48,19 +63,8 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
     if image_bytes.startswith(b"\xff\xd8"):
         index = 2
         sof_markers = {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
         }
         while index + 9 < len(image_bytes):
             if image_bytes[index] != 0xFF:
@@ -97,15 +101,35 @@ def storage_url_for_path(data_dir: Path, file_path: Path) -> str:
 
 def resolve_storage_path(data_dir: Path, relative_path: str) -> Path:
     decoded_path = parse.unquote(relative_path).lstrip("/")
+    # Disallow absolute paths or parent-only references early.
+    if Path(decoded_path).is_absolute():
+        raise APIError(HTTPStatus.FORBIDDEN, "非法文件路径", code="forbidden")
     target_path = (data_dir / decoded_path).resolve()
     data_root = data_dir.resolve()
-
     try:
         target_path.relative_to(data_root)
     except ValueError as exc:
-        raise APIError(403, "非法文件路径") from exc
-
+        raise APIError(HTTPStatus.FORBIDDEN, "非法文件路径", code="forbidden") from exc
     return target_path
+
+
+def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=target.suffix, dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_path.replace(target)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_write_text(target: Path, payload: str) -> None:
+    _atomic_write_bytes(target, payload.encode("utf-8"))
 
 
 def save_output_image(
@@ -117,26 +141,37 @@ def save_output_image(
     image_mime: str,
     metadata: dict[str, object],
 ) -> dict[str, object]:
-    day_dir = outputs_dir / datetime.now().strftime("%Y%m%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
-
-    stem = f"{mode}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    now = datetime.now()
+    day_dir = outputs_dir / now.strftime("%Y%m%d")
+    stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
     metadata_path = day_dir / f"{stem}.json"
     image_dimensions = detect_image_dimensions(image_bytes)
 
-    image_path.write_bytes(image_bytes)
-    metadata_path.write_text(
+    _atomic_write_bytes(image_path, image_bytes)
+    _atomic_write_text(
+        metadata_path,
         json.dumps(
             {
                 **metadata,
                 "saved_image_width": image_dimensions[0] if image_dimensions else None,
                 "saved_image_height": image_dimensions[1] if image_dimensions else None,
+                "saved_image_bytes": len(image_bytes),
             },
             ensure_ascii=False,
             indent=2,
         ),
-        encoding="utf-8",
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "storage_saved",
+        mode=mode,
+        path=str(image_path),
+        bytes=len(image_bytes),
+        width=image_dimensions[0] if image_dimensions else None,
+        height=image_dimensions[1] if image_dimensions else None,
     )
 
     return {
@@ -149,3 +184,24 @@ def save_output_image(
         "saved_metadata_path": str(metadata_path),
         "saved_metadata_url": storage_url_for_path(data_dir, metadata_path),
     }
+
+
+def prune_old_outputs(outputs_dir: Path, retention_days: int) -> int:
+    """Delete day-folders older than retention_days. Returns count removed."""
+
+    if retention_days <= 0 or not outputs_dir.exists():
+        return 0
+    cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+    removed = 0
+    for entry in outputs_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            day = datetime.strptime(entry.name, "%Y%m%d").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        if day < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+            log_event(logger, logging.INFO, "storage_pruned", folder=str(entry))
+    return removed

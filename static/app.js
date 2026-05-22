@@ -6,6 +6,8 @@ const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
 const WORKSPACE_KEY = "current-workspace"
 const WORKSPACE_VERSION = 1
+const REQUEST_TIMEOUT_MS = 10 * 60 * 1000 + 30 * 1000
+const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.5"])
 
 const SIZE_PRESETS = [
   "auto",
@@ -16,6 +18,7 @@ const SIZE_PRESETS = [
   "1024x1024",
   "1536x1024",
   "1024x1536",
+  "1088x2240",
   "2048x2048",
   "3840x2160",
   "2160x3840",
@@ -55,6 +58,10 @@ const refs = {
   apiKeyInput: document.querySelector("#apiKeyInput"),
   generateUrlInput: document.querySelector("#generateUrlInput"),
   editUrlInput: document.querySelector("#editUrlInput"),
+  responsesUrlInput: document.querySelector("#responsesUrlInput"),
+  responsesModelInput: document.querySelector("#responsesModelInput"),
+  imageTransportInputs: Array.from(document.querySelectorAll('input[name="imageTransport"]')),
+  imageTransportHint: document.querySelector("#imageTransportHint"),
   settingsHint: document.querySelector("#settingsHint"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   toggleKeyButton: document.querySelector("#toggleKeyButton"),
@@ -270,6 +277,8 @@ function summarizePayloadForDebug(payload) {
   return {
     endpoint: payload.endpoint_url,
     model: payload.model,
+    transport: payload.transport,
+    responsesModel: payload.responses_model,
     size: payload.size,
     quality: payload.quality,
     background: payload.background,
@@ -317,6 +326,8 @@ function createWorkspaceSnapshot() {
       moderation: refs.moderationSelect.value,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
+      responsesModel: refs.responsesModelInput.value,
+      imageTransport: getImageTransport(),
     },
     result: {
       promptText: refs.resultPrompt.textContent,
@@ -389,6 +400,10 @@ async function restoreWorkspaceState() {
 
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
+  refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
+  if (forms.imageTransport) {
+    setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
+  }
   updatePromptCounters()
 
   const result = snapshot.result || {}
@@ -558,7 +573,11 @@ function setFlowState(element, stateName) {
 
 function updateWorkflowStatus() {
   const hasConnection = Boolean(
-    refs.generateUrlInput.value.trim() || refs.editUrlInput.value.trim() || refs.apiKeyInput.value.trim() || state.serverConfig?.has_default_api_key,
+    refs.generateUrlInput.value.trim()
+      || refs.editUrlInput.value.trim()
+      || refs.responsesUrlInput.value.trim()
+      || refs.apiKeyInput.value.trim()
+      || state.serverConfig?.has_default_api_key,
   )
   const hasResult = Boolean(state.resultPreview?.src)
   const hasGenerated = Boolean(hasResult && ["generate", "variant"].includes(state.lastResultMode))
@@ -602,6 +621,9 @@ function saveSettings() {
     apiKey: refs.apiKeyInput.value.trim(),
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
+    responsesUrl: refs.responsesUrlInput.value.trim(),
+    responsesModel: refs.responsesModelInput.value.trim(),
+    imageTransport: getImageTransport(),
   }
   saveJSON(STORAGE_KEY, payload)
   flashHint("设置已保存到当前浏览器。")
@@ -614,16 +636,48 @@ function loadSettings() {
   refs.apiKeyInput.value = local.apiKey || legacy.apiKey || ""
   refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
   refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
+  refs.responsesUrlInput.value = local.responsesUrl || state.serverConfig.responses_url || ""
+  refs.responsesModelInput.value = normalizeResponsesModel(local.responsesModel || state.serverConfig.default_responses_model)
 
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   setGenerateSize(state.serverConfig.default_size || "auto")
+  setImageTransport(local.imageTransport === "responses" ? "responses" : "images")
 
   if (state.serverConfig.has_default_api_key && !local.apiKey) {
     refs.settingsHint.textContent = "服务端已预设默认 API Key。你也可以在这里覆盖它。"
   }
 
   updateWorkflowStatus()
+}
+
+function getImageTransport() {
+  const checked = refs.imageTransportInputs.find((input) => input.checked)
+  return checked?.value === "responses" ? "responses" : "images"
+}
+
+function setImageTransport(value) {
+  const normalized = value === "responses" ? "responses" : "images"
+  refs.imageTransportInputs.forEach((input) => {
+    input.checked = input.value === normalized
+  })
+  updateImageTransportUI()
+}
+
+function updateImageTransportUI() {
+  const transport = getImageTransport()
+  const isResponses = transport === "responses"
+  if (refs.imageTransportHint) {
+    refs.imageTransportHint.textContent = isResponses
+      ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.4），用于对接不支持 Images Edit 的兼容代理。"
+      : "编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。"
+  }
+  const editFieldset = refs.responsesUrlInput?.closest("label")
+  const modelFieldset = refs.responsesModelInput?.closest("label")
+  ;[editFieldset, modelFieldset].forEach((node) => {
+    if (!node) return
+    node.classList.toggle("is-dimmed", !isResponses)
+  })
 }
 
 function flashHint(text) {
@@ -643,7 +697,44 @@ function getSettings() {
     apiKey: refs.apiKeyInput.value.trim(),
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
+    responsesUrl: refs.responsesUrlInput.value.trim(),
+    responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
+    imageTransport: getImageTransport(),
   }
+}
+
+function requireEditSettings(settings, contextLabel) {
+  if (!settings.editUrl) {
+    appendDebugLine("参数校验失败：编辑接口 URL 为空")
+    setError(`${contextLabel}需要填写编辑接口 URL（/v1/images/edits）。`)
+    refs.editUrlInput.focus()
+    return false
+  }
+  return true
+}
+
+function normalizeResponsesModel(value) {
+  const model = String(value || "").trim()
+  if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
+    return state.serverConfig?.default_responses_model || "gpt-5.4"
+  }
+  return model
+}
+
+function requireResponsesSettings(settings, contextLabel) {
+  if (!settings.responsesUrl) {
+    appendDebugLine("参数校验失败：Responses 图像接口 URL 为空")
+    setError(`${contextLabel}需要填写 Responses 图像接口 URL。`)
+    refs.responsesUrlInput.focus()
+    return false
+  }
+  if (!settings.responsesModel) {
+    appendDebugLine("参数校验失败：Responses 主模型为空")
+    setError(`${contextLabel}需要填写 Responses 主模型。`)
+    refs.responsesModelInput.focus()
+    return false
+  }
+  return true
 }
 
 function formatTimestamp(isoLike) {
@@ -1335,6 +1426,13 @@ function setResult(payload, durationMs, requestSource = null) {
 
   const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : payload.mode === "reference" ? "参考生成" : "生成"
   const metaParts = [metaLabel, payload.model]
+  if (payload.transport === "responses-image") {
+    metaParts.push("Responses")
+  } else if (payload.transport === "images-edit") {
+    metaParts.push("Images Edit")
+  } else if (payload.transport === "images-generate") {
+    metaParts.push("Images Gen")
+  }
   if (payload.size && payload.size !== "auto") {
     metaParts.push(payload.size)
   }
@@ -1380,6 +1478,9 @@ function setResult(payload, durationMs, requestSource = null) {
 
 function historySummary(item) {
   const parts = [item.model]
+  if (item.transport === "responses-image") {
+    parts.push("Responses")
+  }
   if (item.size && item.size !== "auto") {
     parts.push(item.size)
   }
@@ -1428,14 +1529,22 @@ function renderHistory() {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
-        refs.generateModelInput.value = item.model
+        if (item.transport === "responses-image") {
+          refs.responsesModelInput.value = item.model
+        } else {
+          refs.generateModelInput.value = item.model
+        }
         setGenerateSize(item.size || state.serverConfig.default_size || "1024x1024")
         updatePromptCounters()
         refs.generatePromptInput.focus()
       } else {
         setMode("edit")
         refs.editPromptInput.value = item.prompt
-        refs.editModelInput.value = item.model
+        if (item.transport === "responses-image") {
+          refs.responsesModelInput.value = item.model
+        } else {
+          refs.editModelInput.value = item.model
+        }
         updatePromptCounters()
         refs.editPromptInput.focus()
       }
@@ -1453,7 +1562,7 @@ function pushHistory(item) {
 async function postJSON(url, payload, options = {}) {
   const requestId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
   const startedAt = performance.now()
-  const timeoutMs = options.timeoutMs || 190000
+  const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS
   appendDebugLine("准备发送本地代理请求", {
     requestId,
     url,
@@ -1636,8 +1745,11 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
   const prompt = refs.generatePromptInput.value
-  const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+  const model = useResponses ? settings.responsesModel : imageModel
+  const transport = useResponses ? "responses-image" : "images-edit"
   let imageOptions
   let size
 
@@ -1654,10 +1766,11 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     return
   }
 
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError("基于当前结果延展需要编辑接口 URL。")
-    refs.editUrlInput.focus()
+  if (useResponses) {
+    if (!requireResponsesSettings(settings, "基于当前结果延展")) {
+      return
+    }
+  } else if (!requireEditSettings(settings, "基于当前结果延展")) {
     return
   }
 
@@ -1689,28 +1802,51 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     appendDebugLine("读取延展输入图片")
     setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
-    const result = await postJSON("/api/edit", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.editUrl,
-      prompt,
-      model,
-      size,
-      ...imageOptions,
-      image: {
-        name: requestSource.name,
-        type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
-        data_url: requestSourceDataUrl,
-      },
-    }, {
-      mode: "variant",
-      progressLabel: "提交延展请求",
-      waitingLabel: "等待上游延展",
-    })
-    setResult({ ...result, mode: "variant" }, performance.now() - startedAt, requestSource)
+    const imagePart = {
+      name: requestSource.name,
+      type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
+      data_url: requestSourceDataUrl,
+    }
+    let result
+    if (useResponses) {
+      result = await postJSON("/api/responses-image", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.responsesUrl,
+        prompt,
+        model,
+        mode: "variant",
+        transport: "responses-image",
+        allow_inline_fallback: true,
+        size,
+        ...imageOptions,
+        image: imagePart,
+      }, {
+        mode: "variant",
+        progressLabel: "提交延展请求",
+        waitingLabel: "等待上游延展",
+      })
+    } else {
+      result = await postJSON("/api/edit", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.editUrl,
+        prompt,
+        model,
+        mode: "variant",
+        size,
+        ...imageOptions,
+        image: imagePart,
+      }, {
+        mode: "variant",
+        progressLabel: "提交延展请求",
+        waitingLabel: "等待上游延展",
+      })
+    }
+    setResult({ ...result, mode: "variant", transport }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "variant",
       prompt,
       model,
+      transport,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
@@ -1734,8 +1870,10 @@ async function submitGenerate() {
   resetDebugLog("点击生成按钮：生成图片")
 
   const prompt = refs.generatePromptInput.value
-  const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+  const model = state.generateReferenceImage && useResponses ? settings.responsesModel : imageModel
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -1751,11 +1889,14 @@ async function submitGenerate() {
     return
   }
 
-  if (state.generateReferenceImage && !settings.editUrl) {
-    appendDebugLine("参数校验失败：参考图生成缺少编辑接口 URL")
-    setError("带参考图生成需要填写编辑接口 URL，因为图片会通过 multipart 发送给上游。")
-    refs.editUrlInput.focus()
-    return
+  if (state.generateReferenceImage) {
+    if (useResponses) {
+      if (!requireResponsesSettings(settings, "带参考图生成")) {
+        return
+      }
+    } else if (!requireEditSettings(settings, "带参考图生成")) {
+      return
+    }
   }
 
   let size
@@ -1789,28 +1930,52 @@ async function submitGenerate() {
       setProgressPhase("preparing", "读取参考图")
       const referenceSource = cloneImageAsset(state.generateReferenceImage)
       const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
-      const result = await postJSON("/api/edit", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt,
-        model,
-        size,
-        ...imageOptions,
-        image: {
-          name: referenceSource.name,
-          type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
-          data_url: referenceDataUrl,
-        },
-      }, {
-        mode: "reference",
-        progressLabel: "提交参考图生成",
-        waitingLabel: "等待上游参考生成",
-      })
-      setResult({ ...result, mode: "reference", size }, performance.now() - startedAt, referenceSource)
+      const referencePart = {
+        name: referenceSource.name,
+        type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
+        data_url: referenceDataUrl,
+      }
+      const transport = useResponses ? "responses-image" : "images-edit"
+      let result
+      if (useResponses) {
+        result = await postJSON("/api/responses-image", {
+          api_key: settings.apiKey,
+          endpoint_url: settings.responsesUrl,
+          prompt,
+          model: settings.responsesModel,
+          mode: "reference",
+          transport: "responses-image",
+          allow_inline_fallback: true,
+          size,
+          ...imageOptions,
+          image: referencePart,
+        }, {
+          mode: "reference",
+          progressLabel: "提交参考图生成",
+          waitingLabel: "等待上游参考生成",
+        })
+      } else {
+        result = await postJSON("/api/edit", {
+          api_key: settings.apiKey,
+          endpoint_url: settings.editUrl,
+          prompt,
+          model: imageModel,
+          mode: "reference",
+          size,
+          ...imageOptions,
+          image: referencePart,
+        }, {
+          mode: "reference",
+          progressLabel: "提交参考图生成",
+          waitingLabel: "等待上游参考生成",
+        })
+      }
+      setResult({ ...result, mode: "reference", size, transport }, performance.now() - startedAt, referenceSource)
       pushHistory({
         mode: "reference",
         prompt,
-        model,
+        model: useResponses ? settings.responsesModel : imageModel,
+        transport,
         size,
         ...imageOptions,
         createdAt: new Date().toISOString(),
@@ -1850,8 +2015,11 @@ async function submitGenerate() {
 async function submitEdit() {
   resetDebugLog("点击编辑按钮：编辑图片")
   const prompt = refs.editPromptInput.value
-  const model = refs.editModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
+  const model = useResponses ? settings.responsesModel : imageModel
+  const transport = useResponses ? "responses-image" : "images-edit"
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -1866,10 +2034,11 @@ async function submitEdit() {
     return
   }
 
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError("请先填写编辑接口 URL。")
-    refs.editUrlInput.focus()
+  if (useResponses) {
+    if (!requireResponsesSettings(settings, "编辑图像")) {
+      return
+    }
+  } else if (!requireEditSettings(settings, "编辑图像")) {
     return
   }
 
@@ -1891,38 +2060,67 @@ async function submitEdit() {
     appendDebugLine("读取编辑输入图片")
     setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
-    const requestPayload = {
-      api_key: settings.apiKey,
-      endpoint_url: settings.editUrl,
-      prompt,
-      model,
-      image: {
-        name: requestSource.name,
-        type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
-        data_url: requestSourceDataUrl,
-      },
+    const imagePart = {
+      name: requestSource.name,
+      type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
+      data_url: requestSourceDataUrl,
     }
 
+    let maskPart = null
     if (state.editMaskImage) {
       appendDebugLine("读取编辑 mask")
       const maskDataUrl = await ensureAssetDataUrl(state.editMaskImage)
-      requestPayload.mask = {
+      maskPart = {
         name: state.editMaskImage.name,
         type: state.editMaskImage.type || inferMimeFromDataUrl(maskDataUrl),
         data_url: maskDataUrl,
       }
     }
 
-    const result = await postJSON("/api/edit", requestPayload, {
-      mode: "edit",
-      progressLabel: "提交编辑请求",
-      waitingLabel: "等待上游编辑",
-    })
-    setResult(result, performance.now() - startedAt, requestSource)
+    let result
+    if (useResponses) {
+      const requestPayload = {
+        api_key: settings.apiKey,
+        endpoint_url: settings.responsesUrl,
+        prompt,
+        model,
+        mode: "edit",
+        transport: "responses-image",
+        allow_inline_fallback: true,
+        image: imagePart,
+      }
+      if (maskPart) {
+        requestPayload.mask = maskPart
+      }
+      result = await postJSON("/api/responses-image", requestPayload, {
+        mode: "edit",
+        progressLabel: "提交 Responses 编辑请求",
+        waitingLabel: "等待 Responses 图像流",
+      })
+    } else {
+      const requestPayload = {
+        api_key: settings.apiKey,
+        endpoint_url: settings.editUrl,
+        prompt,
+        model: imageModel,
+        mode: "edit",
+        image: imagePart,
+      }
+      if (maskPart) {
+        requestPayload.mask = maskPart
+      }
+      result = await postJSON("/api/edit", requestPayload, {
+        mode: "edit",
+        progressLabel: "提交编辑请求",
+        waitingLabel: "等待上游编辑",
+      })
+    }
+    setResult({ ...result, mode: "edit", transport }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "edit",
       prompt,
       model,
+      transport,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
@@ -2039,6 +2237,12 @@ function bindEvents() {
     refs.apiKeyInput.type = isHidden ? "text" : "password"
     refs.toggleKeyButton.textContent = isHidden ? "隐藏" : "显示"
   })
+  refs.imageTransportInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      updateImageTransportUI()
+      scheduleWorkspacePersist()
+    })
+  })
   refs.clearHistoryButton.addEventListener("click", () => {
     state.history = []
     saveJSON(HISTORY_KEY, state.history)
@@ -2121,6 +2325,7 @@ function bindEvents() {
     refs.generateModelInput,
     refs.editPromptInput,
     refs.editModelInput,
+    refs.responsesModelInput,
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updatePromptCounters()
@@ -2148,7 +2353,7 @@ function bindEvents() {
     })
   })
 
-  ;[refs.generateUrlInput, refs.editUrlInput, refs.apiKeyInput].forEach((input) => {
+  ;[refs.generateUrlInput, refs.editUrlInput, refs.responsesUrlInput, refs.responsesModelInput, refs.apiKeyInput].forEach((input) => {
     input.addEventListener("input", updateWorkflowStatus)
   })
 
@@ -2419,9 +2624,11 @@ async function init() {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
     state.serverConfig = {
       default_model: "gpt-image-2",
+      default_responses_model: "gpt-5.4",
       default_size: "1024x1024",
       generate_url: "",
       edit_url: "",
+      responses_url: "",
       has_default_api_key: false,
     }
   }

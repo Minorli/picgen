@@ -1115,10 +1115,71 @@ select:focus,
   padding: 14px;
 }
 
+.transport-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 4px 0 10px;
+  background: rgba(15, 132, 102, 0.06);
+  border: 1px solid rgba(15, 132, 102, 0.16);
+  border-radius: 10px;
+}
+
+.transport-toggle .transport-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.transport-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.transport-option:hover {
+  background: rgba(15, 132, 102, 0.08);
+}
+
+.transport-option input[type="radio"] {
+  accent-color: var(--primary, #108566);
+  margin: 0;
+}
+
+.transport-option span {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.transport-option small {
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  margin-top: 1px;
+}
+
 .settings-grid {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(180px, 0.8fr) repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.settings-grid label.is-dimmed {
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.settings-grid label.is-dimmed:hover,
+.settings-grid label.is-dimmed:focus-within {
+  opacity: 1;
 }
 
 #generatePanel,

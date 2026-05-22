@@ -112,6 +112,10 @@
                   <option value="gpt-image-2"></option>
                   <option value="gpt-image-1.5"></option>
                   <option value="gpt-image-1"></option>
+                  <option value="gpt-5.5"></option>
+                  <option value="gpt-5.5-pro"></option>
+                  <option value="gpt-5.4"></option>
+                  <option value="gpt-5"></option>
                 </datalist>
 
                 <h2 class="compact-title">图像尺寸</h2>
@@ -119,6 +123,7 @@
                   <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
                   <label><input type="radio" name="visualSize" value="1024x1536"><span>2:3<small>1024x1536</small></span></label>
                   <label><input type="radio" name="visualSize" value="1536x1024"><span>3:2<small>1536x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1088x2240"><span>6人游<small>1088x2240</small></span></label>
                   <label><input type="radio" name="visualSize" value="3840x2160"><span>16:9<small>3840x2160</small></span></label>
                   <label><input type="radio" name="visualSize" value="custom"><span>自定义<small>W × H</small></span></label>
                 </div>
@@ -135,6 +140,7 @@
                       <option value="1024x1024">1024 x 1024</option>
                       <option value="1536x1024">横版 1536 x 1024</option>
                       <option value="1024x1536">竖版 1024 x 1536</option>
+                      <option value="1088x2240">6人游 1088 x 2240</option>
                       <option value="2048x2048">2K 2048 x 2048</option>
                       <option value="3840x2160">4K 横版 3840 x 2160</option>
                       <option value="2160x3840">4K 竖版 2160 x 3840</option>
@@ -340,6 +346,18 @@
                 <h2>连接设置</h2>
                 <button id="saveSettingsButton" class="ghost-button" type="button">保存本地配置</button>
               </div>
+              <div class="transport-toggle" role="radiogroup" aria-label="图像通道">
+                <span class="transport-label">图像通道</span>
+                <label class="transport-option">
+                  <input type="radio" name="imageTransport" value="images" checked>
+                  <span>Images API<small>gpt-image-2 · 推荐</small></span>
+                </label>
+                <label class="transport-option">
+                  <input type="radio" name="imageTransport" value="responses">
+                  <span>Responses API<small>gpt-5.4 · 兼容兜底</small></span>
+                </label>
+              </div>
+              <p id="imageTransportHint" class="helper-text">编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。</p>
               <div class="settings-grid">
                 <label>
                   <span>API Key</span>
@@ -355,6 +373,14 @@
                 <label>
                   <span>编辑接口 URL</span>
                   <input id="editUrlInput" type="url" placeholder="https://.../v1/images/edits" spellcheck="false">
+                </label>
+                <label>
+                  <span>Responses 图像接口 URL</span>
+                  <input id="responsesUrlInput" type="url" placeholder="https://.../v1/responses" spellcheck="false">
+                </label>
+                <label>
+                  <span>Responses 主模型</span>
+                  <input id="responsesModelInput" type="text" placeholder="gpt-5.4" spellcheck="false" list="openaiImageModels">
                 </label>
               </div>
               <p id="settingsHint" class="helper-text">设置会保存在当前浏览器。服务端如果已预设默认 key，这里可以留空。</p>
@@ -424,6 +450,6 @@
       </div>
     </div>
 
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=images-default-20260522g" type="module"></script>
   </body>
 </html>

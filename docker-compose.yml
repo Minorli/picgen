@@ -1,0 +1,21 @@
+services:
+  picgen:
+    build: .
+    image: picgen:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    environment:
+      PICGEN_HOST: "0.0.0.0"
+      PICGEN_PORT: "8000"
+      PICGEN_LOG_FORMAT: "json"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
