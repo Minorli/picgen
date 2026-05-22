@@ -689,7 +689,7 @@ function saveSettings() {
   }
   saveJSON(STORAGE_KEY, payload)
   refs.apiKeyInput.value = ""
-  flashHint(newApiKey ? "新 API Key 已保存；输入框已清空，不会回显 key。" : "设置已保存；API Key 未变更。")
+  flashHint(newApiKey ? "新 API Key 已保存在当前浏览器本地；输入框已清空，不会回显 key。" : "设置已保存；API Key 未变更。")
   updateWorkflowStatus()
 }
 
@@ -709,7 +709,7 @@ function loadSettings() {
   setImageTransport(local.imageTransport === "responses" ? "responses" : "images")
 
   if (state.savedApiKey) {
-    refs.settingsHint.textContent = "浏览器已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
+    refs.settingsHint.textContent = "浏览器本地已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
   } else if (state.serverConfig.has_default_api_key) {
     refs.settingsHint.textContent = "服务端已预设默认 API Key。你可以在这里填入新 key 覆盖。"
   }
@@ -751,14 +751,14 @@ function flashHint(text) {
   window.clearTimeout(flashHint.timeoutId)
   flashHint.timeoutId = window.setTimeout(() => {
     if (state.savedApiKey) {
-      refs.settingsHint.textContent = "浏览器已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
+      refs.settingsHint.textContent = "浏览器本地已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
       return
     }
     if (state.serverConfig?.has_default_api_key) {
       refs.settingsHint.textContent = "服务端已预设默认 API Key。你可以在这里填入新 key 覆盖。"
       return
     }
-    refs.settingsHint.textContent = "设置会保存在当前浏览器。API Key 输入框只用于填入新 key。"
+    refs.settingsHint.textContent = "API Key 仅保存在当前浏览器本地存储；输入框只用于填入新 key，不会回显现有 key。"
   }, 2200)
 }
 

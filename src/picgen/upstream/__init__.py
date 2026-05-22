@@ -15,6 +15,7 @@ from .client import (
 )
 from .errors import compact_log_text, extract_error_message
 from .payload import (
+    compact_raw_response,
     decode_base64_blob,
     ensure_json_object,
     extract_response_image_item,
@@ -43,6 +44,7 @@ __all__ = [
     "UpstreamClient",
     "ascii_multipart_filename",
     "compact_log_text",
+    "compact_raw_response",
     "decode_base64_blob",
     "encode_multipart",
     "ensure_json_object",

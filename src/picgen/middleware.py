@@ -26,6 +26,19 @@ logger = get_logger("picgen.middleware")
 RequestHandler = Callable[[Request], Awaitable[Response]]
 
 
+def _single_message_receive(message: dict[str, Any]) -> Callable[[], Awaitable[dict[str, Any]]]:
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return message
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return receive
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """Assign a stable request id, expose it on response headers and logs."""
 
@@ -64,36 +77,94 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            (
+                "default-src 'self'; "
+                "script-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "connect-src 'self'; "
+                "font-src 'self' data:; "
+                "object-src 'none'; "
+                "base-uri 'self'; "
+                "frame-ancestors 'none'"
+            ),
+        )
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         return response
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    """Reject requests whose Content-Length exceeds the configured maximum."""
+class BodySizeLimitMiddleware:
+    """Reject oversized requests before route parsing.
+
+    Content-Length is only a fast path. For chunked requests or missing headers
+    we read up to the configured limit, then replay the buffered body downstream.
+    The buffer is bounded by max_bytes, which is already the configured safety cap.
+    """
 
     def __init__(self, app: Any, *, max_bytes: int) -> None:
-        super().__init__(app)
+        self.app = app
         self.max_bytes = max_bytes
 
-    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
-        if request.method.upper() in {"POST", "PUT", "PATCH"}:
-            content_length = request.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > self.max_bytes:
-                        return _error_response(
-                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                            f"请求体超过最大允许大小 {self.max_bytes} 字节",
-                            code="payload_too_large",
-                        )
-                except ValueError:
-                    return _error_response(
-                        HTTPStatus.BAD_REQUEST,
-                        "无效的 Content-Length",
-                        code="bad_request",
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or str(scope.get("method", "")).upper() not in {"POST", "PUT", "PATCH"}:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin1").lower(): value.decode("latin1")
+            for key, value in scope.get("headers", [])
+        }
+        content_length = headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    response = _error_response(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        f"请求体超过最大允许大小 {self.max_bytes} 字节",
+                        code="payload_too_large",
                     )
-        return await call_next(request)
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = _error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "无效的 Content-Length",
+                    code="bad_request",
+                )
+                await response(scope, receive, send)
+                return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                await self.app(scope, _single_message_receive(message), send)
+                return
+            if message.get("type") != "http.request":
+                continue
+
+            chunk = message.get("body", b"")
+            if chunk:
+                body.extend(chunk)
+            if len(body) > self.max_bytes:
+                response = _error_response(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    f"请求体超过最大允许大小 {self.max_bytes} 字节",
+                    code="payload_too_large",
+                )
+                await response(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        await self.app(scope, _single_message_receive({
+            "type": "http.request",
+            "body": bytes(body),
+            "more_body": False,
+        }), send)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

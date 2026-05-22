@@ -10,6 +10,7 @@ from picgen.errors import APIError
 from picgen.storage import (
     detect_image_dimensions,
     detect_image_mime,
+    extension_for_mime,
     prune_old_outputs,
     resolve_storage_path,
     sanitize_filename,
@@ -51,6 +52,12 @@ def test_detect_image_mime_recognises_signatures() -> None:
     assert detect_image_mime(b"\xff\xd8\xff") == "image/jpeg"
     assert detect_image_mime(b"GIF89a000") == "image/gif"
     assert detect_image_mime(b"RIFF0000WEBPVP8") == "image/webp"
+    assert detect_image_mime(b"not-an-image") == "application/octet-stream"
+
+
+def test_extension_for_unknown_mime_uses_bin() -> None:
+    assert extension_for_mime("application/octet-stream") == ".bin"
+    assert extension_for_mime("image/avif") == ".bin"
 
 
 def test_sanitize_filename_strips_unsafe_characters() -> None:
