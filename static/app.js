@@ -6,6 +6,9 @@ const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
 const WORKSPACE_KEY = "current-workspace"
 const WORKSPACE_VERSION = 1
+const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
+const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
+const STYLE_TRANSFER_SAMPLE_COUNT = 3
 
 const SIZE_PRESETS = [
   "auto",
@@ -16,6 +19,7 @@ const SIZE_PRESETS = [
   "1024x1024",
   "1536x1024",
   "1024x1536",
+  "1088x2240",
   "2048x2048",
   "3840x2160",
   "2160x3840",
@@ -28,6 +32,8 @@ const state = {
   editImage: null,
   editMaskImage: null,
   generateReferenceImage: null,
+  styleReferenceImage: null,
+  materialReferenceImage: null,
   displayedSourceImage: null,
   history: [],
   lastResultPrompt: "",
@@ -36,10 +42,14 @@ const state = {
   lastResultMode: null,
   currentComparisonSource: null,
   resultPreview: null,
+  resultCandidates: [],
+  selectedCandidateIndex: 0,
   progressTimer: null,
   progressStartedAt: 0,
   progressPhase: "idle",
   progressLabel: "",
+  progressExpectedCount: 1,
+  progressEstimatedSecondsPerImage: 210,
   preview: {
     mode: "single",
     target: "result",
@@ -55,9 +65,12 @@ const refs = {
   apiKeyInput: document.querySelector("#apiKeyInput"),
   generateUrlInput: document.querySelector("#generateUrlInput"),
   editUrlInput: document.querySelector("#editUrlInput"),
+  responsesUrlInput: document.querySelector("#responsesUrlInput"),
+  responsesModelInput: document.querySelector("#responsesModelInput"),
+  imageTransportInputs: Array.from(document.querySelectorAll('input[name="imageTransport"]')),
+  imageTransportHint: document.querySelector("#imageTransportHint"),
   settingsHint: document.querySelector("#settingsHint"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
-  toggleKeyButton: document.querySelector("#toggleKeyButton"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
   newTaskButton: document.querySelector("#newTaskButton"),
   navModeButtons: Array.from(document.querySelectorAll(".nav-link[data-mode]")),
@@ -81,9 +94,14 @@ const refs = {
   variantSourceName: document.querySelector("#variantSourceName"),
   variantSourceHint: document.querySelector("#variantSourceHint"),
   variantSuggestion: document.querySelector("#variantSuggestion"),
-  generateReferenceDropzone: document.querySelector("#generateReferenceDropzone"),
-  generateReferenceInput: document.querySelector("#generateReferenceInput"),
-  generateReferenceTitle: document.querySelector("#generateReferenceTitle"),
+  styleReferenceDropzone: document.querySelector("#styleReferenceDropzone"),
+  styleReferenceInput: document.querySelector("#styleReferenceInput"),
+  styleReferenceTitle: document.querySelector("#styleReferenceTitle"),
+  styleReferenceMeta: document.querySelector("#styleReferenceMeta"),
+  materialReferenceDropzone: document.querySelector("#materialReferenceDropzone"),
+  materialReferenceInput: document.querySelector("#materialReferenceInput"),
+  materialReferenceTitle: document.querySelector("#materialReferenceTitle"),
+  materialReferenceMeta: document.querySelector("#materialReferenceMeta"),
   generateReferenceMeta: document.querySelector("#generateReferenceMeta"),
   clearGenerateReferenceButton: document.querySelector("#clearGenerateReferenceButton"),
   generatePromptInput: document.querySelector("#generatePromptInput"),
@@ -126,7 +144,9 @@ const refs = {
   resultPreviewTrigger: document.querySelector("#resultPreviewTrigger"),
   resultImage: document.querySelector("#resultImage"),
   resultPreviewEmpty: document.querySelector("#resultPreviewEmpty"),
+  resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
   generationOverlay: document.querySelector("#generationOverlay"),
+  generationOrbit: document.querySelector(".generation-orbit"),
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
   generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
   resultPrompt: document.querySelector("#resultPrompt"),
@@ -138,6 +158,9 @@ const refs = {
   requestProgressFill: document.querySelector("#requestProgressFill"),
   progressHint: document.querySelector("#progressHint"),
   resultStorage: document.querySelector("#resultStorage"),
+  copyrightRiskPanel: document.querySelector("#copyrightRiskPanel"),
+  copyrightRiskStatus: document.querySelector("#copyrightRiskStatus"),
+  copyrightRiskText: document.querySelector("#copyrightRiskText"),
   downloadButton: document.querySelector("#downloadButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
@@ -270,6 +293,8 @@ function summarizePayloadForDebug(payload) {
   return {
     endpoint: payload.endpoint_url,
     model: payload.model,
+    transport: payload.transport,
+    responsesModel: payload.responses_model,
     size: payload.size,
     quality: payload.quality,
     background: payload.background,
@@ -317,6 +342,8 @@ function createWorkspaceSnapshot() {
       moderation: refs.moderationSelect.value,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
+      responsesModel: refs.responsesModelInput.value,
+      imageTransport: getImageTransport(),
     },
     result: {
       promptText: refs.resultPrompt.textContent,
@@ -331,6 +358,8 @@ function createWorkspaceSnapshot() {
       lastResultImage: state.lastResultImage,
       currentComparisonSource: state.currentComparisonSource,
       rawResponsePreview: state.rawResponsePreview,
+      resultCandidates: state.resultCandidates,
+      selectedCandidateIndex: state.selectedCandidateIndex,
     },
     source: {
       labelText: refs.sourcePreviewLabel.textContent,
@@ -338,6 +367,8 @@ function createWorkspaceSnapshot() {
       editImage: state.editImage,
       editMaskImage: state.editMaskImage,
       generateReferenceImage: state.generateReferenceImage,
+      styleReferenceImage: state.styleReferenceImage,
+      materialReferenceImage: state.materialReferenceImage,
     },
   }
 }
@@ -389,6 +420,10 @@ async function restoreWorkspaceState() {
 
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
+  refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
+  if (forms.imageTransport) {
+    setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
+  }
   updatePromptCounters()
 
   const result = snapshot.result || {}
@@ -397,6 +432,8 @@ async function restoreWorkspaceState() {
   state.lastResultMode = result.lastResultMode || null
   state.lastResultImage = cloneImageAsset(result.lastResultImage)
   state.currentComparisonSource = cloneImageAsset(result.currentComparisonSource)
+  state.resultCandidates = Array.isArray(result.resultCandidates) ? result.resultCandidates : []
+  state.selectedCandidateIndex = Number.isInteger(result.selectedCandidateIndex) ? result.selectedCandidateIndex : 0
   state.resultPreview = result.imageSrc
     ? {
         src: result.imageSrc,
@@ -418,12 +455,22 @@ async function restoreWorkspaceState() {
     refs.downloadButton.classList.remove("disabled-link")
     refs.downloadButton.setAttribute("aria-disabled", "false")
     refs.downloadButton.download = state.lastResultImage?.name || `picgen-${state.lastResultMode || "result"}-restored.png`
+    renderResultCandidates()
   }
 
   const source = snapshot.source || {}
   state.editImage = cloneImageAsset(source.editImage)
   state.editMaskImage = cloneImageAsset(source.editMaskImage)
   state.generateReferenceImage = cloneImageAsset(source.generateReferenceImage)
+  state.styleReferenceImage = cloneImageAsset(source.styleReferenceImage)
+  state.materialReferenceImage = cloneImageAsset(source.materialReferenceImage)
+  if (!state.materialReferenceImage && state.generateReferenceImage) {
+    state.materialReferenceImage = cloneImageAsset(state.generateReferenceImage, {
+      role: "material",
+      origin: "material",
+    })
+  }
+  state.generateReferenceImage = state.materialReferenceImage || state.styleReferenceImage || state.generateReferenceImage
 
   if (getAssetDisplaySrc(source.displayedSourceImage)) {
     applySourcePreview(source.displayedSourceImage, source.labelText || "输入图")
@@ -432,6 +479,7 @@ async function restoreWorkspaceState() {
   }
 
   renderRawResponsePreview()
+  renderResultCandidates()
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateGenerateIntentUI()
   updateGenerateReferenceUI()
@@ -510,7 +558,7 @@ function setGenerateIntent(intent) {
 function updateGenerateIntentUI() {
   const hasResultAnchor = Boolean(state.lastResultImage)
   const isVariant = state.generateIntent === "variant"
-  const hasReference = Boolean(state.generateReferenceImage)
+  const hasReference = Boolean(state.generateReferenceImage || state.materialReferenceImage || state.styleReferenceImage)
 
   refs.freshGenerateMode.classList.toggle("active", !isVariant)
   refs.variantGenerateMode.classList.toggle("active", isVariant)
@@ -546,6 +594,28 @@ function updateGenerateIntentUI() {
       : "开始生成"
 }
 
+function generateReferenceImages() {
+  if (state.styleReferenceImage || state.materialReferenceImage) {
+    return [state.styleReferenceImage, state.materialReferenceImage].filter(Boolean)
+  }
+  return state.generateReferenceImage ? [state.generateReferenceImage] : []
+}
+
+function hasStyleTransferReferences() {
+  return Boolean(state.styleReferenceImage && state.materialReferenceImage)
+}
+
+function styleTransferPrompt(userPrompt) {
+  return [
+    "使用第 1 张图片作为风格模板，提取它的视觉风格、材质质感、光影、色调、排版氛围和整体艺术方向。",
+    "同时识别第 1 张风格模板中有明确品牌或活动含义的视觉元素，例如 6人游 Logo、2022、冬奥会相关文字、徽章、角标、标题、装饰条和版式结构；请把这些元素放到最终成品中合适且自然的位置。",
+    "使用第 2 张图片作为素材主体，保留它的主体结构、人物/物体身份、关键文字、Logo、比例关系和可识别特征。",
+    "请把第 2 张素材图转换成第 1 张风格模板的完整视觉效果，让模板里的品牌/活动信息与素材画面融合成一张最终效果图。",
+    "不要生成左右对比图，不要把两张参考图并排放入结果。不要机械复制模板里无意义的小噪点；只迁移有设计价值或品牌/活动含义的文字和图形元素。输出完整单张成品图。",
+    userPrompt.trim(),
+  ].filter(Boolean).join("\n")
+}
+
 function setFlowState(element, stateName) {
   if (!element) {
     return
@@ -557,8 +627,14 @@ function setFlowState(element, stateName) {
 }
 
 function updateWorkflowStatus() {
+  const savedApiKey = state.savedApiKey || ""
   const hasConnection = Boolean(
-    refs.generateUrlInput.value.trim() || refs.editUrlInput.value.trim() || refs.apiKeyInput.value.trim() || state.serverConfig?.has_default_api_key,
+    refs.generateUrlInput.value.trim()
+      || refs.editUrlInput.value.trim()
+      || refs.responsesUrlInput.value.trim()
+      || refs.apiKeyInput.value.trim()
+      || savedApiKey
+      || state.serverConfig?.has_default_api_key,
   )
   const hasResult = Boolean(state.resultPreview?.src)
   const hasGenerated = Boolean(hasResult && ["generate", "variant"].includes(state.lastResultMode))
@@ -598,52 +674,137 @@ function isTypingElement(element) {
 }
 
 function saveSettings() {
+  const local = loadJSON(STORAGE_KEY, {})
+  const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
+  const newApiKey = refs.apiKeyInput.value.trim()
+  const nextApiKey = newApiKey || local.apiKey || legacy.apiKey || ""
+  state.savedApiKey = nextApiKey
   const payload = {
-    apiKey: refs.apiKeyInput.value.trim(),
+    apiKey: nextApiKey,
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
+    responsesUrl: refs.responsesUrlInput.value.trim(),
+    responsesModel: refs.responsesModelInput.value.trim(),
+    imageTransport: getImageTransport(),
   }
   saveJSON(STORAGE_KEY, payload)
-  flashHint("设置已保存到当前浏览器。")
+  refs.apiKeyInput.value = ""
+  flashHint(newApiKey ? "新 API Key 已保存；输入框已清空，不会回显 key。" : "设置已保存；API Key 未变更。")
   updateWorkflowStatus()
 }
 
 function loadSettings() {
   const local = loadJSON(STORAGE_KEY, {})
   const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
-  refs.apiKeyInput.value = local.apiKey || legacy.apiKey || ""
+  state.savedApiKey = local.apiKey || legacy.apiKey || ""
+  refs.apiKeyInput.value = ""
   refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
   refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
+  refs.responsesUrlInput.value = local.responsesUrl || state.serverConfig.responses_url || ""
+  refs.responsesModelInput.value = normalizeResponsesModel(local.responsesModel || state.serverConfig.default_responses_model)
 
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
   setGenerateSize(state.serverConfig.default_size || "auto")
+  setImageTransport(local.imageTransport === "responses" ? "responses" : "images")
 
-  if (state.serverConfig.has_default_api_key && !local.apiKey) {
-    refs.settingsHint.textContent = "服务端已预设默认 API Key。你也可以在这里覆盖它。"
+  if (state.savedApiKey) {
+    refs.settingsHint.textContent = "浏览器已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
+  } else if (state.serverConfig.has_default_api_key) {
+    refs.settingsHint.textContent = "服务端已预设默认 API Key。你可以在这里填入新 key 覆盖。"
   }
 
   updateWorkflowStatus()
+}
+
+function getImageTransport() {
+  const checked = refs.imageTransportInputs.find((input) => input.checked)
+  return checked?.value === "responses" ? "responses" : "images"
+}
+
+function setImageTransport(value) {
+  const normalized = value === "responses" ? "responses" : "images"
+  refs.imageTransportInputs.forEach((input) => {
+    input.checked = input.value === normalized
+  })
+  updateImageTransportUI()
+}
+
+function updateImageTransportUI() {
+  const transport = getImageTransport()
+  const isResponses = transport === "responses"
+  if (refs.imageTransportHint) {
+    refs.imageTransportHint.textContent = isResponses
+      ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.5），用于对接不支持 Images Edit 的兼容代理。"
+      : "编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。"
+  }
+  const editFieldset = refs.responsesUrlInput?.closest("label")
+  const modelFieldset = refs.responsesModelInput?.closest("label")
+  ;[editFieldset, modelFieldset].forEach((node) => {
+    if (!node) return
+    node.classList.toggle("is-dimmed", !isResponses)
+  })
 }
 
 function flashHint(text) {
   refs.settingsHint.textContent = text
   window.clearTimeout(flashHint.timeoutId)
   flashHint.timeoutId = window.setTimeout(() => {
-    if (state.serverConfig?.has_default_api_key && !refs.apiKeyInput.value.trim()) {
-      refs.settingsHint.textContent = "服务端已预设默认 API Key。你也可以在这里覆盖它。"
+    if (state.savedApiKey) {
+      refs.settingsHint.textContent = "浏览器已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
       return
     }
-    refs.settingsHint.textContent = "设置会保存在当前浏览器。服务端如果已预设默认 key，这里可以留空。"
+    if (state.serverConfig?.has_default_api_key) {
+      refs.settingsHint.textContent = "服务端已预设默认 API Key。你可以在这里填入新 key 覆盖。"
+      return
+    }
+    refs.settingsHint.textContent = "设置会保存在当前浏览器。API Key 输入框只用于填入新 key。"
   }, 2200)
 }
 
 function getSettings() {
   return {
-    apiKey: refs.apiKeyInput.value.trim(),
+    apiKey: refs.apiKeyInput.value.trim() || state.savedApiKey || "",
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
+    responsesUrl: refs.responsesUrlInput.value.trim(),
+    responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
+    imageTransport: getImageTransport(),
   }
+}
+
+function requireEditSettings(settings, contextLabel) {
+  if (!settings.editUrl) {
+    appendDebugLine("参数校验失败：编辑接口 URL 为空")
+    setError(`${contextLabel}需要填写编辑接口 URL（/v1/images/edits）。`)
+    refs.editUrlInput.focus()
+    return false
+  }
+  return true
+}
+
+function normalizeResponsesModel(value) {
+  const model = String(value || "").trim()
+  if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
+    return state.serverConfig?.default_responses_model || "gpt-5.5"
+  }
+  return model
+}
+
+function requireResponsesSettings(settings, contextLabel) {
+  if (!settings.responsesUrl) {
+    appendDebugLine("参数校验失败：Responses 图像接口 URL 为空")
+    setError(`${contextLabel}需要填写 Responses 图像接口 URL。`)
+    refs.responsesUrlInput.focus()
+    return false
+  }
+  if (!settings.responsesModel) {
+    appendDebugLine("参数校验失败：Responses 主模型为空")
+    setError(`${contextLabel}需要填写 Responses 主模型。`)
+    refs.responsesModelInput.focus()
+    return false
+  }
+  return true
 }
 
 function formatTimestamp(isoLike) {
@@ -823,6 +984,15 @@ function estimateProgress(elapsedMs, phase) {
 }
 
 function progressHintForPhase(phase, label) {
+  const expectedCount = Math.max(1, Number(state.progressExpectedCount) || 1)
+  if (phase === "waiting" && expectedCount > 1 && state.progressStartedAt) {
+    const elapsedSeconds = Math.max(0, (performance.now() - state.progressStartedAt) / 1000)
+    const estimatePerImage = Math.max(60, Number(state.progressEstimatedSecondsPerImage) || 210)
+    const estimatedTotal = estimatePerImage * expectedCount
+    const currentImage = Math.min(expectedCount, Math.max(1, Math.floor(elapsedSeconds / estimatePerImage) + 1))
+    const remainingSeconds = Math.max(0, estimatedTotal - elapsedSeconds)
+    return `正在生成第 ${currentImage}/${expectedCount} 张，预计还需要约 ${formatDuration(remainingSeconds)} 完成全部候选。`
+  }
   if (phase === "preparing") {
     return "正在整理参数和本地输入。"
   }
@@ -838,6 +1008,16 @@ function progressHintForPhase(phase, label) {
   return label || "等待操作。"
 }
 
+function formatDuration(seconds) {
+  const safeSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(safeSeconds / 60)
+  const rest = safeSeconds % 60
+  if (minutes <= 0) {
+    return `${rest} 秒`
+  }
+  return `${minutes} 分 ${rest} 秒`
+}
+
 function renderProgress() {
   if (!state.progressStartedAt) {
     return
@@ -845,11 +1025,16 @@ function renderProgress() {
 
   const elapsedMs = performance.now() - state.progressStartedAt
   const progress = estimateProgress(elapsedMs, state.progressPhase)
+  const hint = progressHintForPhase(state.progressPhase, state.progressLabel)
   refs.requestProgressFill.style.width = `${progress.toFixed(1)}%`
   refs.progressElapsed.textContent = `${(elapsedMs / 1000).toFixed(1)}s`
   refs.resultTiming.textContent = `请求进行中 ${(elapsedMs / 1000).toFixed(1)}s`
   refs.progressStageLabel.textContent = state.progressLabel || "处理中"
-  refs.progressHint.textContent = progressHintForPhase(state.progressPhase, state.progressLabel)
+  refs.progressHint.textContent = hint
+  refs.generationOverlayTitle.textContent = state.progressLabel || "处理中"
+  refs.generationOverlaySubtitle.textContent = hint
+  refs.generationOrbit?.style.setProperty("--progress-degrees", `${(progress * 3.6).toFixed(1)}deg`)
+  refs.generationOrbit?.setAttribute("data-progress", `${Math.round(progress)}%`)
 }
 
 function setProgressPhase(phase, label) {
@@ -863,15 +1048,19 @@ function setProgressPhase(phase, label) {
   renderProgress()
 }
 
-function startProgress(label) {
+function startProgress(label, options = {}) {
   window.clearInterval(state.progressTimer)
   state.progressStartedAt = performance.now()
   state.progressPhase = "preparing"
   state.progressLabel = label
+  state.progressExpectedCount = Math.max(1, Number(options.expectedCount) || 1)
+  state.progressEstimatedSecondsPerImage = Math.max(60, Number(options.estimatedSecondsPerImage) || 210)
   refs.progressInspectorItem.classList.remove("hidden")
   refs.generationOverlay.classList.remove("hidden")
   refs.resultPreviewTrigger.classList.add("preview-frame-busy")
   refs.requestProgressFill.style.width = "6%"
+  refs.generationOrbit?.style.setProperty("--progress-degrees", "21.6deg")
+  refs.generationOrbit?.setAttribute("data-progress", "6%")
   refs.progressElapsed.textContent = "0.0s"
   refs.progressStageLabel.textContent = label
   refs.progressHint.textContent = progressHintForPhase("preparing", label)
@@ -885,7 +1074,10 @@ function stopProgress() {
   state.progressTimer = null
   state.progressStartedAt = 0
   state.progressPhase = "idle"
+  state.progressExpectedCount = 1
   refs.requestProgressFill.style.width = "100%"
+  refs.generationOrbit?.style.setProperty("--progress-degrees", "360deg")
+  refs.generationOrbit?.setAttribute("data-progress", "100%")
   window.setTimeout(() => {
     if (state.isBusy) {
       return
@@ -894,6 +1086,8 @@ function stopProgress() {
     refs.generationOverlay.classList.add("hidden")
     refs.resultPreviewTrigger.classList.remove("preview-frame-busy")
     refs.requestProgressFill.style.width = "0%"
+    refs.generationOrbit?.style.setProperty("--progress-degrees", "0deg")
+    refs.generationOrbit?.setAttribute("data-progress", "0%")
   }, 420)
 }
 
@@ -907,7 +1101,7 @@ function setBusy(isBusy, label, options = {}) {
   refs.requestBadge.textContent = label
   refs.requestBadge.className = `status-badge ${isBusy ? "working" : "idle"}`
   if (isBusy) {
-    startProgress(options.progressLabel || label)
+    startProgress(options.progressLabel || label, options)
   } else {
     stopProgress()
   }
@@ -917,17 +1111,46 @@ function setError(message = "", details = "") {
   refs.errorMessage.textContent = details ? `${message} ${details}` : message
 }
 
+function setRiskPanel(status, text, { hidden = false } = {}) {
+  refs.copyrightRiskPanel?.classList.toggle("hidden", hidden)
+  if (refs.copyrightRiskStatus) {
+    refs.copyrightRiskStatus.textContent = status
+  }
+  if (refs.copyrightRiskText) {
+    refs.copyrightRiskText.textContent = text
+  }
+}
+
 function updateGenerateReferenceUI() {
-  const hasReference = Boolean(state.generateReferenceImage)
-  refs.generateReferenceDropzone.classList.toggle("ready", hasReference)
+  const hasStyle = Boolean(state.styleReferenceImage)
+  const hasMaterial = Boolean(state.materialReferenceImage)
+  const hasReference = Boolean(state.generateReferenceImage || hasStyle || hasMaterial)
+  refs.styleReferenceDropzone.classList.toggle("ready", hasStyle)
+  refs.materialReferenceDropzone.classList.toggle("ready", hasMaterial)
   refs.clearGenerateReferenceButton.classList.toggle("hidden", !hasReference)
 
-  if (hasReference) {
-    refs.generateReferenceTitle.textContent = "已加载参考图"
-    refs.generateReferenceMeta.textContent = state.generateReferenceImage.description || state.generateReferenceImage.name
+  if (hasStyle) {
+    refs.styleReferenceTitle.textContent = "已加载风格模板"
+    refs.styleReferenceMeta.textContent = state.styleReferenceImage.description || state.styleReferenceImage.name
   } else {
-    refs.generateReferenceTitle.textContent = "可选：添加参考图"
-    refs.generateReferenceMeta.textContent = "全新开题也可以带一张参考图；有参考图时会使用编辑接口发送。"
+    refs.styleReferenceTitle.textContent = "左：风格模板"
+    refs.styleReferenceMeta.textContent = "取色调、材质、光影和版式氛围。"
+  }
+
+  if (hasMaterial) {
+    refs.materialReferenceTitle.textContent = "已加载素材图"
+    refs.materialReferenceMeta.textContent = state.materialReferenceImage.description || state.materialReferenceImage.name
+  } else {
+    refs.materialReferenceTitle.textContent = "右：素材图"
+    refs.materialReferenceMeta.textContent = "保留主体、结构、文字和可识别信息。"
+  }
+
+  if (hasStyle && hasMaterial) {
+    refs.generateReferenceMeta.textContent = "将按左图风格处理右图素材，默认返回 3 张候选效果图。"
+  } else if (hasStyle || hasMaterial || state.generateReferenceImage) {
+    refs.generateReferenceMeta.textContent = "请补齐左右两张图以生成 3 张风格效果图；仅一张图时按单参考图生成。"
+  } else {
+    refs.generateReferenceMeta.textContent = "两张都上传时默认生成 3 张效果图；仅上传右侧素材时按单参考图生成。"
   }
 
   updateGenerateIntentUI()
@@ -942,10 +1165,33 @@ function setGenerateReferenceImage(asset, { showPreview = state.activeMode === "
   scheduleWorkspacePersist()
 }
 
+function setStyleReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+  state.styleReferenceImage = cloneImageAsset(asset, { role: "style_template" })
+  state.generateReferenceImage = state.materialReferenceImage || state.styleReferenceImage
+  updateGenerateReferenceUI()
+  if (showPreview && getAssetDisplaySrc(state.styleReferenceImage)) {
+    applySourcePreview(state.styleReferenceImage, "风格模板")
+  }
+  scheduleWorkspacePersist()
+}
+
+function setMaterialReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+  state.materialReferenceImage = cloneImageAsset(asset, { role: "material" })
+  state.generateReferenceImage = state.materialReferenceImage
+  updateGenerateReferenceUI()
+  if (showPreview && getAssetDisplaySrc(state.materialReferenceImage)) {
+    applySourcePreview(state.materialReferenceImage, "素材图")
+  }
+  scheduleWorkspacePersist()
+}
+
 function clearGenerateReferenceImage({ clearInput = true } = {}) {
   state.generateReferenceImage = null
+  state.styleReferenceImage = null
+  state.materialReferenceImage = null
   if (clearInput) {
-    refs.generateReferenceInput.value = ""
+    refs.styleReferenceInput.value = ""
+    refs.materialReferenceInput.value = ""
   }
   updateGenerateReferenceUI()
   if (state.activeMode === "generate") {
@@ -1091,8 +1337,8 @@ function setMode(mode, options = {}) {
 
   if (mode === "edit" && previousMode !== "edit" && options.autoLoadLatest !== false && state.lastResultImage) {
     useLastResultAsEditSource({ showPreview: true })
-  } else if (mode === "generate" && getAssetDisplaySrc(state.generateReferenceImage)) {
-    applySourcePreview(state.generateReferenceImage, "参考图")
+  } else if (mode === "generate" && getAssetDisplaySrc(state.materialReferenceImage || state.generateReferenceImage || state.styleReferenceImage)) {
+    applySourcePreview(state.materialReferenceImage || state.generateReferenceImage || state.styleReferenceImage, state.materialReferenceImage ? "素材图" : "参考图")
   } else if (mode !== "edit" && state.lastResultMode !== "edit") {
     clearSourcePreview("原图")
   }
@@ -1209,6 +1455,7 @@ function clearResult() {
   refs.resultStorage.textContent = ""
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
+  setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
   refs.downloadButton.classList.add("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
@@ -1219,12 +1466,15 @@ function clearResult() {
   state.lastResultMode = null
   state.currentComparisonSource = null
   state.resultPreview = null
+  state.resultCandidates = []
+  state.selectedCandidateIndex = 0
   state.rawResponsePreview = null
   state.debugLines = []
   state.generateIntent = "fresh"
 
   closePreview()
   renderRawResponsePreview()
+  renderResultCandidates()
   updateGenerateIntentUI()
   updatePreviewAvailability()
   updateWorkflowStatus()
@@ -1261,14 +1511,104 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.downloadButton.classList.add("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
+  state.resultCandidates = []
+  state.selectedCandidateIndex = 0
+  renderResultCandidates()
+}
+
+function candidateImageSource(candidate) {
+  return candidate?.saved_image_url || candidate?.image_data_url || candidate?.image_url || ""
+}
+
+function candidateAsset(candidate, payload, index) {
+  const imageSource = candidateImageSource(candidate)
+  if (!imageSource) {
+    return null
+  }
+  return {
+    name: candidate.saved_image_name || `picgen-${payload.mode}-${index + 1}-${Date.now()}.png`,
+    type: candidate.saved_image_mime || (candidate.image_data_url ? inferMimeFromDataUrl(candidate.image_data_url) : ""),
+    dataUrl: candidate.image_data_url || "",
+    savedUrl: candidate.saved_image_url || "",
+    savedPath: candidate.saved_image_path || "",
+    metadataPath: candidate.saved_metadata_path || "",
+    fileUrl: candidate.saved_image_url || candidate.image_url || "",
+    origin: "result",
+    description: `候选 ${index + 1} · ${payload.model || ""}`,
+    src: imageSource,
+  }
+}
+
+function selectResultCandidate(index) {
+  const candidate = state.resultCandidates[index]
+  const imageSource = candidateImageSource(candidate)
+  if (!candidate || !imageSource) {
+    return
+  }
+
+  state.selectedCandidateIndex = index
+  refs.resultImage.src = imageSource
+  refs.resultImage.classList.add("visible")
+  refs.resultPreviewEmpty.classList.add("hidden")
+  state.resultPreview = {
+    src: imageSource,
+    mode: state.lastResultMode,
+  }
+  state.lastResultImage = cloneImageAsset(candidate.asset)
+  refs.downloadButton.href = candidate.saved_image_url || imageSource
+  refs.downloadButton.classList.remove("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "false")
+  refs.downloadButton.download = candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`
+  renderResultCandidates()
+  updatePreviewAvailability()
+  scheduleWorkspacePersist()
+}
+
+function renderResultCandidates() {
+  if (!refs.resultCandidateStrip) {
+    return
+  }
+  refs.resultCandidateStrip.replaceChildren()
+  refs.resultCandidateStrip.classList.toggle("hidden", state.resultCandidates.length <= 1)
+
+  state.resultCandidates.forEach((candidate, index) => {
+    const imageSource = candidateImageSource(candidate)
+    if (!imageSource) {
+      return
+    }
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "candidate-button"
+    button.classList.toggle("active", index === state.selectedCandidateIndex)
+    const img = document.createElement("img")
+    img.src = imageSource
+    img.alt = `候选 ${index + 1}`
+    const label = document.createElement("span")
+    label.textContent = `候选 ${index + 1}`
+    button.append(img, label)
+    button.addEventListener("click", () => selectResultCandidate(index))
+    refs.resultCandidateStrip.appendChild(button)
+  })
 }
 
 function setResult(payload, durationMs, requestSource = null) {
-  const imageSource = payload.saved_image_url || payload.image_data_url || payload.image_url
+  const candidates = Array.isArray(payload.images) && payload.images.length
+    ? payload.images
+    : [payload]
+  const enrichedCandidates = candidates
+    .map((candidate, index) => ({
+      ...candidate,
+      asset: candidateAsset(candidate, payload, index),
+    }))
+    .filter((candidate) => candidateImageSource(candidate))
+  const firstCandidate = enrichedCandidates[0] || {}
+  const imageSource = candidateImageSource(firstCandidate)
   if (!imageSource) {
     throw new Error("上游接口没有返回可展示的图片。")
   }
 
+  state.resultCandidates = enrichedCandidates
+  state.selectedCandidateIndex = 0
   const isTransformMode = ["edit", "variant", "reference"].includes(payload.mode)
   refs.resultPreviewLabel.textContent = payload.mode === "variant"
     ? "延展后"
@@ -1292,22 +1632,7 @@ function setResult(payload, durationMs, requestSource = null) {
     mode: payload.mode || null,
   }
 
-  if (payload.image_data_url || payload.saved_image_url || payload.image_url) {
-    state.lastResultImage = {
-      name: payload.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`,
-      type: payload.saved_image_mime || (payload.image_data_url ? inferMimeFromDataUrl(payload.image_data_url) : ""),
-      dataUrl: payload.image_data_url || "",
-      savedUrl: payload.saved_image_url || "",
-      savedPath: payload.saved_image_path || "",
-      metadataPath: payload.saved_metadata_path || "",
-      fileUrl: payload.saved_image_url || payload.image_url || "",
-      origin: "result",
-      description: `最新输出 · ${payload.model || ""}`,
-      src: imageSource,
-    }
-  } else {
-    state.lastResultImage = null
-  }
+  state.lastResultImage = cloneImageAsset(firstCandidate.asset)
 
   if (isTransformMode && getAssetDisplaySrc(requestSource)) {
     state.currentComparisonSource = cloneImageAsset(requestSource)
@@ -1335,6 +1660,13 @@ function setResult(payload, durationMs, requestSource = null) {
 
   const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : payload.mode === "reference" ? "参考生成" : "生成"
   const metaParts = [metaLabel, payload.model]
+  if (payload.transport === "responses-image") {
+    metaParts.push("Responses")
+  } else if (payload.transport === "images-edit") {
+    metaParts.push("Images Edit")
+  } else if (payload.transport === "images-generate") {
+    metaParts.push("Images Gen")
+  }
   if (payload.size && payload.size !== "auto") {
     metaParts.push(payload.size)
   }
@@ -1353,8 +1685,8 @@ function setResult(payload, durationMs, requestSource = null) {
   }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
-  refs.resultStorage.textContent = payload.saved_image_path
-    ? `已落盘到 ${payload.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+  refs.resultStorage.textContent = firstCandidate.saved_image_path
+    ? `已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
     : actualSize
       ? `实际尺寸 ${actualSize}`
       : ""
@@ -1366,10 +1698,12 @@ function setResult(payload, durationMs, requestSource = null) {
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
 
-  refs.downloadButton.href = payload.saved_image_url || imageSource
+  refs.downloadButton.href = firstCandidate.saved_image_url || imageSource
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.download = payload.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
+  refs.downloadButton.download = firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
+  renderResultCandidates()
+  void checkCopyrightRisk(payload)
 
   updateEditSourceUI()
   updateGenerateIntentUI()
@@ -1380,6 +1714,9 @@ function setResult(payload, durationMs, requestSource = null) {
 
 function historySummary(item) {
   const parts = [item.model]
+  if (item.transport === "responses-image") {
+    parts.push("Responses")
+  }
   if (item.size && item.size !== "auto") {
     parts.push(item.size)
   }
@@ -1428,14 +1765,22 @@ function renderHistory() {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
-        refs.generateModelInput.value = item.model
+        if (item.transport === "responses-image") {
+          refs.responsesModelInput.value = item.model
+        } else {
+          refs.generateModelInput.value = item.model
+        }
         setGenerateSize(item.size || state.serverConfig.default_size || "1024x1024")
         updatePromptCounters()
         refs.generatePromptInput.focus()
       } else {
         setMode("edit")
         refs.editPromptInput.value = item.prompt
-        refs.editModelInput.value = item.model
+        if (item.transport === "responses-image") {
+          refs.responsesModelInput.value = item.model
+        } else {
+          refs.editModelInput.value = item.model
+        }
         updatePromptCounters()
         refs.editPromptInput.focus()
       }
@@ -1453,7 +1798,7 @@ function pushHistory(item) {
 async function postJSON(url, payload, options = {}) {
   const requestId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
   const startedAt = performance.now()
-  const timeoutMs = options.timeoutMs || 190000
+  const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS
   appendDebugLine("准备发送本地代理请求", {
     requestId,
     url,
@@ -1540,6 +1885,74 @@ async function postJSON(url, payload, options = {}) {
   return data
 }
 
+async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(data.details ? `${data.error}\n${data.details}` : data.error || "请求失败")
+    }
+    return data
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
+
+async function checkCopyrightRisk(payload) {
+  const settings = getSettings()
+  if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
+    setRiskPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做版权风险提醒。")
+    return
+  }
+
+  const selectedCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
+  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, state.selectedCandidateIndex || 0)
+  const sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
+  const reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
+  const images = reviewDataUrl
+    ? [{
+        name: selectedAsset?.name || "selected-result.jpg",
+        type: inferMimeFromDataUrl(reviewDataUrl),
+        data_url: reviewDataUrl,
+      }]
+    : []
+
+  if (!images.length) {
+    setRiskPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    return
+  }
+
+  setRiskPanel("检查中", "正在调用 gpt-5.5 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。")
+  try {
+    const result = await postJSONSilent("/api/copyright-risk", {
+      api_key: settings.apiKey,
+      endpoint_url: settings.responsesUrl,
+      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      prompt: payload.prompt || state.lastResultPrompt || "",
+      context: [
+        `模式：${payload.mode || ""}`,
+        `模型：${payload.model || ""}`,
+        `尺寸：${payload.size || ""}`,
+        `素材来源：用户上传/用户授权`,
+      ].filter(Boolean).join("\n"),
+      images,
+    })
+    setRiskPanel("已检查", result.risk_text || "未见明显风险，但商用前仍建议确认素材授权链。")
+  } catch (error) {
+    appendDebugLine("版权风险检查失败", { error: error.message })
+    setRiskPanel("检查失败", error.message || "版权风险检查失败，不影响图片生成结果。")
+  }
+}
+
 async function fileToDataURL(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -1556,6 +1969,32 @@ async function blobToDataURL(blob) {
     reader.onerror = () => reject(new Error("读取图片失败。"))
     reader.readAsDataURL(blob)
   })
+}
+
+async function downscaleDataUrlForRisk(dataUrl, maxSide = 768, quality = 0.82) {
+  if (!dataUrl) {
+    return ""
+  }
+  const image = await new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error("无法读取版权风险检查图片。"))
+    img.src = dataUrl
+  })
+  const naturalWidth = image.naturalWidth || image.width
+  const naturalHeight = image.naturalHeight || image.height
+  const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight))
+  const width = Math.max(1, Math.round(naturalWidth * scale))
+  const height = Math.max(1, Math.round(naturalHeight * scale))
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext("2d")
+  if (!ctx) {
+    return dataUrl
+  }
+  ctx.drawImage(image, 0, 0, width, height)
+  return canvas.toDataURL("image/jpeg", quality)
 }
 
 async function ensureAssetDataUrl(asset) {
@@ -1631,13 +2070,54 @@ async function useGenerateReferenceFile(file) {
   )
 }
 
+async function useStyleReferenceFile(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    throw new Error("请选择图片文件。")
+  }
+
+  const dataUrl = await fileToDataURL(file)
+  setStyleReferenceImage(
+    {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+      origin: "style_template",
+      role: "style_template",
+      description: `${file.name} · ${formatFileSize(file.size)}`,
+    },
+    { showPreview: true },
+  )
+}
+
+async function useMaterialReferenceFile(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    throw new Error("请选择图片文件。")
+  }
+
+  const dataUrl = await fileToDataURL(file)
+  setMaterialReferenceImage(
+    {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+      origin: "material",
+      role: "material",
+      description: `${file.name} · ${formatFileSize(file.size)}`,
+    },
+    { showPreview: true },
+  )
+}
+
 async function submitVariantGenerate({ resetLog = true } = {}) {
   if (resetLog) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
   const prompt = refs.generatePromptInput.value
-  const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+  const model = useResponses ? settings.responsesModel : imageModel
+  const transport = useResponses ? "responses-image" : "images-edit"
   let imageOptions
   let size
 
@@ -1654,10 +2134,11 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     return
   }
 
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError("基于当前结果延展需要编辑接口 URL。")
-    refs.editUrlInput.focus()
+  if (useResponses) {
+    if (!requireResponsesSettings(settings, "基于当前结果延展")) {
+      return
+    }
+  } else if (!requireEditSettings(settings, "基于当前结果延展")) {
     return
   }
 
@@ -1689,28 +2170,51 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     appendDebugLine("读取延展输入图片")
     setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
-    const result = await postJSON("/api/edit", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.editUrl,
-      prompt,
-      model,
-      size,
-      ...imageOptions,
-      image: {
-        name: requestSource.name,
-        type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
-        data_url: requestSourceDataUrl,
-      },
-    }, {
-      mode: "variant",
-      progressLabel: "提交延展请求",
-      waitingLabel: "等待上游延展",
-    })
-    setResult({ ...result, mode: "variant" }, performance.now() - startedAt, requestSource)
+    const imagePart = {
+      name: requestSource.name,
+      type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
+      data_url: requestSourceDataUrl,
+    }
+    let result
+    if (useResponses) {
+      result = await postJSON("/api/responses-image", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.responsesUrl,
+        prompt,
+        model,
+        mode: "variant",
+        transport: "responses-image",
+        allow_inline_fallback: true,
+        size,
+        ...imageOptions,
+        image: imagePart,
+      }, {
+        mode: "variant",
+        progressLabel: "提交延展请求",
+        waitingLabel: "等待上游延展",
+      })
+    } else {
+      result = await postJSON("/api/edit", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.editUrl,
+        prompt,
+        model,
+        mode: "variant",
+        size,
+        ...imageOptions,
+        image: imagePart,
+      }, {
+        mode: "variant",
+        progressLabel: "提交延展请求",
+        waitingLabel: "等待上游延展",
+      })
+    }
+    setResult({ ...result, mode: "variant", transport }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "variant",
       prompt,
       model,
+      transport,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
@@ -1734,8 +2238,13 @@ async function submitGenerate() {
   resetDebugLog("点击生成按钮：生成图片")
 
   const prompt = refs.generatePromptInput.value
-  const model = refs.generateModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+  const referenceImages = generateReferenceImages()
+  const dualReference = hasStyleTransferReferences()
+  const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
+  const requestPrompt = dualReference ? styleTransferPrompt(prompt) : prompt
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -1744,18 +2253,21 @@ async function submitGenerate() {
     return
   }
 
-  if (!state.generateReferenceImage && !settings.generateUrl) {
+  if (!referenceImages.length && !settings.generateUrl) {
     appendDebugLine("参数校验失败：生成接口 URL 为空")
     setError("请先填写生成接口 URL。")
     refs.generateUrlInput.focus()
     return
   }
 
-  if (state.generateReferenceImage && !settings.editUrl) {
-    appendDebugLine("参数校验失败：参考图生成缺少编辑接口 URL")
-    setError("带参考图生成需要填写编辑接口 URL，因为图片会通过 multipart 发送给上游。")
-    refs.editUrlInput.focus()
-    return
+  if (referenceImages.length) {
+    if (useResponses) {
+      if (!requireResponsesSettings(settings, "带参考图生成")) {
+        return
+      }
+    } else if (!requireEditSettings(settings, "带参考图生成")) {
+      return
+    }
   }
 
   let size
@@ -1772,46 +2284,85 @@ async function submitGenerate() {
   saveSettings()
   setError("")
   closePreview()
-  setBusy(true, "生成中", { progressLabel: "准备生成图像" })
+  setBusy(true, "生成中", {
+    progressLabel: "准备生成图像",
+    expectedCount: dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : 1,
+    estimatedSecondsPerImage: 210,
+  })
   previewPendingResult({
-    mode: state.generateReferenceImage ? "reference" : "generate",
+    mode: referenceImages.length ? "reference" : "generate",
     prompt,
     model,
     size,
-    sourceName: state.generateReferenceImage?.name || "",
+    sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || "",
   })
 
   const startedAt = performance.now()
 
   try {
-    if (state.generateReferenceImage) {
+    if (referenceImages.length) {
       appendDebugLine("读取生成参考图")
       setProgressPhase("preparing", "读取参考图")
-      const referenceSource = cloneImageAsset(state.generateReferenceImage)
-      const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
-      const result = await postJSON("/api/edit", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt,
-        model,
-        size,
-        ...imageOptions,
-        image: {
+      const requestSources = referenceImages.map((asset) => cloneImageAsset(asset))
+      const referenceParts = []
+      for (const referenceSource of requestSources) {
+        const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
+        referenceParts.push({
           name: referenceSource.name,
           type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
           data_url: referenceDataUrl,
-        },
-      }, {
-        mode: "reference",
-        progressLabel: "提交参考图生成",
-        waitingLabel: "等待上游参考生成",
-      })
-      setResult({ ...result, mode: "reference", size }, performance.now() - startedAt, referenceSource)
+          role: referenceSource.role || referenceSource.origin || "reference",
+        })
+      }
+      const referencePart = referenceParts.at(-1)
+      const transport = useResponses ? "responses-image" : "images-edit"
+      const sampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : 1
+      let result
+      if (useResponses) {
+        result = await postJSON("/api/responses-image", {
+          api_key: settings.apiKey,
+          endpoint_url: settings.responsesUrl,
+          prompt: requestPrompt,
+          model: settings.responsesModel,
+          mode: "reference",
+          transport: "responses-image",
+          allow_inline_fallback: true,
+          sample_count: sampleCount,
+          size,
+          ...imageOptions,
+          image: referencePart,
+          images: referenceParts,
+        }, {
+          mode: "reference",
+          progressLabel: "提交参考图生成",
+          waitingLabel: "等待上游参考生成",
+        })
+      } else {
+        result = await postJSON("/api/edit", {
+          api_key: settings.apiKey,
+          endpoint_url: settings.editUrl,
+          prompt: requestPrompt,
+          model: imageModel,
+          mode: "reference",
+          sample_count: sampleCount,
+          size,
+          ...imageOptions,
+          image: referencePart,
+          images: referenceParts,
+        }, {
+          mode: "reference",
+          progressLabel: "提交参考图生成",
+          waitingLabel: "等待上游参考生成",
+        })
+      }
+      setResult({ ...result, mode: "reference", prompt, size, transport }, performance.now() - startedAt, requestSources.at(-1))
       pushHistory({
         mode: "reference",
         prompt,
-        model,
+        model: useResponses ? settings.responsesModel : imageModel,
+        transport,
         size,
+        sampleCount,
         ...imageOptions,
         createdAt: new Date().toISOString(),
       })
@@ -1850,8 +2401,11 @@ async function submitGenerate() {
 async function submitEdit() {
   resetDebugLog("点击编辑按钮：编辑图片")
   const prompt = refs.editPromptInput.value
-  const model = refs.editModelInput.value.trim()
   const settings = getSettings()
+  const useResponses = settings.imageTransport === "responses"
+  const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
+  const model = useResponses ? settings.responsesModel : imageModel
+  const transport = useResponses ? "responses-image" : "images-edit"
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -1866,10 +2420,11 @@ async function submitEdit() {
     return
   }
 
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError("请先填写编辑接口 URL。")
-    refs.editUrlInput.focus()
+  if (useResponses) {
+    if (!requireResponsesSettings(settings, "编辑图像")) {
+      return
+    }
+  } else if (!requireEditSettings(settings, "编辑图像")) {
     return
   }
 
@@ -1891,38 +2446,67 @@ async function submitEdit() {
     appendDebugLine("读取编辑输入图片")
     setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
-    const requestPayload = {
-      api_key: settings.apiKey,
-      endpoint_url: settings.editUrl,
-      prompt,
-      model,
-      image: {
-        name: requestSource.name,
-        type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
-        data_url: requestSourceDataUrl,
-      },
+    const imagePart = {
+      name: requestSource.name,
+      type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
+      data_url: requestSourceDataUrl,
     }
 
+    let maskPart = null
     if (state.editMaskImage) {
       appendDebugLine("读取编辑 mask")
       const maskDataUrl = await ensureAssetDataUrl(state.editMaskImage)
-      requestPayload.mask = {
+      maskPart = {
         name: state.editMaskImage.name,
         type: state.editMaskImage.type || inferMimeFromDataUrl(maskDataUrl),
         data_url: maskDataUrl,
       }
     }
 
-    const result = await postJSON("/api/edit", requestPayload, {
-      mode: "edit",
-      progressLabel: "提交编辑请求",
-      waitingLabel: "等待上游编辑",
-    })
-    setResult(result, performance.now() - startedAt, requestSource)
+    let result
+    if (useResponses) {
+      const requestPayload = {
+        api_key: settings.apiKey,
+        endpoint_url: settings.responsesUrl,
+        prompt,
+        model,
+        mode: "edit",
+        transport: "responses-image",
+        allow_inline_fallback: true,
+        image: imagePart,
+      }
+      if (maskPart) {
+        requestPayload.mask = maskPart
+      }
+      result = await postJSON("/api/responses-image", requestPayload, {
+        mode: "edit",
+        progressLabel: "提交 Responses 编辑请求",
+        waitingLabel: "等待 Responses 图像流",
+      })
+    } else {
+      const requestPayload = {
+        api_key: settings.apiKey,
+        endpoint_url: settings.editUrl,
+        prompt,
+        model: imageModel,
+        mode: "edit",
+        image: imagePart,
+      }
+      if (maskPart) {
+        requestPayload.mask = maskPart
+      }
+      result = await postJSON("/api/edit", requestPayload, {
+        mode: "edit",
+        progressLabel: "提交编辑请求",
+        waitingLabel: "等待上游编辑",
+      })
+    }
+    setResult({ ...result, mode: "edit", transport }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "edit",
       prompt,
       model,
+      transport,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
@@ -2024,6 +2608,58 @@ function bindPreviewTrigger(element, target) {
   })
 }
 
+function bindReferenceDropzone(dropzone, input, handler) {
+  dropzone.addEventListener("click", () => input.click())
+  dropzone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      input.click()
+    }
+  })
+  input.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await handler(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
+    }
+  })
+
+  ;["dragenter", "dragover"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      dropzone.classList.add("dragging")
+    })
+  })
+
+  ;["dragleave", "dragend", "drop"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      if (eventName !== "drop") {
+        dropzone.classList.remove("dragging")
+      }
+    })
+  })
+
+  dropzone.addEventListener("drop", async (event) => {
+    dropzone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      await handler(file)
+      setError("")
+    } catch (error) {
+      setError(error.message)
+    }
+  })
+}
+
 function bindEvents() {
   refs.newTaskButton.addEventListener("click", () => {
     clearResult()
@@ -2034,10 +2670,11 @@ function bindEvents() {
     setError("")
   })
   refs.saveSettingsButton.addEventListener("click", saveSettings)
-  refs.toggleKeyButton.addEventListener("click", () => {
-    const isHidden = refs.apiKeyInput.type === "password"
-    refs.apiKeyInput.type = isHidden ? "text" : "password"
-    refs.toggleKeyButton.textContent = isHidden ? "隐藏" : "显示"
+  refs.imageTransportInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      updateImageTransportUI()
+      scheduleWorkspacePersist()
+    })
   })
   refs.clearHistoryButton.addEventListener("click", () => {
     state.history = []
@@ -2121,6 +2758,7 @@ function bindEvents() {
     refs.generateModelInput,
     refs.editPromptInput,
     refs.editModelInput,
+    refs.responsesModelInput,
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updatePromptCounters()
@@ -2148,7 +2786,7 @@ function bindEvents() {
     })
   })
 
-  ;[refs.generateUrlInput, refs.editUrlInput, refs.apiKeyInput].forEach((input) => {
+  ;[refs.generateUrlInput, refs.editUrlInput, refs.responsesUrlInput, refs.responsesModelInput, refs.apiKeyInput].forEach((input) => {
     input.addEventListener("input", updateWorkflowStatus)
   })
 
@@ -2165,59 +2803,12 @@ function bindEvents() {
     }
   })
 
-  refs.generateReferenceDropzone.addEventListener("click", () => refs.generateReferenceInput.click())
-  refs.generateReferenceDropzone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault()
-      refs.generateReferenceInput.click()
-    }
-  })
-  refs.generateReferenceInput.addEventListener("change", async (event) => {
-    const file = event.target.files?.[0]
-    if (!file) {
-      return
-    }
-    try {
-      await useGenerateReferenceFile(file)
-      setError("")
-    } catch (error) {
-      setError(error.message)
-    }
-  })
+  bindReferenceDropzone(refs.styleReferenceDropzone, refs.styleReferenceInput, useStyleReferenceFile)
+  bindReferenceDropzone(refs.materialReferenceDropzone, refs.materialReferenceInput, useMaterialReferenceFile)
   refs.clearGenerateReferenceButton.addEventListener("click", (event) => {
     event.stopPropagation()
     clearGenerateReferenceImage()
     setError("")
-  })
-
-  ;["dragenter", "dragover"].forEach((eventName) => {
-    refs.generateReferenceDropzone.addEventListener(eventName, (event) => {
-      event.preventDefault()
-      refs.generateReferenceDropzone.classList.add("dragging")
-    })
-  })
-
-  ;["dragleave", "dragend", "drop"].forEach((eventName) => {
-    refs.generateReferenceDropzone.addEventListener(eventName, (event) => {
-      event.preventDefault()
-      if (eventName !== "drop") {
-        refs.generateReferenceDropzone.classList.remove("dragging")
-      }
-    })
-  })
-
-  refs.generateReferenceDropzone.addEventListener("drop", async (event) => {
-    refs.generateReferenceDropzone.classList.remove("dragging")
-    const file = event.dataTransfer?.files?.[0]
-    if (!file) {
-      return
-    }
-    try {
-      await useGenerateReferenceFile(file)
-      setError("")
-    } catch (error) {
-      setError(error.message)
-    }
   })
 
   refs.editPromptInput.addEventListener("keydown", (event) => {
@@ -2419,9 +3010,11 @@ async function init() {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
     state.serverConfig = {
       default_model: "gpt-image-2",
+      default_responses_model: "gpt-5.5",
       default_size: "1024x1024",
       generate_url: "",
       edit_url: "",
+      responses_url: "",
       has_default_api_key: false,
     }
   }

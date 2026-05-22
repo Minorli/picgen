@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=progress-risk-20260522a">
   </head>
   <body>
     <div class="desktop-shell">
@@ -90,14 +90,25 @@
                   <h2>参考图（可选）</h2>
                   <button id="clearGenerateReferenceButton" class="icon-button hidden" type="button" aria-label="移除参考图">×</button>
                 </div>
-                <div id="generateReferenceDropzone" class="reference-dropzone" tabindex="0" role="button" aria-label="上传或替换生成参考图">
-                  <input id="generateReferenceInput" type="file" accept="image/*" hidden>
-                  <div class="upload-icon" aria-hidden="true">▧</div>
-                  <div>
-                    <strong id="generateReferenceTitle">拖拽图像到此处　或　点击上传</strong>
-                    <p id="generateReferenceMeta" class="helper-text">支持 JPG / PNG，最大 10MB。有参考图时会使用编辑接口发送。</p>
+                <div class="reference-pair">
+                  <div id="styleReferenceDropzone" class="reference-dropzone" tabindex="0" role="button" aria-label="上传或替换风格模板">
+                    <input id="styleReferenceInput" type="file" accept="image/*" hidden>
+                    <div class="upload-icon" aria-hidden="true">▧</div>
+                    <div>
+                      <strong id="styleReferenceTitle">左：风格模板</strong>
+                      <p id="styleReferenceMeta" class="helper-text">取色调、材质、光影和版式氛围。</p>
+                    </div>
+                  </div>
+                  <div id="materialReferenceDropzone" class="reference-dropzone" tabindex="0" role="button" aria-label="上传或替换素材图">
+                    <input id="materialReferenceInput" type="file" accept="image/*" hidden>
+                    <div class="upload-icon" aria-hidden="true">▣</div>
+                    <div>
+                      <strong id="materialReferenceTitle">右：素材图</strong>
+                      <p id="materialReferenceMeta" class="helper-text">保留主体、结构、文字和可识别信息。</p>
+                    </div>
                   </div>
                 </div>
+                <p id="generateReferenceMeta" class="helper-text">两张都上传时默认生成 3 张效果图；仅上传右侧素材时按单参考图生成。</p>
               </section>
 
               <section class="studio-block model-block">
@@ -112,6 +123,10 @@
                   <option value="gpt-image-2"></option>
                   <option value="gpt-image-1.5"></option>
                   <option value="gpt-image-1"></option>
+                  <option value="gpt-5.5"></option>
+                  <option value="gpt-5.5-pro"></option>
+                  <option value="gpt-5.4"></option>
+                  <option value="gpt-5"></option>
                 </datalist>
 
                 <h2 class="compact-title">图像尺寸</h2>
@@ -119,6 +134,7 @@
                   <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
                   <label><input type="radio" name="visualSize" value="1024x1536"><span>2:3<small>1024x1536</small></span></label>
                   <label><input type="radio" name="visualSize" value="1536x1024"><span>3:2<small>1536x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1088x2240"><span>6人游<small>1088x2240</small></span></label>
                   <label><input type="radio" name="visualSize" value="3840x2160"><span>16:9<small>3840x2160</small></span></label>
                   <label><input type="radio" name="visualSize" value="custom"><span>自定义<small>W × H</small></span></label>
                 </div>
@@ -135,6 +151,7 @@
                       <option value="1024x1024">1024 x 1024</option>
                       <option value="1536x1024">横版 1536 x 1024</option>
                       <option value="1024x1536">竖版 1024 x 1536</option>
+                      <option value="1088x2240">6人游 1088 x 2240</option>
                       <option value="2048x2048">2K 2048 x 2048</option>
                       <option value="3840x2160">4K 横版 3840 x 2160</option>
                       <option value="2160x3840">4K 竖版 2160 x 3840</option>
@@ -287,6 +304,7 @@
                     </div>
                     <span class="preview-hint">点击放大</span>
                   </div>
+                  <div id="resultCandidateStrip" class="candidate-strip hidden" aria-label="结果候选图"></div>
                   <div class="result-actions">
                     <a id="downloadButton" class="ghost-button disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载图像</a>
                     <button id="continueEditButton" class="ghost-button" type="button" disabled>继续编辑</button>
@@ -332,6 +350,13 @@
                     <strong id="resultStorage"> </strong>
                   </div>
                 </div>
+                <div id="copyrightRiskPanel" class="risk-panel hidden">
+                  <div class="risk-panel-title">
+                    <span>版权风险提醒</span>
+                    <strong id="copyrightRiskStatus">等待检查</strong>
+                  </div>
+                  <p id="copyrightRiskText">生成完成后自动检查。</p>
+                </div>
               </section>
             </section>
 
@@ -340,12 +365,23 @@
                 <h2>连接设置</h2>
                 <button id="saveSettingsButton" class="ghost-button" type="button">保存本地配置</button>
               </div>
+              <div class="transport-toggle" role="radiogroup" aria-label="图像通道">
+                <span class="transport-label">图像通道</span>
+                <label class="transport-option">
+                  <input type="radio" name="imageTransport" value="images" checked>
+                  <span>Images API<small>gpt-image-2 · 推荐</small></span>
+                </label>
+                <label class="transport-option">
+                  <input type="radio" name="imageTransport" value="responses">
+                  <span>Responses API<small>gpt-5.5 · 兼容兜底</small></span>
+                </label>
+              </div>
+              <p id="imageTransportHint" class="helper-text">编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。</p>
               <div class="settings-grid">
                 <label>
                   <span>API Key</span>
                   <div class="secret-field">
-                    <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-..." spellcheck="false">
-                    <button id="toggleKeyButton" class="ghost-button" type="button">显示</button>
+                    <input id="apiKeyInput" type="password" autocomplete="new-password" placeholder="填入新 key 后保存替换" spellcheck="false">
                   </div>
                 </label>
                 <label>
@@ -355,6 +391,14 @@
                 <label>
                   <span>编辑接口 URL</span>
                   <input id="editUrlInput" type="url" placeholder="https://.../v1/images/edits" spellcheck="false">
+                </label>
+                <label>
+                  <span>Responses 图像接口 URL</span>
+                  <input id="responsesUrlInput" type="url" placeholder="https://.../v1/responses" spellcheck="false">
+                </label>
+                <label>
+                  <span>Responses 主模型</span>
+                  <input id="responsesModelInput" type="text" placeholder="gpt-5.5" spellcheck="false" list="openaiImageModels">
                 </label>
               </div>
               <p id="settingsHint" class="helper-text">设置会保存在当前浏览器。服务端如果已预设默认 key，这里可以留空。</p>
@@ -378,7 +422,7 @@
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.9.0</span>
+        <span>PicGen Console　v0.9.2</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -424,6 +468,6 @@
       </div>
     </div>
 
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=progress-risk-20260522a" type="module"></script>
   </body>
 </html>
