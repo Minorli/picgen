@@ -13,6 +13,8 @@ from ..errors import APIError
 from ..storage import detect_image_mime, save_output_image
 
 _IMAGE_OPTION_KEYS = ("quality", "background", "output_format", "output_compression", "moderation")
+_RAW_IMAGE_KEYS = frozenset({"b64_json", "result", "partial_image_b64", "image_b64"})
+_RAW_IMAGE_URL_KEYS = frozenset({"url", "image_url"})
 
 
 def decode_base64_blob(blob: str) -> bytes:
@@ -122,6 +124,29 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
     return metadata
 
 
+def compact_raw_response(payload: Any) -> Any:
+    """Return a preview-safe copy of an upstream payload.
+
+    The browser still gets first-class image fields and persisted file URLs from
+    `prepare_image_payload`; `raw_response` is only a debug preview and should
+    not duplicate megabytes of image base64.
+    """
+
+    if isinstance(payload, dict):
+        compacted: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in _RAW_IMAGE_KEYS and isinstance(value, str):
+                compacted[key] = f"[omitted {len(value)} chars]"
+            elif key in _RAW_IMAGE_URL_KEYS and isinstance(value, str) and value.startswith("data:image/"):
+                compacted[key] = f"[omitted data URL {len(value)} chars]"
+            else:
+                compacted[key] = compact_raw_response(value)
+        return compacted
+    if isinstance(payload, list):
+        return [compact_raw_response(item) for item in payload]
+    return payload
+
+
 def ensure_json_object(payload: Any, context: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         details = (
@@ -200,7 +225,7 @@ def _image_item_payload(
             image_bytes = base64.b64decode(base64_image, validate=True)
             image_mime = detect_image_mime(image_bytes)
         except (ValueError, binascii.Error):
-            image_mime = "image/png"
+            image_mime = "application/octet-stream"
         image_data_url = f"data:{image_mime};base64,{base64_image}"
     elif isinstance(image_url, str) and image_url and fetch_remote is not None:
         image_bytes, image_mime = fetch_remote(image_url, user_agent)
@@ -269,7 +294,7 @@ def prepare_image_payload(
         "image_url": first_image.get("image_url"),
         "revised_prompt": first_image.get("revised_prompt"),
         "created": upstream.get("created"),
-        "raw_response": upstream,
+        "raw_response": compact_raw_response(upstream),
         "images": images,
         "candidate_count": len(images),
         **first_image,

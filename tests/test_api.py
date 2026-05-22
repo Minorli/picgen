@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from starlette.types import Scope
 
 from picgen.errors import APIError
+from picgen.middleware import BodySizeLimitMiddleware
 from picgen.upstream import parse_sse_json_events, stream_events_to_image_payload
 
 TINY_PNG_B64 = (
@@ -63,6 +65,7 @@ def test_security_headers_are_set(make_client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "no-referrer"
+    assert "default-src 'self'" in response.headers["content-security-policy"]
 
 
 def test_generate_requires_prompt_before_api_key(make_client):
@@ -114,6 +117,8 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     assert payload["mode"] == "reference"
     assert payload["model"] == "gpt-image-2"
     assert payload["saved_image_url"].startswith("/files/outputs/")
+    assert payload["raw_response"]["data"][0]["b64_json"].startswith("[omitted ")
+    assert TINY_PNG_B64 not in str(payload["raw_response"])
 
     fake.run_multipart.assert_awaited_once()
     upstream_args = fake.run_multipart.await_args.args
@@ -562,6 +567,50 @@ def test_payload_size_limit_blocks_oversized_request(make_client, settings_facto
     response = client.post("/api/generate", json=big_payload)
     assert response.status_code == 413
     assert response.json()["code"] == "payload_too_large"
+
+
+def test_payload_size_limit_counts_streamed_body_without_content_length():
+    async def drain_app(scope, receive, send):
+        while True:
+            message = await receive()
+            if message["type"] != "http.request" or not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BodySizeLimitMiddleware(drain_app, max_bytes=1024)
+    messages = [
+        {"type": "http.request", "body": b"a" * 800, "more_body": True},
+        {"type": "http.request", "body": b"b" * 800, "more_body": False},
+    ]
+    sent: list[dict[str, object]] = []
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/generate",
+        "raw_path": b"/api/generate",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("testclient", 123),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, object]:
+        return messages.pop(0)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    import anyio
+
+    anyio.run(app, scope, receive, send)
+
+    response_start = next(message for message in sent if message["type"] == "http.response.start")
+    assert response_start["status"] == 413
 
 
 def test_rate_limit_returns_429(make_client, settings_factory):

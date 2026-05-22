@@ -23,12 +23,17 @@ _MIME_TO_EXT: dict[str, str] = {
     "image/jpg": ".jpg",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "application/octet-stream": ".bin",
 }
 
 
 def extension_for_mime(image_mime: str) -> str:
     normalized = image_mime.lower().split(";", 1)[0].strip()
-    return _MIME_TO_EXT.get(normalized, ".png")
+    extension = _MIME_TO_EXT.get(normalized)
+    if extension is None:
+        log_event(logger, logging.WARNING, "unknown_image_mime", mime=image_mime)
+        return ".bin"
+    return extension
 
 
 _FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00"})
@@ -50,7 +55,8 @@ def detect_image_mime(image_bytes: bytes) -> str:
         return "image/gif"
     if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
         return "image/webp"
-    return "image/png"
+    log_event(logger, logging.WARNING, "unknown_image_signature", bytes=len(image_bytes))
+    return "application/octet-stream"
 
 
 def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:

@@ -27,6 +27,7 @@ from .schemas import (
 )
 from .storage import detect_image_mime, resolve_storage_path, sanitize_filename
 from .upstream import (
+    compact_raw_response,
     openai_image_options,
     prepare_image_payload,
     request_metadata,
@@ -364,7 +365,7 @@ async def handle_copyright_risk(
     return {
         "model": model,
         "risk_text": _extract_text_output(upstream_response) or "未能解析风险提醒文本。",
-        "raw_response": upstream_response,
+        "raw_response": compact_raw_response(upstream_response),
     }
 
 
