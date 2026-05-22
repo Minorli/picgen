@@ -108,7 +108,7 @@ async def test_run_responses_parses_sse() -> None:
         payload = await client.run_responses(
             "https://upstream.test/responses",
             "sk-test",
-            {"stream": True, "model": "gpt-5.4", "input": []},
+            {"stream": True, "model": "gpt-5.5", "input": []},
             "UA",
         )
         assert payload["data"][0]["b64_json"] == "abcd"

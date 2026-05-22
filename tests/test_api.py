@@ -38,7 +38,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     payload = response.json()
     assert payload["has_default_api_key"] is True
     assert payload["responses_url"] == "https://api.openai.com/v1/responses"
-    assert payload["default_responses_model"] == "gpt-5.4"
+    assert payload["default_responses_model"] == "gpt-5.5"
     assert "sk-secret" not in response.text
     assert payload["max_image_bytes"] > 0
     assert payload["upstream_timeout_seconds"] > 0
@@ -131,6 +131,145 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     assert files[0]["filename"] == "ref.png"
 
 
+def test_edit_accepts_ordered_reference_images_and_returns_candidates(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.return_value = {
+        "data": [
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 1"},
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 2"},
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 3"},
+        ],
+        "created": 100,
+    }
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": "把素材做成模板风格",
+            "model": "gpt-image-2",
+            "mode": "reference",
+            "sample_count": 3,
+            "images": [
+                {
+                    "name": "style.png",
+                    "type": "image/png",
+                    "role": "style_template",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "material.png",
+                    "type": "image/png",
+                    "role": "material",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sample_count"] == 3
+    assert payload["candidate_count"] == 3
+    assert len(payload["images"]) == 3
+    assert payload["source_image_names"] == ["style.png", "material.png"]
+    assert payload["source_image_roles"] == ["style_template", "material"]
+    assert payload["saved_image_url"] == payload["images"][0]["saved_image_url"]
+
+    upstream_args = fake.run_multipart.await_args.args
+    fields = upstream_args[2]
+    assert fields["n"] == 3
+    files = upstream_args[3]
+    assert [part["field_name"] for part in files] == ["image", "image"]
+    assert [part["filename"] for part in files] == ["style.png", "material.png"]
+    assert [part["role"] for part in files] == ["style_template", "material"]
+
+
+def test_edit_fans_out_when_upstream_returns_fewer_candidates(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.side_effect = [
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
+    ]
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": "生成三张候选",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+            "images": [
+                {
+                    "name": "style.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "material.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_count"] == 3
+    assert fake.run_multipart.await_count == 3
+    first_fields = fake.run_multipart.await_args_list[0].args[2]
+    second_fields = fake.run_multipart.await_args_list[1].args[2]
+    assert first_fields["n"] == 3
+    assert "n" not in second_fields
+
+
+def test_edit_retries_without_sample_count_after_502(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.side_effect = [
+        APIError(502, "Upstream request failed", code="upstream_error"),
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
+    ]
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": "生成三张候选",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+            "images": [
+                {
+                    "name": "style.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "material.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_count"] == 3
+    assert fake.run_multipart.await_count == 4
+    assert fake.run_multipart.await_args_list[0].args[2]["n"] == 3
+    assert "n" not in fake.run_multipart.await_args_list[1].args[2]
+
+
 def test_edit_passes_mask_and_options(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
@@ -191,7 +330,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/responses",
             "prompt": "生成一张小图",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "mode": "reference",
         },
     )
@@ -199,7 +338,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "reference"
-    assert payload["model"] == "gpt-5.4"
+    assert payload["model"] == "gpt-5.5"
     assert payload["saved_image_url"].startswith("/files/outputs/")
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
@@ -220,7 +359,7 @@ def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settin
             "api_key": "sk-test",
             "endpoint_url": "https://sub.tidba.com/v1/responses",
             "prompt": "基于这张图重新打光",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "mode": "edit",
             "image": {
                 "name": "source.png",
@@ -246,6 +385,91 @@ def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settin
     assert "data:image/png;base64" not in str(upstream_payload)
 
 
+def test_responses_image_uploads_ordered_reference_images(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_file_upload.side_effect = [{"id": "file_style"}, {"id": "file_material"}]
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "把素材做成模板风格",
+            "model": "gpt-5.5",
+            "mode": "reference",
+            "sample_count": 3,
+            "images": [
+                {
+                    "name": "style.png",
+                    "type": "image/png",
+                    "role": "style_template",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "material.png",
+                    "type": "image/png",
+                    "role": "material",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_file_ids"] == ["file_style", "file_material"]
+    assert payload["source_image_names"] == ["style.png", "material.png"]
+    assert fake.run_file_upload.await_count == 2
+
+    uploaded = [call.args[2]["filename"] for call in fake.run_file_upload.await_args_list]
+    assert uploaded == ["style.png", "material.png"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["n"] == 3
+    assert upstream_payload["input"][0]["content"] == [
+        {"type": "input_text", "text": "把素材做成模板风格"},
+        {"type": "input_image", "file_id": "file_style"},
+        {"type": "input_image", "file_id": "file_material"},
+    ]
+
+
+def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "output_text": "风险等级：低\n可能风险点：含有活动标识，商用前确认授权。",
+    }
+
+    response = client.post(
+        "/api/copyright-risk",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/responses",
+            "prompt": "生成一张活动图",
+            "images": [
+                {
+                    "name": "result.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "gpt-5.5"
+    assert "风险等级：低" in payload["risk_text"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "gpt-5.5"
+    content = upstream_payload["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert "版权与商标风险审查助手" in content[0]["text"]
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
 def test_responses_image_can_fallback_to_inline_after_file_upload_error(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
@@ -258,7 +482,7 @@ def test_responses_image_can_fallback_to_inline_after_file_upload_error(make_cli
             "api_key": "sk-test",
             "endpoint_url": "https://sub.tidba.com/v1/responses",
             "prompt": "基于这张图重新打光",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "allow_inline_fallback": True,
             "image": {
                 "name": "source-upload.jpg",
@@ -290,7 +514,7 @@ def test_responses_image_falls_back_to_inline_by_default_after_file_upload_error
             "api_key": "sk-test",
             "endpoint_url": "https://sub.tidba.com/v1/responses",
             "prompt": "基于这张图重新打光",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "image": {
                 "name": "source-upload.jpg",
                 "type": "image/jpeg",
@@ -316,7 +540,7 @@ def test_responses_image_can_disable_inline_fallback(make_client, settings_facto
             "api_key": "sk-test",
             "endpoint_url": "https://sub.tidba.com/v1/responses",
             "prompt": "基于这张图重新打光",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "allow_inline_fallback": False,
             "image": {
                 "name": "source-upload.jpg",

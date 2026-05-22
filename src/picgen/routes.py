@@ -16,6 +16,7 @@ from .errors import APIError
 from .logging_config import get_logger, log_event
 from .schemas import (
     ConfigResponse,
+    CopyrightRiskRequest,
     EditRequest,
     FilePayload,
     GenerateRequest,
@@ -62,6 +63,109 @@ def _validate_image_size(part: FilePayload, max_image_bytes: int) -> dict[str, A
         "content_type": content_type,
         "data": data,
     }
+
+
+def _request_image_parts(
+    *,
+    image: FilePayload | None,
+    images: list[FilePayload],
+    max_image_bytes: int,
+) -> list[dict[str, Any]]:
+    source_images = images or ([image] if image is not None else [])
+    image_parts: list[dict[str, Any]] = []
+    for index, source_image in enumerate(source_images):
+        part = _validate_image_size(source_image, max_image_bytes)
+        part["field_name"] = "image"
+        part["role"] = source_image.role or ("style_template" if index == 0 and len(source_images) > 1 else "material")
+        part["index"] = index
+        image_parts.append(part)
+    return image_parts
+
+
+def _image_reference_metadata(image_parts: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "source_image_names": [str(part["filename"]) for part in image_parts],
+        "source_image_roles": [str(part.get("role") or "") for part in image_parts],
+        "source_image_count": len(image_parts),
+        "source_image_name": str(image_parts[0]["filename"]) if image_parts else None,
+    }
+
+
+def _candidate_items(response: dict[str, Any]) -> list[dict[str, Any]]:
+    data = response.get("data")
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _extend_candidate_items(target: dict[str, Any], source: dict[str, Any], limit: int) -> None:
+    target_data = target.setdefault("data", [])
+    if not isinstance(target_data, list):
+        target_data = []
+        target["data"] = target_data
+    for item in _candidate_items(source):
+        if len(target_data) >= limit:
+            break
+        target_data.append(item)
+
+
+def _error_mentions_sample_count(exc: APIError) -> bool:
+    haystack = f"{exc.message}\n{exc.details or ''}".lower()
+    return " n" in haystack or '"n"' in haystack or "sample" in haystack
+
+
+def _should_retry_without_sample_count(exc: APIError, sample_count: int) -> bool:
+    if sample_count <= 1:
+        return False
+    if exc.status == HTTPStatus.BAD_REQUEST:
+        return _error_mentions_sample_count(exc)
+    return exc.status in {
+        HTTPStatus.BAD_GATEWAY,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        HTTPStatus.GATEWAY_TIMEOUT,
+    }
+
+
+async def _run_multipart_candidates(
+    *,
+    client: UpstreamClient,
+    endpoint_url: str,
+    api_key: str,
+    fields: dict[str, Any],
+    files: list[dict[str, Any]],
+    user_agent: str,
+    sample_count: int,
+) -> dict[str, Any]:
+    try:
+        response = await client.run_multipart(endpoint_url, api_key, fields, files, user_agent)
+    except APIError as exc:
+        if not _should_retry_without_sample_count(exc, sample_count):
+            raise
+        fallback_fields = {key: value for key, value in fields.items() if key != "n"}
+        log_event(
+            logger,
+            logging.WARNING,
+            "images_edit_sample_count_fallback",
+            endpoint_url=endpoint_url,
+            sample_count=sample_count,
+            status=exc.status,
+            message=exc.message,
+        )
+        response = await client.run_multipart(endpoint_url, api_key, fallback_fields, files, user_agent)
+
+    while len(_candidate_items(response)) < sample_count:
+        fallback_fields = {key: value for key, value in fields.items() if key != "n"}
+        next_response = await client.run_multipart(
+            endpoint_url,
+            api_key,
+            fallback_fields,
+            files,
+            user_agent,
+        )
+        before_count = len(_candidate_items(response))
+        _extend_candidate_items(response, next_response, sample_count)
+        if len(_candidate_items(response)) <= before_count:
+            break
+
+    return response
 
 
 def _prepare_mask(part: FilePayload, max_image_bytes: int) -> dict[str, Any]:
@@ -156,7 +260,112 @@ def create_router() -> APIRouter:
             await _with_timing("/api/responses-image", handle_responses_image, body, settings, client)
         )
 
+    @router.post("/api/copyright-risk")
+    async def copyright_risk(
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        client: UpstreamClient = Depends(get_client),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await _with_timing("/api/copyright-risk", handle_copyright_risk, body, settings, client)
+        )
+
     return router
+
+
+def _copyright_risk_prompt(parsed: CopyrightRiskRequest) -> str:
+    context = parsed.context.strip()
+    prompt = parsed.prompt.strip()
+    return (
+        "你是图片版权与商标风险审查助手。请基于用户提供的最终生成图和上下文，"
+        "用中文给出简短、务实、非法律意见的风险提醒。\n"
+        "重点查看：商标/Logo、赛事或活动标识、奥运/冬奥等受保护元素、名人肖像、"
+        "第三方品牌、IP角色、受版权保护的艺术风格或包装版式、可识别摄影作品。\n"
+        "已知前提：图片素材通常来自用户自己，用户声称有授权，所以总体风险可能不高；"
+        "但仍需指出画面元素本身可能触发复核的地方。\n"
+        "输出格式：\n"
+        "风险等级：低/中/高\n"
+        "可能风险点：用 1-4 条短句\n"
+        "建议：用 1-3 条短句\n"
+        "如果没有明显风险，说明“未见明显第三方侵权元素”，但提醒商用前确认授权链。\n\n"
+        f"用户提示词：{prompt or '未提供'}\n"
+        f"生成上下文：{context or '未提供'}"
+    )
+
+
+def _extract_text_output(payload: dict[str, Any]) -> str:
+    text = payload.get("output_text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        chunks: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_text = block.get("text")
+                    if isinstance(block_text, str) and block_text.strip():
+                        chunks.append(block_text.strip())
+            item_text = item.get("text")
+            if isinstance(item_text, str) and item_text.strip():
+                chunks.append(item_text.strip())
+        if chunks:
+            return "\n".join(chunks)
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                maybe_text = item.get("text") or item.get("content")
+                if isinstance(maybe_text, str) and maybe_text.strip():
+                    return maybe_text.strip()
+    return ""
+
+
+async def handle_copyright_risk(
+    body: Any, settings: Settings, client: UpstreamClient
+) -> dict[str, Any]:
+    payload = _ensure_dict(body)
+    parsed = _validate_request(CopyrightRiskRequest, payload)
+
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 图像接口 URL",
+    )
+    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
+    api_key = (parsed.api_key or settings.default_api_key).strip()
+    if not api_key:
+        raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
+
+    image_parts = _request_image_parts(
+        image=None,
+        images=parsed.images,
+        max_image_bytes=settings.max_image_bytes,
+    )
+    content = _responses_inline_input_content(_copyright_risk_prompt(parsed), image_parts)
+    upstream_payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+    }
+    upstream_response = await client.run_responses(
+        endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+    )
+    return {
+        "model": model,
+        "risk_text": _extract_text_output(upstream_response) or "未能解析风险提醒文本。",
+        "raw_response": upstream_response,
+    }
 
 
 async def _with_timing(
@@ -264,7 +473,7 @@ async def handle_edit(
     body: Any, settings: Settings, client: UpstreamClient
 ) -> dict[str, Any]:
     payload = _ensure_dict(body)
-    if not payload.get("image"):
+    if not payload.get("image") and not payload.get("images"):
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 image 文件", code="bad_request")
     parsed = _validate_request(EditRequest, payload)
 
@@ -277,10 +486,16 @@ async def handle_edit(
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
-    image_part = _validate_image_size(parsed.image, settings.max_image_bytes)
+    image_parts = _request_image_parts(
+        image=parsed.image,
+        images=parsed.images,
+        max_image_bytes=settings.max_image_bytes,
+    )
+    if not image_parts:
+        raise APIError(HTTPStatus.BAD_REQUEST, "缺少 image 文件", code="bad_request")
     mask_part = _prepare_mask(parsed.mask, settings.max_image_bytes) if parsed.mask else None
 
-    files_for_multipart = [part for part in (image_part, mask_part) if part is not None]
+    files_for_multipart = [*image_parts, *([mask_part] if mask_part else [])]
     size = (parsed.size or "").strip()
     image_options = openai_image_options(payload)
     fields: dict[str, Any] = {
@@ -290,12 +505,21 @@ async def handle_edit(
     }
     if size and size != "auto":
         fields["size"] = size
+    if parsed.sample_count > 1:
+        fields["n"] = parsed.sample_count
 
-    upstream_response = await client.run_multipart(
-        endpoint_url, api_key, fields, files_for_multipart, settings.upstream_user_agent
+    upstream_response = await _run_multipart_candidates(
+        client=client,
+        endpoint_url=endpoint_url,
+        api_key=api_key,
+        fields=fields,
+        files=files_for_multipart,
+        user_agent=settings.upstream_user_agent,
+        sample_count=parsed.sample_count,
     )
     metadata = request_metadata({**payload, **image_options}, size=size or None)
     mode = (parsed.mode or "edit").strip() or "edit"
+    image_metadata = _image_reference_metadata(image_parts)
 
     return await _finalize_image_response(
         upstream_response=upstream_response,
@@ -306,9 +530,10 @@ async def handle_edit(
             "prompt": parsed.prompt,
             "model": model,
             "endpoint_url": endpoint_url,
-            "source_image_name": image_part["filename"],
+            **image_metadata,
             "mask_image_name": mask_part["filename"] if mask_part else None,
             "transport": "images-edit",
+            "sample_count": parsed.sample_count,
             **metadata,
         },
         extra={
@@ -317,24 +542,25 @@ async def handle_edit(
             "model": model,
             **metadata,
             "endpoint_url": endpoint_url,
-            "source_image_name": image_part["filename"],
+            **image_metadata,
             "mask_image_name": mask_part["filename"] if mask_part else None,
+            "sample_count": parsed.sample_count,
         },
     )
 
 
-def _responses_input_content(prompt: str, image_file_id: str | None) -> list[dict[str, str]]:
+def _responses_input_content(prompt: str, image_file_ids: list[str]) -> list[dict[str, str]]:
     content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
-    if image_file_id is not None:
+    for image_file_id in image_file_ids:
         content.append({"type": "input_image", "file_id": image_file_id})
     return content
 
 
 def _responses_inline_input_content(
-    prompt: str, image_part: dict[str, Any] | None
+    prompt: str, image_parts: list[dict[str, Any]]
 ) -> list[dict[str, str]]:
     content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
-    if image_part is not None:
+    for image_part in image_parts:
         image_b64 = base64.b64encode(image_part["data"]).decode("ascii")
         content.append(
             {
@@ -363,41 +589,51 @@ async def handle_responses_image(
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
-    image_part: dict[str, Any] | None = None
-    if parsed.image is not None and parsed.image.data_url:
-        image_part = _validate_image_size(parsed.image, settings.max_image_bytes)
+    image_parts = _request_image_parts(
+        image=parsed.image,
+        images=parsed.images,
+        max_image_bytes=settings.max_image_bytes,
+    )
+    image_parts = [part for part in image_parts if part.get("data")]
 
-    image_file_id: str | None = None
+    image_file_ids: list[str] = []
     files_endpoint_url: str | None = None
     upload_error: APIError | None = None
-    if image_part is not None:
+    if image_parts:
         files_endpoint_url = sibling_endpoint_url(endpoint_url, "files")
-        try:
-            upload_response = await client.run_file_upload(
-                files_endpoint_url,
-                api_key,
-                image_part,
-                settings.upstream_user_agent,
-            )
-            image_file_id = str(upload_response.get("id") or "").strip()
-        except APIError as exc:
-            upload_error = exc
-            if not parsed.allow_inline_fallback:
-                raise
-            log_event(
-                logger,
-                logging.WARNING,
-                "responses_image_file_upload_fallback",
-                endpoint_url=endpoint_url,
-                files_endpoint_url=files_endpoint_url,
-                filename=image_part["filename"],
-                file_bytes=len(image_part["data"]),
-                upload_error=exc.message,
-            )
+        for image_part in image_parts:
+            try:
+                upload_response = await client.run_file_upload(
+                    files_endpoint_url,
+                    api_key,
+                    image_part,
+                    settings.upstream_user_agent,
+                )
+                image_file_id = str(upload_response.get("id") or "").strip()
+                if image_file_id:
+                    image_file_ids.append(image_file_id)
+            except APIError as exc:
+                upload_error = exc
+                image_file_ids = []
+                if not parsed.allow_inline_fallback:
+                    raise
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "responses_image_file_upload_fallback",
+                    endpoint_url=endpoint_url,
+                    files_endpoint_url=files_endpoint_url,
+                    filename=image_part["filename"],
+                    file_bytes=len(image_part["data"]),
+                    upload_error=exc.message,
+                )
+                break
 
     tool: dict[str, Any] = {"type": "image_generation"}
     if size and size != "auto":
         tool["size"] = size
+    if parsed.sample_count > 1:
+        tool["n"] = parsed.sample_count
     for key in ("quality", "background", "output_format", "output_compression", "moderation"):
         if key in image_options:
             tool[key] = image_options[key]
@@ -409,9 +645,9 @@ async def handle_responses_image(
             {
                 "role": "user",
                 "content": (
-                    _responses_input_content(parsed.prompt, image_file_id)
+                    _responses_input_content(parsed.prompt, image_file_ids)
                     if upload_error is None
-                    else _responses_inline_input_content(parsed.prompt, image_part)
+                    else _responses_inline_input_content(parsed.prompt, image_parts)
                 ),
             }
         ],
@@ -422,7 +658,8 @@ async def handle_responses_image(
         endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
     )
     metadata = request_metadata({**payload, **image_options}, size=size)
-    mode = (parsed.mode or ("reference" if image_part else "responses")).strip() or "responses"
+    mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
+    image_metadata = _image_reference_metadata(image_parts)
 
     return await _finalize_image_response(
         upstream_response=upstream_response,
@@ -434,11 +671,13 @@ async def handle_responses_image(
             "model": model,
             "endpoint_url": endpoint_url,
             "files_endpoint_url": files_endpoint_url,
-            "source_image_name": image_part["filename"] if image_part else None,
-            "source_file_id": image_file_id,
+            **image_metadata,
+            "source_file_id": image_file_ids[0] if image_file_ids else None,
+            "source_file_ids": image_file_ids,
             "file_upload_fallback": bool(upload_error),
             "file_upload_error": upload_error.message if upload_error else None,
             "transport": "responses-image",
+            "sample_count": parsed.sample_count,
             **metadata,
         },
         extra={
@@ -448,9 +687,11 @@ async def handle_responses_image(
             **metadata,
             "endpoint_url": endpoint_url,
             "files_endpoint_url": files_endpoint_url,
-            "source_image_name": image_part["filename"] if image_part else None,
-            "source_file_id": image_file_id,
+            **image_metadata,
+            "source_file_id": image_file_ids[0] if image_file_ids else None,
+            "source_file_ids": image_file_ids,
             "file_upload_fallback": bool(upload_error),
+            "sample_count": parsed.sample_count,
         },
     )
 

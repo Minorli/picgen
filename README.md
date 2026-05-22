@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 图像生成 / 编辑接口的本地工作台，**0.9.1** 起整体重写为企业级架构。它把
+一个面向 OpenAI 图像生成 / 编辑接口的本地工作台，**0.9.2** 起整体重写为企业级架构。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -10,7 +10,7 @@
 - 私有部署，对接兼容 OpenAI 协议的国内/自建上游
 - 嵌入企业内部工具链，作为带审计、限流、健康检查的接口网关
 
-## 0.9.1 主要特性
+## 0.9.2 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -60,11 +60,11 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t picgen:0.9.1 .
+docker build -t picgen:0.9.2 .
 docker run --rm -p 8000:8000 \
   -e PICGEN_DEFAULT_API_KEY=sk-... \
   -v $(pwd)/data:/app/data \
-  picgen:0.9.1
+  picgen:0.9.2
 ```
 
 或：
@@ -84,8 +84,8 @@ docker compose up -d
 | --- | --- | --- |
 | `PICGEN_DEFAULT_API_KEY` | 服务端默认上游 key（浏览器留空即用此值） | 空 |
 | `PICGEN_DEFAULT_GENERATE_URL` / `PICGEN_DEFAULT_EDIT_URL` / `PICGEN_DEFAULT_RESPONSES_URL` | 上游接口 URL | OpenAI 官方 |
-| `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.4` |
-| `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 600 |
+| `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.5` |
+| `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 1200 |
 | `PICGEN_UPSTREAM_MAX_RETRIES` | 5xx / 网络瞬时错误重试次数 | 2 |
 | `PICGEN_UPSTREAM_MAX_CONNECTIONS` | 连接池上限 | 64 |
 | `PICGEN_RATE_LIMIT_PER_MINUTE` / `PICGEN_RATE_LIMIT_BURST` | 限流配额 | 120 / 20 |
@@ -106,7 +106,7 @@ uv run picgen --print-config
 
 ## 图像通道
 
-PicGen 0.9.1 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.9.2 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
@@ -115,7 +115,7 @@ PicGen 0.9.1 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-ima
 | 基于结果延展 | `/api/edit` → `/v1/images/edits`（`mode: "variant"`） | `gpt-image-2` |
 | 编辑现有图 | `/api/edit` → `/v1/images/edits`（`mode: "edit"`） | `gpt-image-2` |
 
-页面"连接设置"里可一键切换为 **Responses API + `gpt-5.4`** 兜底通道，用于无法直接调
+页面"连接设置"里可一键切换为 **Responses API + `gpt-5.5`** 兜底通道，用于无法直接调
 Images Edit 的兼容代理（例如 sub2api ChatGPT OAuth）。Responses 通道开启后，编辑 / 参考图 /
 延展会改走 `/api/responses-image` + 流式 `image_generation` 工具，并优先把参考图上传到
 同源 `/v1/files` 拿 `file_id`，必要时回退到内联 Base64。
@@ -172,7 +172,7 @@ Responses 兜底通道默认 `stream: true`，并优先把参考图上传到同�
 
 ```json
 {
-  "model": "gpt-5.4",
+  "model": "gpt-5.5",
   "stream": true,
   "input": [
     {
@@ -267,7 +267,7 @@ PicGen 不会自动重试这类错误，以免触发更严格的封锁。
 
 `/v1/images/edits` + `gpt-image-2` 在某些 OAuth 池兼容代理上可能在 ~3 分钟后 502。
 在"连接设置 → 图像通道"切到 Responses，把 Responses 接口 URL 配为相同站点的
-`/v1/responses`、模型用上游已验证的 `gpt-5.4`，编辑 / 参考图 / 延展会自动改走流式
+`/v1/responses`、模型用上游已验证的 `gpt-5.5`，编辑 / 参考图 / 延展会自动改走流式
 `image_generation` 工具。带参考图时 PicGen 会先上传到 `/v1/files` 再用 `file_id` 调用。
 
 ## 协作与开源

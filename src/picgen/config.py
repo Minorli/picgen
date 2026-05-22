@@ -34,12 +34,12 @@ class Settings(BaseSettings):
     default_edit_url: str = "https://api.openai.com/v1/images/edits"
     default_responses_url: str = "https://api.openai.com/v1/responses"
     default_model: str = "gpt-image-2"
-    default_responses_model: str = "gpt-5.4"
+    default_responses_model: str = "gpt-5.5"
     default_size: str = "auto"
     default_api_key: str = ""
 
     upstream_user_agent: str = DEFAULT_USER_AGENT
-    upstream_timeout_seconds: float = Field(default=600.0, ge=10.0, le=3600.0)
+    upstream_timeout_seconds: float = Field(default=1200.0, ge=10.0, le=3600.0)
     upstream_connect_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
     upstream_max_connections: int = Field(default=64, ge=1, le=1024)
     upstream_max_keepalive: int = Field(default=16, ge=1, le=512)

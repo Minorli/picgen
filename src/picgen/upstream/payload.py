@@ -178,34 +178,22 @@ def normalize_responses_image_payload(
     return normalized
 
 
-def prepare_image_payload(
-    upstream: dict[str, Any],
+def _image_item_payload(
+    item: dict[str, Any],
     *,
+    upstream: dict[str, Any],
     data_dir: Path,
     outputs_dir: Path,
     user_agent: str,
     save_context: dict[str, Any],
     fetch_remote: Any | None = None,
+    index: int = 0,
 ) -> dict[str, Any]:
-    """Build the response payload sent back to the browser and persist the image.
-
-    `fetch_remote` is an optional callable used for downloading an image referenced
-    by URL. Tests may inject a stub here; in production it is wired to the async
-    httpx-based downloader bridged via anyio.
-    """
-
-    first_item: dict[str, Any] = {}
-    data_items = upstream.get("data")
-    if isinstance(data_items, list) and data_items:
-        maybe_item = data_items[0]
-        if isinstance(maybe_item, dict):
-            first_item = maybe_item
-
-    base64_image = first_item.get("b64_json")
+    base64_image = item.get("b64_json")
     image_data_url: str | None = None
     image_mime: str | None = None
     image_bytes: bytes | None = None
-    image_url = first_item.get("url")
+    image_url = item.get("url")
 
     if isinstance(base64_image, str) and base64_image:
         try:
@@ -227,6 +215,7 @@ def prepare_image_payload(
             image_mime=image_mime,
             metadata={
                 **save_context,
+                "candidate_index": index,
                 "created_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
                 "upstream_created": upstream.get("created"),
                 "upstream_image_url": image_url,
@@ -237,8 +226,51 @@ def prepare_image_payload(
     return {
         "image_data_url": image_data_url,
         "image_url": image_url,
-        "revised_prompt": first_item.get("revised_prompt"),
+        "revised_prompt": item.get("revised_prompt"),
+        **saved_payload,
+    }
+
+
+def prepare_image_payload(
+    upstream: dict[str, Any],
+    *,
+    data_dir: Path,
+    outputs_dir: Path,
+    user_agent: str,
+    save_context: dict[str, Any],
+    fetch_remote: Any | None = None,
+) -> dict[str, Any]:
+    """Build the response payload sent back to the browser and persist the image.
+
+    `fetch_remote` is an optional callable used for downloading an image referenced
+    by URL. Tests may inject a stub here; in production it is wired to the async
+    httpx-based downloader bridged via anyio.
+    """
+
+    data_items = upstream.get("data")
+    candidate_items = [item for item in data_items if isinstance(item, dict)] if isinstance(data_items, list) else []
+    images = [
+        _image_item_payload(
+            item,
+            upstream=upstream,
+            data_dir=data_dir,
+            outputs_dir=outputs_dir,
+            user_agent=user_agent,
+            save_context=save_context,
+            fetch_remote=fetch_remote,
+            index=index,
+        )
+        for index, item in enumerate(candidate_items)
+    ]
+    first_image = images[0] if images else {}
+
+    return {
+        "image_data_url": first_image.get("image_data_url"),
+        "image_url": first_image.get("image_url"),
+        "revised_prompt": first_image.get("revised_prompt"),
         "created": upstream.get("created"),
         "raw_response": upstream,
-        **saved_payload,
+        "images": images,
+        "candidate_count": len(images),
+        **first_image,
     }

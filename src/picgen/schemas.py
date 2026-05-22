@@ -15,6 +15,7 @@ class FilePayload(BaseModel):
     name: str = Field(default="image.png", max_length=255)
     type: str = Field(default="", max_length=128)
     data_url: str = Field(default="", description="data URL or raw base64 content")
+    role: str | None = Field(default=None, max_length=64)
 
     @field_validator("name", mode="after")
     @classmethod
@@ -67,9 +68,11 @@ class EditRequest(_ImageOptions):
     model: str | None = Field(default=None, max_length=128)
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
-    image: FilePayload
+    image: FilePayload | None = None
+    images: list[FilePayload] = Field(default_factory=list, max_length=16)
     mask: FilePayload | None = None
     mode: str | None = Field(default=None, max_length=64)
+    sample_count: int = Field(default=1, ge=1, le=10)
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> EditRequest:
@@ -86,13 +89,26 @@ class ResponsesImageRequest(_ImageOptions):
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
     image: FilePayload | None = None
+    images: list[FilePayload] = Field(default_factory=list, max_length=16)
     mode: str | None = Field(default=None, max_length=64)
+    sample_count: int = Field(default=1, ge=1, le=10)
     allow_inline_fallback: bool = True
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> ResponsesImageRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="Responses 图像提示词不能为空")
         return self
+
+
+class CopyrightRiskRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    prompt: str = Field(default="", max_length=32_000)
+    context: str = Field(default="", max_length=8_000)
+    endpoint_url: str | None = None
+    model: str | None = Field(default=None, max_length=128)
+    api_key: str | None = Field(default=None, max_length=512)
+    images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=1)
 
 
 class ConfigResponse(BaseModel):

@@ -147,6 +147,7 @@ class HttpxAsyncClient:
             "upstream_multipart_start",
             url=url,
             model=fields.get("model"),
+            sample_count=fields.get("n"),
             prompt_chars=len(str(fields.get("prompt") or "")),
             files=",".join(str(p.get("filename")) for p in files),
             body_bytes=len(body),
@@ -299,12 +300,13 @@ class HttpxAsyncClient:
                         elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                         body_chars=len(body_text),
                     )
-                    return normalize_responses_image_payload(
-                        ensure_json_object(
-                            self._parse_json(body_text, "Responses 图像接口"),
-                            "Responses 图像接口",
-                        )
+                    parsed = ensure_json_object(
+                        self._parse_json(body_text, "Responses 图像接口"),
+                        "Responses 图像接口",
                     )
+                    if payload.get("tools"):
+                        return normalize_responses_image_payload(parsed)
+                    return parsed
             except APIError as exc:
                 if attempt < self.max_retries and exc.status in _RETRY_STATUS:
                     await self._sleep_for_retry(attempt, url=url, status=exc.status)
