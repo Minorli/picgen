@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from urllib import parse
@@ -91,18 +91,32 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
                 return width, height
             index += segment_length
 
-    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP" and len(image_bytes) >= 30:
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP" and len(image_bytes) >= 16:
         chunk_type = image_bytes[12:16]
         if chunk_type == b"VP8X" and len(image_bytes) >= 30:
             width = int.from_bytes(image_bytes[24:27], "little") + 1
             height = int.from_bytes(image_bytes[27:30], "little") + 1
+            return width, height
+        if chunk_type == b"VP8 " and len(image_bytes) >= 30 and image_bytes[23:26] == b"\x9d\x01\x2a":
+            # Lossy keyframe: 3-byte frame tag, the 0x9d012a start code, then the
+            # 14-bit width and height (little-endian).
+            width = int.from_bytes(image_bytes[26:28], "little") & 0x3FFF
+            height = int.from_bytes(image_bytes[28:30], "little") & 0x3FFF
+            return width, height
+        if chunk_type == b"VP8L" and len(image_bytes) >= 25 and image_bytes[20] == 0x2F:
+            # Lossless: 0x2f signature, then 14-bit (width-1) and (height-1).
+            bits = int.from_bytes(image_bytes[21:25], "little")
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
             return width, height
 
     return None
 
 
 def storage_url_for_path(data_dir: Path, file_path: Path) -> str:
-    return f"/files/{file_path.relative_to(data_dir).as_posix()}"
+    # Relative URL (no leading slash) so it resolves correctly both when PicGen is
+    # served at the site root and when it is mounted under a sub-path (e.g. /picgen/).
+    return f"files/{file_path.relative_to(data_dir).as_posix()}"
 
 
 def resolve_storage_path(data_dir: Path, relative_path: str) -> Path:
@@ -197,13 +211,16 @@ def prune_old_outputs(outputs_dir: Path, retention_days: int) -> int:
 
     if retention_days <= 0 or not outputs_dir.exists():
         return 0
-    cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+    # Day-folders are named with local time in `save_output_image`, so compare
+    # against local time here too — mixing UTC and local would prune a day early
+    # or late for servers far from UTC.
+    cutoff = datetime.now() - timedelta(days=retention_days)
     removed = 0
     for entry in outputs_dir.iterdir():
         if not entry.is_dir():
             continue
         try:
-            day = datetime.strptime(entry.name, "%Y%m%d").replace(tzinfo=UTC)
+            day = datetime.strptime(entry.name, "%Y%m%d")
         except ValueError:
             continue
         if day < cutoff:

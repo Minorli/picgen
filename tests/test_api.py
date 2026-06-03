@@ -46,6 +46,14 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["upstream_timeout_seconds"] > 0
 
 
+def test_config_reports_custom_responses_url(make_client, settings_factory):
+    settings = settings_factory(default_responses_url="https://sub.tidba.com/v1/responses")
+    client, _, _ = make_client(settings=settings)
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json()["responses_url"] == "https://sub.tidba.com/v1/responses"
+
+
 def test_request_id_is_round_tripped(make_client):
     client, _, _ = make_client()
     response = client.get("/api/health", headers={"X-Request-ID": "abc1234567"})
@@ -75,6 +83,193 @@ def test_generate_requires_prompt_before_api_key(make_client):
     body = response.json()
     assert body["error"] == "生成提示词不能为空"
     assert body["code"] == "validation_error"
+
+
+def test_generate_defaults_to_one_candidate_without_sample_count(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sample_count"] == 1
+    assert payload["candidate_count"] == 1
+    # Persisted images are served from the saved file URL; the heavy inline data
+    # URL is dropped to keep the response small.
+    assert payload["saved_image_url"].startswith("files/outputs/")
+    assert payload["image_data_url"] is None
+    assert payload["images"][0]["image_data_url"] is None
+
+    upstream_payload = fake.run_json.await_args.args[2]
+    assert "n" not in upstream_payload
+
+
+def test_generate_accepts_three_candidates(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 1"},
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 2"},
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "candidate 3"},
+        ],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成三张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sample_count"] == 3
+    assert payload["candidate_count"] == 3
+    assert len(payload["images"]) == 3
+
+    upstream_payload = fake.run_json.await_args.args[2]
+    assert upstream_payload["n"] == 3
+
+
+def test_generate_fans_out_when_upstream_returns_fewer_candidates(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成三张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_count"] == 3
+    assert fake.run_json.await_count == 3
+    assert fake.run_json.await_args_list[0].args[2]["n"] == 3
+    assert "n" not in fake.run_json.await_args_list[1].args[2]
+
+
+def test_generate_retries_without_sample_count_after_502(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(502, "Upstream request failed", code="upstream_error"),
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成三张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_count"] == 3
+    assert fake.run_json.await_count == 4
+    assert fake.run_json.await_args_list[0].args[2]["n"] == 3
+    assert "n" not in fake.run_json.await_args_list[1].args[2]
+
+
+def test_generate_does_not_retry_on_content_moderation_400(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(400, "Your prompt is not allowed by the content policy", code="upstream_error"),
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成两张海报",
+            "model": "gpt-image-2",
+            "sample_count": 2,
+        },
+    )
+
+    # The bare " n" inside "is not allowed" must NOT be read as a sample-count
+    # error: the 400 should surface unchanged with no extra fallback call.
+    assert response.status_code == 400
+    assert fake.run_json.await_count == 1
+
+
+def test_generate_fanout_tolerates_partial_failure(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        APIError(502, "transient blip", code="upstream_error"),
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成三张海报",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    # Initial image plus one successful top-up; the failed concurrent call is tolerated.
+    assert response.json()["candidate_count"] == 2
+    assert fake.run_json.await_count == 3
+
+
+def test_generate_rejects_more_than_three_candidates(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成四张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 4,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    fake.run_json.assert_not_awaited()
 
 
 def test_edit_requires_image_payload(make_client, settings_factory):
@@ -116,7 +311,7 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     payload = response.json()
     assert payload["mode"] == "reference"
     assert payload["model"] == "gpt-image-2"
-    assert payload["saved_image_url"].startswith("/files/outputs/")
+    assert payload["saved_image_url"].startswith("files/outputs/")
     assert payload["raw_response"]["data"][0]["b64_json"].startswith("[omitted ")
     assert TINY_PNG_B64 not in str(payload["raw_response"])
 
@@ -344,7 +539,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     payload = response.json()
     assert payload["mode"] == "reference"
     assert payload["model"] == "gpt-5.5"
-    assert payload["saved_image_url"].startswith("/files/outputs/")
+    assert payload["saved_image_url"].startswith("files/outputs/")
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
@@ -473,6 +668,130 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
     assert "版权与商标风险审查助手" in content[0]["text"]
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_edit_accepts_logo_reference_and_prompt_guidance(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": (
+                "生成海报\n\n"
+                "6 人游 LOGO 合成要求：请把参考图中的 6 人游 LOGO 作为公司官方标识整合进最终画面。"
+            ),
+            "model": "gpt-image-2",
+            "mode": "generate-with-logo",
+            "images": [
+                {
+                    "name": "6renyou.png",
+                    "type": "image/png",
+                    "role": "brand_logo",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "generate-with-logo"
+    assert payload["source_image_names"] == ["6renyou.png"]
+    assert payload["source_image_roles"] == ["brand_logo"]
+    upstream_args = fake.run_multipart.await_args.args
+    fields = upstream_args[2]
+    assert "6 人游 LOGO 合成要求" in fields["prompt"]
+    files = upstream_args[3]
+    assert len(files) == 1
+    assert files[0]["filename"] == "6renyou.png"
+    assert files[0]["role"] == "brand_logo"
+
+
+def test_logo_reference_generation_keeps_single_candidate_by_default(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": "生成海报并自然合成 6 人游 LOGO",
+            "model": "gpt-image-2",
+            "mode": "reference-with-logo",
+            "logo_requested": True,
+            "images": [
+                {
+                    "name": "6renyou.png",
+                    "type": "image/png",
+                    "role": "brand_logo",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sample_count"] == 1
+    assert payload["logo_requested"] is True
+    fields = fake.run_multipart.await_args.args[2]
+    assert "n" not in fields
+
+
+def test_responses_image_accepts_logo_reference_and_preserves_order(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_file_upload.side_effect = [{"id": "file_source"}, {"id": "file_logo"}]
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "在现有图片中自然加入 6 人游 LOGO",
+            "model": "gpt-5.5",
+            "mode": "edit-with-logo",
+            "images": [
+                {
+                    "name": "source.png",
+                    "type": "image/png",
+                    "role": "source_image",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "6renyou.png",
+                    "type": "image/png",
+                    "role": "brand_logo",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_image_names"] == ["source.png", "6renyou.png"]
+    assert payload["source_image_roles"] == ["source_image", "brand_logo"]
+    assert payload["source_file_ids"] == ["file_source", "file_logo"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["input"][0]["content"] == [
+        {"type": "input_text", "text": "在现有图片中自然加入 6 人游 LOGO"},
+        {"type": "input_image", "file_id": "file_source"},
+        {"type": "input_image", "file_id": "file_logo"},
+    ]
+
+
+def test_logo_compose_endpoint_is_removed(make_client):
+    client, _, _ = make_client()
+    response = client.post("/api/logo-compose", json={})
+    assert response.status_code in {404, 405}
 
 
 def test_responses_image_can_fallback_to_inline_after_file_upload_error(make_client, settings_factory):
@@ -611,6 +930,53 @@ def test_payload_size_limit_counts_streamed_body_without_content_length():
 
     response_start = next(message for message in sent if message["type"] == "http.response.start")
     assert response_start["status"] == 413
+
+
+def test_payload_size_limit_streams_through_with_valid_content_length():
+    received: dict[str, object] = {}
+
+    async def echo_app(scope, receive, send):
+        message = await receive()
+        received["body"] = message.get("body")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    body = b'{"prompt":"hi"}'
+    app = BodySizeLimitMiddleware(echo_app, max_bytes=1024)
+    messages = [{"type": "http.request", "body": body, "more_body": False}]
+    sent: list[dict[str, object]] = []
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/generate",
+        "raw_path": b"/api/generate",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("testclient", 123),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    async def receive() -> dict[str, object]:
+        return messages.pop(0)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    import anyio
+
+    anyio.run(app, scope, receive, send)
+
+    # The body is forwarded untouched (fast path, no buffering/replay).
+    assert received["body"] == body
+    response_start = next(message for message in sent if message["type"] == "http.response.start")
+    assert response_start["status"] == 204
 
 
 def test_rate_limit_returns_429(make_client, settings_factory):

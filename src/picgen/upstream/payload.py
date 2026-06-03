@@ -248,8 +248,14 @@ def _image_item_payload(
             },
         )
 
+    # When the image is persisted, the browser loads it from the saved file URL
+    # (same-origin), so we drop the multi-megabyte inline data URL to keep
+    # responses small — especially with multiple candidates. The inline copy is
+    # only kept as a fallback when persistence failed.
+    inline_data_url = None if saved_payload.get("saved_image_url") else image_data_url
+
     return {
-        "image_data_url": image_data_url,
+        "image_data_url": inline_data_url,
         "image_url": image_url,
         "revised_prompt": item.get("revised_prompt"),
         **saved_payload,

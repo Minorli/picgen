@@ -75,11 +75,13 @@ class HttpxAsyncClient:
         max_keepalive: int = 16,
         max_retries: int = 2,
         retry_backoff: float = 0.75,
+        max_image_bytes: int = 32 * 1024 * 1024,
         http2: bool = False,
     ) -> None:
         self.total_timeout = total_timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        self.max_image_bytes = max_image_bytes
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=connect_timeout,
@@ -324,34 +326,90 @@ class HttpxAsyncClient:
         raise RuntimeError("unreachable")  # pragma: no cover
 
     async def fetch_image(self, url: str, user_agent: str) -> tuple[bytes, str]:
+        headers = upstream_headers(user_agent, {"Accept": "image/*"})
+        action = "下载上游返回图片"
         started_at = time.perf_counter()
-        response = await self._send(
-            "GET",
-            url,
-            content=None,
-            headers=upstream_headers(user_agent, {"Accept": "image/*"}),
-            event_prefix="upstream_image",
-            action="下载上游返回图片",
-        )
-        image_bytes = response.content
-        if not image_bytes:
-            raise APIError(
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                image_bytes, response_mime = await self._stream_download(
+                    url, headers, started_at=started_at, attempt=attempt
+                )
+            except APIError as exc:
+                if attempt < self.max_retries and exc.status in _RETRY_STATUS:
+                    await self._sleep_for_retry(attempt, url=url, status=exc.status)
+                    continue
+                raise
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                if attempt < self.max_retries:
+                    await self._sleep_for_retry(attempt, url=url, reason="timeout")
+                    continue
+                self._raise_network(exc, url=url, started_at=started_at, action=action)
+            except httpx.NetworkError as exc:
+                last_exc = exc
+                if attempt < self.max_retries:
+                    await self._sleep_for_retry(attempt, url=url, reason=str(exc))
+                    continue
+                self._raise_network(exc, url=url, started_at=started_at, action=action)
+            else:
+                if not image_bytes:
+                    raise APIError(
+                        HTTPStatus.BAD_GATEWAY,
+                        "上游返回了空图片",
+                        code="upstream_error",
+                    )
+                mime = response_mime if response_mime.startswith("image/") else detect_image_mime(image_bytes)
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "upstream_image_ok",
+                    url=url,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    bytes=len(image_bytes),
+                    response_mime=response_mime or None,
+                    attempts=attempt + 1,
+                )
+                return image_bytes, mime
+
+        assert last_exc is not None
+        self._raise_network(last_exc, url=url, started_at=started_at, action=action)
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def _stream_download(
+        self, url: str, headers: dict[str, str], *, started_at: float, attempt: int
+    ) -> tuple[bytes, str]:
+        """Download a remote image, enforcing ``max_image_bytes`` so a hostile or
+        malfunctioning upstream cannot exhaust memory."""
+
+        def _too_large() -> APIError:
+            return APIError(
                 HTTPStatus.BAD_GATEWAY,
-                "上游返回了空图片",
+                f"上游返回的图片过大，超过 {self.max_image_bytes // 1024} KB 上限",
                 code="upstream_error",
             )
-        response_mime = response.headers.get("content-type", "").split(";", 1)[0].strip()
-        if response_mime.startswith("image/"):
-            return image_bytes, response_mime
-        log_event(
-            logger,
-            logging.DEBUG,
-            "upstream_image_mime_inferred",
-            url=url,
-            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-            response_mime=response_mime,
-        )
-        return image_bytes, detect_image_mime(image_bytes)
+
+        async with self._client.stream("GET", url, headers=headers) as response:
+            if response.status_code >= 400:
+                body_text = (await response.aread()).decode("utf-8", errors="replace")
+                self._raise_for_status(
+                    response.status_code,
+                    body_text,
+                    url=url,
+                    started_at=started_at,
+                    event_prefix="upstream_image",
+                    attempt=attempt,
+                )
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > self.max_image_bytes:
+                raise _too_large()
+            buffer = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > self.max_image_bytes:
+                    raise _too_large()
+            response_mime = response.headers.get("content-type", "").split(";", 1)[0].strip()
+            return bytes(buffer), response_mime
 
     # --- internals ------------------------------------------------------
 
@@ -538,6 +596,7 @@ async def get_default_client(
     max_keepalive: int = 16,
     max_retries: int = 2,
     retry_backoff: float = 0.75,
+    max_image_bytes: int = 32 * 1024 * 1024,
 ) -> HttpxAsyncClient:
     global _default_client
     async with _default_lock:
@@ -549,6 +608,7 @@ async def get_default_client(
                 max_keepalive=max_keepalive,
                 max_retries=max_retries,
                 retry_backoff=retry_backoff,
+                max_image_bytes=max_image_bytes,
             )
     return _default_client
 

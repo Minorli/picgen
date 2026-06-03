@@ -200,8 +200,8 @@ data/outputs/YYYYMMDD/<mode>-<HHMMSS>-<uuid>.png
 data/outputs/YYYYMMDD/<mode>-<HHMMSS>-<uuid>.json   # sidecar 元数据
 ```
 
-落盘走临时文件 + `os.replace`，崩溃不会留下半截文件。开启 `PICGEN_STORAGE_RETENTION_DAYS`
-后可使用一次性清理：
+落盘走临时文件 + `os.replace`，崩溃不会留下半截文件。设置 `PICGEN_STORAGE_RETENTION_DAYS>0`
+后，服务运行期间会有后台任务定期（每 6 小时）清理过期日期目录；也可随时手动跑一次性清理：
 
 ```bash
 uv run picgen --prune-now

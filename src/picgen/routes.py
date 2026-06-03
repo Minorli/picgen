@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
 
@@ -25,7 +27,11 @@ from .schemas import (
     ReadinessResponse,
     ResponsesImageRequest,
 )
-from .storage import detect_image_mime, resolve_storage_path, sanitize_filename
+from .storage import (
+    detect_image_mime,
+    resolve_storage_path,
+    sanitize_filename,
+)
 from .upstream import (
     compact_raw_response,
     openai_image_options,
@@ -110,7 +116,23 @@ def _extend_candidate_items(target: dict[str, Any], source: dict[str, Any], limi
 
 def _error_mentions_sample_count(exc: APIError) -> bool:
     haystack = f"{exc.message}\n{exc.details or ''}".lower()
-    return " n" in haystack or '"n"' in haystack or "sample" in haystack
+    # Be specific: a bare " n" substring matches ordinary prose ("is not
+    # allowed", "no credit") and would wrongly strip `n` on, e.g., a content
+    # moderation 400. Only react to errors that actually name the sample-count
+    # parameter.
+    needles = (
+        '"n"',
+        "'n'",
+        "parameter n",
+        "param n",
+        "value of n",
+        "n must",
+        "sample",
+        "best_of",
+        "num_images",
+        "n_images",
+    )
+    return any(needle in haystack for needle in needles)
 
 
 def _should_retry_without_sample_count(exc: APIError, sample_count: int) -> bool:
@@ -125,6 +147,34 @@ def _should_retry_without_sample_count(exc: APIError, sample_count: int) -> bool
     }
 
 
+async def _fill_candidates(
+    *,
+    initial: dict[str, Any],
+    call_without_sample_count: Callable[[], Awaitable[dict[str, Any]]],
+    sample_count: int,
+) -> dict[str, Any]:
+    """Top ``initial`` up to ``sample_count`` candidates.
+
+    When the upstream ignores ``n`` and returns a single image per call, the
+    missing images are fetched concurrently — each upstream call can take
+    minutes, so issuing them serially would multiply end-to-end latency.
+    Individual failures are tolerated: we return whatever candidates we managed
+    to collect rather than discarding a successful first image.
+    """
+
+    deficit = sample_count - len(_candidate_items(initial))
+    if deficit <= 0:
+        return initial
+    results = await asyncio.gather(
+        *(call_without_sample_count() for _ in range(deficit)),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, dict):
+            _extend_candidate_items(initial, result, sample_count)
+    return initial
+
+
 async def _run_multipart_candidates(
     *,
     client: UpstreamClient,
@@ -135,12 +185,16 @@ async def _run_multipart_candidates(
     user_agent: str,
     sample_count: int,
 ) -> dict[str, Any]:
+    fallback_fields = {key: value for key, value in fields.items() if key != "n"}
+
+    async def _call_without_n() -> dict[str, Any]:
+        return await client.run_multipart(endpoint_url, api_key, fallback_fields, files, user_agent)
+
     try:
         response = await client.run_multipart(endpoint_url, api_key, fields, files, user_agent)
     except APIError as exc:
         if not _should_retry_without_sample_count(exc, sample_count):
             raise
-        fallback_fields = {key: value for key, value in fields.items() if key != "n"}
         log_event(
             logger,
             logging.WARNING,
@@ -150,23 +204,50 @@ async def _run_multipart_candidates(
             status=exc.status,
             message=exc.message,
         )
-        response = await client.run_multipart(endpoint_url, api_key, fallback_fields, files, user_agent)
+        response = await _call_without_n()
 
-    while len(_candidate_items(response)) < sample_count:
-        fallback_fields = {key: value for key, value in fields.items() if key != "n"}
-        next_response = await client.run_multipart(
-            endpoint_url,
-            api_key,
-            fallback_fields,
-            files,
-            user_agent,
+    return await _fill_candidates(
+        initial=response,
+        call_without_sample_count=_call_without_n,
+        sample_count=sample_count,
+    )
+
+
+async def _run_json_candidates(
+    *,
+    client: UpstreamClient,
+    endpoint_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    user_agent: str,
+    sample_count: int,
+) -> dict[str, Any]:
+    fallback_payload = {key: value for key, value in payload.items() if key != "n"}
+
+    async def _call_without_n() -> dict[str, Any]:
+        return await client.run_json(endpoint_url, api_key, fallback_payload, user_agent)
+
+    try:
+        response = await client.run_json(endpoint_url, api_key, payload, user_agent)
+    except APIError as exc:
+        if not _should_retry_without_sample_count(exc, sample_count):
+            raise
+        log_event(
+            logger,
+            logging.WARNING,
+            "images_generate_sample_count_fallback",
+            endpoint_url=endpoint_url,
+            sample_count=sample_count,
+            status=exc.status,
+            message=exc.message,
         )
-        before_count = len(_candidate_items(response))
-        _extend_candidate_items(response, next_response, sample_count)
-        if len(_candidate_items(response)) <= before_count:
-            break
+        response = await _call_without_n()
 
-    return response
+    return await _fill_candidates(
+        initial=response,
+        call_without_sample_count=_call_without_n,
+        sample_count=sample_count,
+    )
 
 
 def _prepare_mask(part: FilePayload, max_image_bytes: int) -> dict[str, Any]:
@@ -442,9 +523,16 @@ async def handle_generate(
     }
     if size and size != "auto":
         upstream_payload["size"] = size
+    if parsed.sample_count > 1:
+        upstream_payload["n"] = parsed.sample_count
 
-    upstream_response = await client.run_json(
-        endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+    upstream_response = await _run_json_candidates(
+        client=client,
+        endpoint_url=endpoint_url,
+        api_key=api_key,
+        payload=upstream_payload,
+        user_agent=settings.upstream_user_agent,
+        sample_count=parsed.sample_count,
     )
     metadata = request_metadata({**payload, **image_options}, size=size)
 
@@ -458,12 +546,16 @@ async def handle_generate(
             "model": model,
             "endpoint_url": endpoint_url,
             "transport": "images-generate",
+            "sample_count": parsed.sample_count,
+            "logo_requested": parsed.logo_requested,
             **metadata,
         },
         extra={
             "mode": "generate",
             "prompt": parsed.prompt,
             "model": model,
+            "logo_requested": parsed.logo_requested,
+            "sample_count": parsed.sample_count,
             **metadata,
             "endpoint_url": endpoint_url,
         },
@@ -535,12 +627,14 @@ async def handle_edit(
             "mask_image_name": mask_part["filename"] if mask_part else None,
             "transport": "images-edit",
             "sample_count": parsed.sample_count,
+            "logo_requested": parsed.logo_requested,
             **metadata,
         },
         extra={
             "mode": mode,
             "prompt": parsed.prompt,
             "model": model,
+            "logo_requested": parsed.logo_requested,
             **metadata,
             "endpoint_url": endpoint_url,
             **image_metadata,
@@ -679,12 +773,14 @@ async def handle_responses_image(
             "file_upload_error": upload_error.message if upload_error else None,
             "transport": "responses-image",
             "sample_count": parsed.sample_count,
+            "logo_requested": parsed.logo_requested,
             **metadata,
         },
         extra={
             "mode": mode,
             "prompt": parsed.prompt,
             "model": model,
+            "logo_requested": parsed.logo_requested,
             **metadata,
             "endpoint_url": endpoint_url,
             "files_endpoint_url": files_endpoint_url,

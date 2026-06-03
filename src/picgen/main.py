@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -11,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .config import Settings
 from .errors import APIError
-from .logging_config import configure_logging, get_logger
+from .logging_config import configure_logging, get_logger, log_event
 from .middleware import (
     BodySizeLimitMiddleware,
     ProxyAuthMiddleware,
@@ -21,9 +24,40 @@ from .middleware import (
     api_error_response,
 )
 from .routes import create_router
+from .storage import prune_old_outputs
 from .upstream import HttpxAsyncClient
 
 logger = get_logger("picgen.app")
+
+# How often the background task re-checks for day-folders past the retention window.
+_RETENTION_SWEEP_SECONDS = 6 * 60 * 60
+
+
+async def _retention_loop(settings: Settings) -> None:
+    """Periodically prune outputs older than the configured retention window.
+
+    Runs only when ``storage_retention_days > 0``; pruning itself is blocking
+    filesystem I/O, so it is dispatched to a worker thread.
+    """
+
+    if settings.storage_retention_days <= 0:
+        return
+    while True:
+        try:
+            removed = await anyio.to_thread.run_sync(
+                prune_old_outputs, settings.outputs_dir, settings.storage_retention_days
+            )
+            if removed:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "storage_retention_sweep",
+                    removed=removed,
+                    retention_days=settings.storage_retention_days,
+                )
+        except Exception as exc:  # pragma: no cover - defensive; never kill the loop
+            log_event(logger, logging.WARNING, "storage_retention_error", error=str(exc))
+        await asyncio.sleep(_RETENTION_SWEEP_SECONDS)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -40,11 +74,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_keepalive=resolved_settings.upstream_max_keepalive,
             max_retries=resolved_settings.upstream_max_retries,
             retry_backoff=resolved_settings.upstream_retry_backoff,
+            max_image_bytes=resolved_settings.max_image_bytes,
         )
         app.state.upstream_client = client
+        prune_task = asyncio.create_task(_retention_loop(resolved_settings))
         try:
             yield
         finally:
+            prune_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prune_task
             await client.aclose()
 
     app = FastAPI(

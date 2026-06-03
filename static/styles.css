@@ -777,6 +777,14 @@ select:focus,
   font-weight: 800;
 }
 
+.param-grid small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .size-stack {
   display: grid;
   gap: 8px;
@@ -1095,6 +1103,43 @@ select:focus,
   white-space: pre-wrap;
 }
 
+.logo-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(0, 149, 104, 0.2);
+  border-radius: 8px;
+  background: #f6fbf9;
+}
+
+.logo-panel-title,
+.logo-panel-title label {
+  display: flex;
+  align-items: center;
+}
+
+.logo-panel-title {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.logo-panel-title label {
+  gap: 8px;
+  color: #0f513d;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.logo-panel-title input {
+  accent-color: var(--green);
+}
+
+.logo-panel-title strong {
+  color: var(--green-dark);
+  font-size: 12px;
+}
+
 .status-list div {
   display: grid;
   grid-template-columns: 18px 1fr 1.1fr auto;
@@ -1286,6 +1331,36 @@ select:focus,
   color: var(--danger);
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.error-details {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 12px;
+}
+
+.error-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.error-details pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: #101827;
+  color: #f8fafc;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .debug-panel,

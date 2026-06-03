@@ -36,6 +36,7 @@ class FakeUpstreamClient:
 def settings_factory(tmp_path: Path):
     def _factory(**overrides: Any) -> Settings:
         base = {
+            "_env_file": None,
             "root_dir": tmp_path,
             "static_dir": tmp_path,
             "data_dir": tmp_path / "data",
