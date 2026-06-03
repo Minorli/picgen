@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="/styles.css?v=progress-risk-20260522a">
+    <link rel="stylesheet" href="styles.css?v=sample-count-20260602a">
   </head>
   <body>
     <div class="desktop-shell">
@@ -203,6 +203,11 @@
                       <option value="low">Low</option>
                     </select>
                   </label>
+                  <label>
+                    <span>生成数量</span>
+                    <input id="generateSampleCountInput" type="number" min="1" max="3" step="1" inputmode="numeric" placeholder="默认 1">
+                    <small id="generateSampleCountHint">纯文字生图可填 1-3；其他模式按现有逻辑。</small>
+                  </label>
                 </div>
               </section>
 
@@ -357,6 +362,15 @@
                   </div>
                   <p id="copyrightRiskText">生成完成后自动检查。</p>
                 </div>
+                <div class="logo-panel">
+                  <div class="logo-panel-title">
+                    <label>
+                      <input id="logoOverlayEnabled" type="checkbox" checked>
+                      <span>是否打上 6 人游 LOGO</span>
+                    </label>
+                    <strong id="logoComposeStatus">AI 合成</strong>
+                  </div>
+                </div>
               </section>
             </section>
 
@@ -406,6 +420,10 @@
 
             <div class="feedback-strip">
               <p id="errorMessage" class="error-text" role="alert"></p>
+              <details id="errorDetails" class="error-details hidden">
+                <summary>技术详情（出问题时给技术同事看）</summary>
+                <pre id="errorDetailsText"></pre>
+              </details>
             </div>
 
             <details class="debug-panel">
@@ -468,6 +486,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=review-hardening-20260522a" type="module"></script>
+    <script src="app.js?v=sample-count-20260602a" type="module"></script>
   </body>
 </html>

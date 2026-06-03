@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 
@@ -45,6 +45,30 @@ def test_detect_png_dimensions() -> None:
         b"\x00\x00\x00\x00"
     )
     assert detect_image_dimensions(image_bytes) == (2, 3)
+
+
+def test_detect_webp_vp8_lossy_dimensions() -> None:
+    image_bytes = (
+        b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP"
+        + b"VP8 " + b"\x00\x00\x00\x00"
+        + b"\x00\x00\x00"  # 3-byte frame tag
+        + b"\x9d\x01\x2a"  # keyframe start code
+        + (4).to_bytes(2, "little")  # width
+        + (5).to_bytes(2, "little")  # height
+    )
+    assert detect_image_dimensions(image_bytes) == (4, 5)
+
+
+def test_detect_webp_vp8l_lossless_dimensions() -> None:
+    # width-1 = 3, height-1 = 4 packed into 14-bit fields.
+    bits = (3) | (4 << 14)
+    image_bytes = (
+        b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP"
+        + b"VP8L" + b"\x00\x00\x00\x00"
+        + b"\x2f"
+        + bits.to_bytes(4, "little")
+    )
+    assert detect_image_dimensions(image_bytes) == (4, 5)
 
 
 def test_detect_image_mime_recognises_signatures() -> None:
@@ -94,10 +118,10 @@ def test_save_output_image_atomic(tmp_path: Path) -> None:
 
 def test_prune_old_outputs_removes_old_folders(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
-    keep = outputs / datetime.now(tz=UTC).strftime("%Y%m%d")
+    keep = outputs / datetime.now().strftime("%Y%m%d")
     keep.mkdir(parents=True)
     (keep / "a.png").write_bytes(b"x")
-    old = outputs / (datetime.now(tz=UTC) - timedelta(days=30)).strftime("%Y%m%d")
+    old = outputs / (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
     old.mkdir(parents=True)
     (old / "b.png").write_bytes(b"x")
 

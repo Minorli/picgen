@@ -1,6 +1,19 @@
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
+const COMPANY_LOGO_B64_URL = "6renyou.png.b64"
+const COMPANY_LOGO_NAME = "6renyou.png"
+const COMPANY_LOGO_MIME = "image/png"
+const COMPANY_LOGO_GUIDANCE = [
+  "",
+  "6 人游 LOGO 合成要求：",
+  "请把参考图中的 6 人游 LOGO 作为公司官方标识整合进最终画面，默认放在左上角的合理位置，整体 LOGO 面积要小一些，做成克制的品牌角标而不是主视觉元素。",
+  "LOGO 由左侧图标和右侧两行文字组成：第一行文字必须精确保留为“6 人游定制旅行”，第二行文字必须精确保留为“Friends & Family”。",
+  "必须保持 LOGO 的图标样式、文字内容、文字顺序、两行布局、比例、笔画结构和透明区域不变；不能删减、改写、翻译、替换大小写或改变这些文字内容。",
+  "左侧图标原本的几种绿色必须保持不变，不能改成白色、黑色、单色或其他品牌色，也不能重新绘制图标。",
+  "为了画面可读性，只能调整右侧两行文字的颜色；文字颜色应与背景和整体设计协调，避免突兀，可使用白色、浅色、深色或轻微描边/阴影来保证清晰。",
+  "请让 LOGO 与最终设计的构图、光影、材质和留白协调，避免像后期随意贴上去的水印；尺寸控制在不抢主视觉的较小比例。",
+].join("\n")
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
@@ -8,6 +21,7 @@ const WORKSPACE_KEY = "current-workspace"
 const WORKSPACE_VERSION = 1
 const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
 const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
+const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 
 const SIZE_PRESETS = [
@@ -115,6 +129,7 @@ const refs = {
   outputFormatSelect: document.querySelector("#outputFormatSelect"),
   outputCompressionInput: document.querySelector("#outputCompressionInput"),
   moderationSelect: document.querySelector("#moderationSelect"),
+  generateSampleCountInput: document.querySelector("#generateSampleCountInput"),
   visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
@@ -161,12 +176,17 @@ const refs = {
   copyrightRiskPanel: document.querySelector("#copyrightRiskPanel"),
   copyrightRiskStatus: document.querySelector("#copyrightRiskStatus"),
   copyrightRiskText: document.querySelector("#copyrightRiskText"),
+  logoOverlayEnabled: document.querySelector("#logoOverlayEnabled"),
+  logoComposeStatus: document.querySelector("#logoComposeStatus"),
+  generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
+  errorDetails: document.querySelector("#errorDetails"),
+  errorDetailsText: document.querySelector("#errorDetailsText"),
   debugOutput: document.querySelector("#debugOutput"),
   rawResponseOutput: document.querySelector("#rawResponseOutput"),
   previewModal: document.querySelector("#previewModal"),
@@ -301,6 +321,8 @@ function summarizePayloadForDebug(payload) {
     outputFormat: payload.output_format,
     outputCompression: payload.output_compression,
     moderation: payload.moderation,
+    sampleCount: payload.sample_count,
+    logoRequested: payload.logo_requested,
     promptChars: String(payload.prompt || "").length,
     hasApiKey: Boolean(payload.api_key),
     imageName: payload.image?.name,
@@ -340,10 +362,12 @@ function createWorkspaceSnapshot() {
       outputFormat: refs.outputFormatSelect.value,
       outputCompression: refs.outputCompressionInput.value,
       moderation: refs.moderationSelect.value,
+      generateSampleCount: refs.generateSampleCountInput.value,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
       imageTransport: getImageTransport(),
+      logoOverlayEnabled: refs.logoOverlayEnabled.checked,
     },
     result: {
       promptText: refs.resultPrompt.textContent,
@@ -412,6 +436,7 @@ async function restoreWorkspaceState() {
   refs.outputFormatSelect.value = forms.outputFormat || "png"
   refs.outputCompressionInput.value = forms.outputCompression || "100"
   refs.moderationSelect.value = forms.moderation || "auto"
+  refs.generateSampleCountInput.value = forms.generateSampleCount || ""
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
@@ -421,6 +446,8 @@ async function restoreWorkspaceState() {
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
   refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
+  refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
+  updateLogoControlUI()
   if (forms.imageTransport) {
     setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
   }
@@ -592,6 +619,7 @@ function updateGenerateIntentUI() {
     : hasReference
       ? "参考图生成"
       : "开始生成"
+  updateGenerateSampleCountUI()
 }
 
 function generateReferenceImages() {
@@ -696,11 +724,15 @@ function saveSettings() {
 function loadSettings() {
   const local = loadJSON(STORAGE_KEY, {})
   const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
+  const localResponsesUrl = local.responsesUrl || ""
+  const responsesUrl = DEPRECATED_RESPONSES_URLS.has(localResponsesUrl) && state.serverConfig.responses_url
+    ? state.serverConfig.responses_url
+    : localResponsesUrl || state.serverConfig.responses_url || ""
   state.savedApiKey = local.apiKey || legacy.apiKey || ""
   refs.apiKeyInput.value = ""
   refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
   refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
-  refs.responsesUrlInput.value = local.responsesUrl || state.serverConfig.responses_url || ""
+  refs.responsesUrlInput.value = responsesUrl
   refs.responsesModelInput.value = normalizeResponsesModel(local.responsesModel || state.serverConfig.default_responses_model)
 
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
@@ -771,6 +803,80 @@ function getSettings() {
     responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
     imageTransport: getImageTransport(),
   }
+}
+
+function updateLogoControlUI() {
+  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled.checked ? "AI 合成" : "未启用"
+  updateGenerateSampleCountUI()
+}
+
+function shouldUseCompanyLogo() {
+  return Boolean(refs.logoOverlayEnabled?.checked)
+}
+
+function updateGenerateSampleCountUI() {
+  const hasReference = Boolean(generateReferenceImages().length)
+  const isVariant = state.generateIntent === "variant"
+  const logoRequested = shouldUseCompanyLogo()
+  const disabled = logoRequested || hasReference || isVariant
+  refs.generateSampleCountInput.disabled = disabled
+  refs.generateSampleCountInput.closest("label")?.classList.toggle("is-disabled", disabled)
+
+  if (isVariant) {
+    refs.generateSampleCountHint.textContent = "基于当前结果延展固定 1 张。"
+  } else if (hasReference) {
+    refs.generateSampleCountHint.textContent = hasStyleTransferReferences()
+      ? "模板 + 素材图仍按现有逻辑默认 3 张。"
+      : "带参考图生成固定 1 张。"
+  } else if (logoRequested) {
+    refs.generateSampleCountHint.textContent = "带 LOGO 会走 AI 参考图合成，固定 1 张。"
+  } else {
+    refs.generateSampleCountHint.textContent = "纯文字生图可填 1-3；留空默认 1。"
+  }
+}
+
+function withCompanyLogoPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+  return logoRequested ? `${prompt.trim()}\n${COMPANY_LOGO_GUIDANCE}` : prompt
+}
+
+function logoContextPrompt(prompt, contextLabel, logoRequested = shouldUseCompanyLogo()) {
+  if (!logoRequested) {
+    return prompt
+  }
+  return withCompanyLogoPrompt(
+    `${prompt.trim()}\n本次任务需要基于${contextLabel}进行整体设计，不是简单覆盖贴图。`,
+    logoRequested,
+  )
+}
+
+async function buildCompanyLogoReferencePart() {
+  const response = await fetch(COMPANY_LOGO_B64_URL)
+  if (!response.ok) {
+    throw new Error("无法读取 6 人游 LOGO 图片。")
+  }
+  const logoBase64 = (await response.text()).replace(/\s+/g, "")
+  if (!logoBase64) {
+    throw new Error("6 人游 LOGO 图片内容为空。")
+  }
+  return {
+    name: COMPANY_LOGO_NAME,
+    type: COMPANY_LOGO_MIME,
+    data_url: `data:${COMPANY_LOGO_MIME};base64,${logoBase64}`,
+    role: "brand_logo",
+  }
+}
+
+async function appendCompanyLogoReference(parts, logoRequested = shouldUseCompanyLogo()) {
+  if (!logoRequested) {
+    refs.logoComposeStatus.textContent = "未启用"
+    return parts
+  }
+  refs.logoComposeStatus.textContent = "随请求提交"
+  appendDebugLine("将 6 人游 LOGO 作为 AI 参考图提交", {
+    placement: "top-left",
+    source: COMPANY_LOGO_NAME,
+  })
+  return [...parts, await buildCompanyLogoReferencePart()]
 }
 
 function requireEditSettings(settings, contextLabel) {
@@ -942,6 +1048,18 @@ function getOpenAIImageOptions() {
   return options
 }
 
+function getGenerateSampleCount() {
+  const rawValue = refs.generateSampleCountInput.value.trim()
+  if (!rawValue) {
+    return 1
+  }
+  const parsed = Number(rawValue)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3) {
+    throw new Error("生成数量必须在 1 到 3 之间。")
+  }
+  return parsed
+}
+
 function updateOpenAIOptionUI() {
   const supportsCompression = ["jpeg", "webp"].includes(refs.outputFormatSelect.value)
   refs.outputCompressionInput.disabled = !supportsCompression
@@ -1108,7 +1226,21 @@ function setBusy(isBusy, label, options = {}) {
 }
 
 function setError(message = "", details = "") {
-  refs.errorMessage.textContent = details ? `${message} ${details}` : message
+  refs.errorMessage.textContent = message
+  // Keep the alert to one plain-language sentence; technical details (raw
+  // upstream JSON, stack-ish text) go into a collapsed panel so non-technical
+  // users aren't faced with a scary wall of text, while a helper can still
+  // expand it when needed.
+  const hasDetails = Boolean(message && details)
+  if (refs.errorDetails) {
+    refs.errorDetails.classList.toggle("hidden", !hasDetails)
+    if (!hasDetails) {
+      refs.errorDetails.open = false
+    }
+  }
+  if (refs.errorDetailsText) {
+    refs.errorDetailsText.textContent = hasDetails ? details : ""
+  }
 }
 
 function setRiskPanel(status, text, { hidden = false } = {}) {
@@ -1154,6 +1286,7 @@ function updateGenerateReferenceUI() {
   }
 
   updateGenerateIntentUI()
+  updateGenerateSampleCountUI()
 }
 
 function setGenerateReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
@@ -1453,6 +1586,7 @@ function clearResult() {
   refs.resultMeta.textContent = ""
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = ""
+  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled?.checked ? "AI 合成" : "未启用"
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
@@ -1539,7 +1673,7 @@ function candidateAsset(candidate, payload, index) {
   }
 }
 
-function selectResultCandidate(index) {
+function selectResultCandidate(index, { persist = true } = {}) {
   const candidate = state.resultCandidates[index]
   const imageSource = candidateImageSource(candidate)
   if (!candidate || !imageSource) {
@@ -1561,7 +1695,9 @@ function selectResultCandidate(index) {
   refs.downloadButton.download = candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`
   renderResultCandidates()
   updatePreviewAvailability()
-  scheduleWorkspacePersist()
+  if (persist) {
+    scheduleWorkspacePersist()
+  }
 }
 
 function renderResultCandidates() {
@@ -1667,6 +1803,9 @@ function setResult(payload, durationMs, requestSource = null) {
   } else if (payload.transport === "images-generate") {
     metaParts.push("Images Gen")
   }
+  if (payload.logo_requested) {
+    metaParts.push("6 人游 LOGO")
+  }
   if (payload.size && payload.size !== "auto") {
     metaParts.push(payload.size)
   }
@@ -1703,6 +1842,7 @@ function setResult(payload, durationMs, requestSource = null) {
   refs.downloadButton.setAttribute("aria-disabled", "false")
   refs.downloadButton.download = firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
   renderResultCandidates()
+  refs.logoComposeStatus.textContent = payload.logo_requested ? "AI 已处理" : "未启用"
   void checkCopyrightRisk(payload)
 
   updateEditSourceUI()
@@ -1716,6 +1856,9 @@ function historySummary(item) {
   const parts = [item.model]
   if (item.transport === "responses-image") {
     parts.push("Responses")
+  }
+  if (item.logoRequested) {
+    parts.push("6 人游 LOGO")
   }
   if (item.size && item.size !== "auto") {
     parts.push(item.size)
@@ -1873,8 +2016,11 @@ async function postJSON(url, payload, options = {}) {
     appendDebugLine("本地代理返回错误", {
       requestId,
       error: data.error || "请求失败",
+      details: data.details || "",
     })
-    throw new Error(data.details ? `${data.error}\n${data.details}` : data.error || "请求失败")
+    const requestError = new Error(data.error || "请求失败")
+    requestError.details = data.details || ""
+    throw requestError
   }
 
   appendDebugLine("请求完成", {
@@ -1899,7 +2045,9 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
     })
     const data = await response.json()
     if (!response.ok) {
-      throw new Error(data.details ? `${data.error}\n${data.details}` : data.error || "请求失败")
+      const requestError = new Error(data.error || "请求失败")
+      requestError.details = data.details || ""
+      throw requestError
     }
     return data
   } finally {
@@ -1916,7 +2064,16 @@ async function checkCopyrightRisk(payload) {
 
   const selectedCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
   const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, state.selectedCandidateIndex || 0)
-  const sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
+  let sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
+  // Results are now served from the saved file URL instead of an inline data
+  // URL, so fetch the pixels on demand when we only have a URL.
+  if (!sourceDataUrl && selectedAsset) {
+    try {
+      sourceDataUrl = await ensureAssetDataUrl(selectedAsset)
+    } catch (error) {
+      appendDebugLine("版权检查取图失败", { error: error.message })
+    }
+  }
   const reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
   const images = reviewDataUrl
     ? [{
@@ -1933,7 +2090,7 @@ async function checkCopyrightRisk(payload) {
 
   setRiskPanel("检查中", "正在调用 gpt-5.5 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。")
   try {
-    const result = await postJSONSilent("/api/copyright-risk", {
+    const result = await postJSONSilent("api/copyright-risk", {
       api_key: settings.apiKey,
       endpoint_url: settings.responsesUrl,
       model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
@@ -2118,6 +2275,8 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
+  const logoRequested = shouldUseCompanyLogo()
+  const requestPrompt = logoContextPrompt(prompt, "当前结果图", logoRequested)
   let imageOptions
   let size
 
@@ -2147,7 +2306,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     size = getGenerateSize()
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
-    setError(error.message)
+    setError(error.message, error.details)
     return
   }
 
@@ -2174,54 +2333,61 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
       data_url: requestSourceDataUrl,
+      role: "source_image",
     }
+    const requestImages = await appendCompanyLogoReference([imagePart], logoRequested)
     let result
     if (useResponses) {
-      result = await postJSON("/api/responses-image", {
+      result = await postJSON("api/responses-image", {
         api_key: settings.apiKey,
         endpoint_url: settings.responsesUrl,
-        prompt,
+        prompt: requestPrompt,
         model,
-        mode: "variant",
+        mode: logoRequested ? "variant-with-logo" : "variant",
         transport: "responses-image",
+        logo_requested: logoRequested,
         allow_inline_fallback: true,
         size,
         ...imageOptions,
         image: imagePart,
+        images: requestImages,
       }, {
         mode: "variant",
         progressLabel: "提交延展请求",
         waitingLabel: "等待上游延展",
       })
     } else {
-      result = await postJSON("/api/edit", {
+      result = await postJSON("api/edit", {
         api_key: settings.apiKey,
         endpoint_url: settings.editUrl,
-        prompt,
+        prompt: requestPrompt,
         model,
-        mode: "variant",
+        mode: logoRequested ? "variant-with-logo" : "variant",
+        logo_requested: logoRequested,
         size,
         ...imageOptions,
         image: imagePart,
+        images: requestImages,
       }, {
         mode: "variant",
         progressLabel: "提交延展请求",
         waitingLabel: "等待上游延展",
       })
     }
-    setResult({ ...result, mode: "variant", transport }, performance.now() - startedAt, requestSource)
+    setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "variant",
       prompt,
       model,
       transport,
+      logoRequested,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
     appendDebugLine("延展请求失败", { error: error.message })
-    setError(error.message)
+    setError(error.message, error.details)
   } finally {
     setBusy(false, "空闲")
   }
@@ -2243,8 +2409,14 @@ async function submitGenerate() {
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const referenceImages = generateReferenceImages()
   const dualReference = hasStyleTransferReferences()
-  const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
-  const requestPrompt = dualReference ? styleTransferPrompt(prompt) : prompt
+  const logoRequested = shouldUseCompanyLogo()
+  const model = (referenceImages.length || logoRequested) && useResponses ? settings.responsesModel : imageModel
+  const requestPrompt = logoContextPrompt(
+    dualReference ? styleTransferPrompt(prompt) : prompt,
+    referenceImages.length ? "用户提供的参考图" : "6 人游 LOGO 参考图",
+    logoRequested,
+  )
+  const requiresReferenceTransport = referenceImages.length || logoRequested
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -2253,31 +2425,33 @@ async function submitGenerate() {
     return
   }
 
-  if (!referenceImages.length && !settings.generateUrl) {
+  if (!requiresReferenceTransport && !settings.generateUrl) {
     appendDebugLine("参数校验失败：生成接口 URL 为空")
     setError("请先填写生成接口 URL。")
     refs.generateUrlInput.focus()
     return
   }
 
-  if (referenceImages.length) {
+  if (requiresReferenceTransport) {
     if (useResponses) {
-      if (!requireResponsesSettings(settings, "带参考图生成")) {
+      if (!requireResponsesSettings(settings, logoRequested ? "带 LOGO 生成" : "带参考图生成")) {
         return
       }
-    } else if (!requireEditSettings(settings, "带参考图生成")) {
+    } else if (!requireEditSettings(settings, logoRequested ? "带 LOGO 生成" : "带参考图生成")) {
       return
     }
   }
 
   let size
   let imageOptions
+  let sampleCount
   try {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
+    sampleCount = logoRequested || referenceImages.length ? 1 : getGenerateSampleCount()
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
-    setError(error.message)
+    setError(error.message, error.details)
     return
   }
 
@@ -2286,21 +2460,21 @@ async function submitGenerate() {
   closePreview()
   setBusy(true, "生成中", {
     progressLabel: "准备生成图像",
-    expectedCount: dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : 1,
+    expectedCount: dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount,
     estimatedSecondsPerImage: 210,
   })
   previewPendingResult({
-    mode: referenceImages.length ? "reference" : "generate",
+    mode: requiresReferenceTransport ? "reference" : "generate",
     prompt,
     model,
     size,
-    sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || "",
+    sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || (logoRequested ? COMPANY_LOGO_NAME : ""),
   })
 
   const startedAt = performance.now()
 
   try {
-    if (referenceImages.length) {
+    if (requiresReferenceTransport) {
       appendDebugLine("读取生成参考图")
       setProgressPhase("preparing", "读取参考图")
       const requestSources = referenceImages.map((asset) => cloneImageAsset(asset))
@@ -2314,66 +2488,72 @@ async function submitGenerate() {
           role: referenceSource.role || referenceSource.origin || "reference",
         })
       }
-      const referencePart = referenceParts.at(-1)
+      const requestParts = await appendCompanyLogoReference(referenceParts, logoRequested)
+      const referencePart = requestParts.at(-1)
       const transport = useResponses ? "responses-image" : "images-edit"
-      const sampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : 1
+      const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
       let result
       if (useResponses) {
-        result = await postJSON("/api/responses-image", {
+        result = await postJSON("api/responses-image", {
           api_key: settings.apiKey,
           endpoint_url: settings.responsesUrl,
           prompt: requestPrompt,
           model: settings.responsesModel,
-          mode: "reference",
+          mode: logoRequested ? "reference-with-logo" : "reference",
           transport: "responses-image",
+          logo_requested: logoRequested,
           allow_inline_fallback: true,
-          sample_count: sampleCount,
+          sample_count: referenceSampleCount,
           size,
           ...imageOptions,
           image: referencePart,
-          images: referenceParts,
+          images: requestParts,
         }, {
           mode: "reference",
           progressLabel: "提交参考图生成",
           waitingLabel: "等待上游参考生成",
         })
       } else {
-        result = await postJSON("/api/edit", {
+        result = await postJSON("api/edit", {
           api_key: settings.apiKey,
           endpoint_url: settings.editUrl,
           prompt: requestPrompt,
           model: imageModel,
-          mode: "reference",
-          sample_count: sampleCount,
+          mode: logoRequested ? "reference-with-logo" : "reference",
+          logo_requested: logoRequested,
+          sample_count: referenceSampleCount,
           size,
           ...imageOptions,
           image: referencePart,
-          images: referenceParts,
+          images: requestParts,
         }, {
           mode: "reference",
           progressLabel: "提交参考图生成",
           waitingLabel: "等待上游参考生成",
         })
       }
-      setResult({ ...result, mode: "reference", prompt, size, transport }, performance.now() - startedAt, requestSources.at(-1))
+      setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSources.at(-1))
       pushHistory({
         mode: "reference",
         prompt,
         model: useResponses ? settings.responsesModel : imageModel,
         transport,
+        logoRequested,
         size,
-        sampleCount,
+        sampleCount: referenceSampleCount,
         ...imageOptions,
         createdAt: new Date().toISOString(),
       })
       return
     }
 
-    const result = await postJSON("/api/generate", {
+    const result = await postJSON("api/generate", {
       api_key: settings.apiKey,
       endpoint_url: settings.generateUrl,
       prompt,
       model,
+      logo_requested: false,
+      sample_count: sampleCount,
       size,
       ...imageOptions,
     }, {
@@ -2386,13 +2566,15 @@ async function submitGenerate() {
       mode: "generate",
       prompt,
       model,
+      logoRequested: false,
+      sampleCount,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
     appendDebugLine("生成请求失败", { error: error.message })
-    setError(error.message)
+    setError(error.message, error.details)
   } finally {
     setBusy(false, "空闲")
   }
@@ -2406,6 +2588,8 @@ async function submitEdit() {
   const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
+  const logoRequested = shouldUseCompanyLogo()
+  const requestPrompt = logoContextPrompt(prompt, "输入图", logoRequested)
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -2450,7 +2634,9 @@ async function submitEdit() {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
       data_url: requestSourceDataUrl,
+      role: "source_image",
     }
+    const requestImages = await appendCompanyLogoReference([imagePart], logoRequested)
 
     let maskPart = null
     if (state.editMaskImage) {
@@ -2468,17 +2654,19 @@ async function submitEdit() {
       const requestPayload = {
         api_key: settings.apiKey,
         endpoint_url: settings.responsesUrl,
-        prompt,
+        prompt: requestPrompt,
         model,
-        mode: "edit",
+        mode: logoRequested ? "edit-with-logo" : "edit",
         transport: "responses-image",
+        logo_requested: logoRequested,
         allow_inline_fallback: true,
         image: imagePart,
+        images: requestImages,
       }
       if (maskPart) {
         requestPayload.mask = maskPart
       }
-      result = await postJSON("/api/responses-image", requestPayload, {
+      result = await postJSON("api/responses-image", requestPayload, {
         mode: "edit",
         progressLabel: "提交 Responses 编辑请求",
         waitingLabel: "等待 Responses 图像流",
@@ -2487,31 +2675,34 @@ async function submitEdit() {
       const requestPayload = {
         api_key: settings.apiKey,
         endpoint_url: settings.editUrl,
-        prompt,
+        prompt: requestPrompt,
         model: imageModel,
-        mode: "edit",
+        mode: logoRequested ? "edit-with-logo" : "edit",
+        logo_requested: logoRequested,
         image: imagePart,
+        images: requestImages,
       }
       if (maskPart) {
         requestPayload.mask = maskPart
       }
-      result = await postJSON("/api/edit", requestPayload, {
+      result = await postJSON("api/edit", requestPayload, {
         mode: "edit",
         progressLabel: "提交编辑请求",
         waitingLabel: "等待上游编辑",
       })
     }
-    setResult({ ...result, mode: "edit", transport }, performance.now() - startedAt, requestSource)
+    setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
     pushHistory({
       mode: "edit",
       prompt,
       model,
       transport,
+      logoRequested,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
     appendDebugLine("编辑请求失败", { error: error.message })
-    setError(error.message)
+    setError(error.message, error.details)
   } finally {
     setBusy(false, "空闲")
   }
@@ -2527,9 +2718,12 @@ function clearGenerateForm() {
   refs.outputFormatSelect.value = "png"
   refs.outputCompressionInput.value = "100"
   refs.moderationSelect.value = "auto"
+  refs.generateSampleCountInput.value = ""
+  refs.logoOverlayEnabled.checked = true
   if (!state.lastResultImage) {
     state.generateIntent = "fresh"
   }
+  updateLogoControlUI()
   updateOpenAIOptionUI()
   updatePromptCounters()
   updateGenerateIntentUI()
@@ -2594,7 +2788,7 @@ async function handleClipboardPaste(event) {
     await useImageFile(file)
     setError("")
   } catch (error) {
-    setError(error.message)
+    setError(error.message, error.details)
   }
 }
 
@@ -2625,7 +2819,7 @@ function bindReferenceDropzone(dropzone, input, handler) {
       await handler(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
 
@@ -2655,7 +2849,7 @@ function bindReferenceDropzone(dropzone, input, handler) {
       await handler(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
 }
@@ -2775,6 +2969,7 @@ function bindEvents() {
     refs.outputFormatSelect,
     refs.outputCompressionInput,
     refs.moderationSelect,
+    refs.generateSampleCountInput,
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updateOpenAIOptionUI()
@@ -2788,6 +2983,17 @@ function bindEvents() {
 
   ;[refs.generateUrlInput, refs.editUrlInput, refs.responsesUrlInput, refs.responsesModelInput, refs.apiKeyInput].forEach((input) => {
     input.addEventListener("input", updateWorkflowStatus)
+  })
+
+  ;[refs.logoOverlayEnabled].forEach((input) => {
+    input.addEventListener("input", () => {
+      updateLogoControlUI()
+      scheduleWorkspacePersist()
+    })
+    input.addEventListener("change", () => {
+      updateLogoControlUI()
+      scheduleWorkspacePersist()
+    })
   })
 
   refs.promptChips.forEach((chip) => {
@@ -2834,7 +3040,7 @@ function bindEvents() {
       await useImageFile(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
 
@@ -2859,7 +3065,7 @@ function bindEvents() {
       await useMaskFile(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
   refs.clearEditMaskButton.addEventListener("click", (event) => {
@@ -2894,7 +3100,7 @@ function bindEvents() {
       await useMaskFile(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
 
@@ -2924,7 +3130,7 @@ function bindEvents() {
       await useImageFile(file)
       setError("")
     } catch (error) {
-      setError(error.message)
+      setError(error.message, error.details)
     }
   })
 
@@ -3004,7 +3210,7 @@ async function init() {
   renderHistory()
 
   try {
-    const response = await fetch("/api/config", { cache: "no-store" })
+    const response = await fetch("api/config", { cache: "no-store" })
     state.serverConfig = await response.json()
   } catch {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
@@ -3021,6 +3227,7 @@ async function init() {
 
   loadSettings()
   bindEvents()
+  updateLogoControlUI()
   updatePromptCounters()
   updateGenerateIntentUI()
   const restored = await restoreWorkspaceState()

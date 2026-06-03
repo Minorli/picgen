@@ -53,6 +53,8 @@ class GenerateRequest(_ImageOptions):
     model: str | None = Field(default=None, max_length=128)
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
+    sample_count: int = Field(default=1, ge=1, le=3)
+    logo_requested: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> GenerateRequest:
@@ -72,7 +74,8 @@ class EditRequest(_ImageOptions):
     images: list[FilePayload] = Field(default_factory=list, max_length=16)
     mask: FilePayload | None = None
     mode: str | None = Field(default=None, max_length=64)
-    sample_count: int = Field(default=1, ge=1, le=10)
+    sample_count: int = Field(default=1, ge=1, le=3)
+    logo_requested: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> EditRequest:
@@ -91,8 +94,9 @@ class ResponsesImageRequest(_ImageOptions):
     image: FilePayload | None = None
     images: list[FilePayload] = Field(default_factory=list, max_length=16)
     mode: str | None = Field(default=None, max_length=64)
-    sample_count: int = Field(default=1, ge=1, le=10)
+    sample_count: int = Field(default=1, ge=1, le=3)
     allow_inline_fallback: bool = True
+    logo_requested: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> ResponsesImageRequest:

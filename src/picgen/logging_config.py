@@ -6,6 +6,7 @@ import logging
 import sys
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _SENSITIVE_KEYS = frozenset(
     {
@@ -19,6 +20,41 @@ _SENSITIVE_KEYS = frozenset(
         "x-api-key",
     }
 )
+
+# Query-string parameters whose values must never reach the logs, even when they
+# are embedded in a client-supplied endpoint URL.
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "key",
+        "token",
+        "access_token",
+        "authorization",
+        "auth",
+        "password",
+        "secret",
+    }
+)
+
+
+def _redact_url_secrets(value: str) -> str:
+    """Mask sensitive query params in a URL string (e.g. ``?api_key=sk-...``)."""
+
+    if "://" not in value or "?" not in value:
+        return value
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    if not parsed.query:
+        return value
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    redacted = [(k, "***" if k.lower() in _SECRET_QUERY_KEYS else v) for k, v in pairs]
+    if redacted == pairs:
+        return value
+    # safe="*" keeps the "***" mask readable instead of percent-encoding it.
+    return urlunsplit(parsed._replace(query=urlencode(redacted, safe="*")))
 
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
@@ -44,7 +80,9 @@ def _scrub_value(key: str, value: Any) -> Any:
 
 
 def _coerce(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str):
+        return _redact_url_secrets(value)
+    if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple, set)):
         return [_coerce(item) for item in value]

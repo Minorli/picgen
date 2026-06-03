@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, HttpUrl, field_validator
@@ -58,7 +57,6 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_format: str = "console"
-    metrics_enabled: bool = False
 
     storage_retention_days: int = Field(default=0, ge=0, le=3650)
 
@@ -121,8 +119,3 @@ class Settings(BaseSettings):
     @classmethod
     def from_env(cls, **overrides: object) -> Settings:
         return cls(**overrides)  # type: ignore[arg-type]
-
-
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    return Settings()

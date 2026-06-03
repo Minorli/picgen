@@ -99,9 +99,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 class BodySizeLimitMiddleware:
     """Reject oversized requests before route parsing.
 
-    Content-Length is only a fast path. For chunked requests or missing headers
-    we read up to the configured limit, then replay the buffered body downstream.
-    The buffer is bounded by max_bytes, which is already the configured safety cap.
+    When a valid ``Content-Length`` is present and within the cap we stream
+    straight through: the server reads at most ``Content-Length`` body bytes, so
+    the limit is already enforced and there is no need to buffer. Only requests
+    without ``Content-Length`` (e.g. chunked transfer) are read up to the limit
+    and replayed downstream, bounded by ``max_bytes``.
     """
 
     def __init__(self, app: Any, *, max_bytes: int) -> None:
@@ -118,16 +120,9 @@ class BodySizeLimitMiddleware:
             for key, value in scope.get("headers", [])
         }
         content_length = headers.get("content-length")
-        if content_length:
+        if content_length is not None:
             try:
-                if int(content_length) > self.max_bytes:
-                    response = _error_response(
-                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                        f"请求体超过最大允许大小 {self.max_bytes} 字节",
-                        code="payload_too_large",
-                    )
-                    await response(scope, receive, send)
-                    return
+                declared = int(content_length)
             except ValueError:
                 response = _error_response(
                     HTTPStatus.BAD_REQUEST,
@@ -136,6 +131,17 @@ class BodySizeLimitMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+            if declared > self.max_bytes:
+                response = _error_response(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    f"请求体超过最大允许大小 {self.max_bytes} 字节",
+                    code="payload_too_large",
+                )
+                await response(scope, receive, send)
+                return
+            # Within the cap and the framing is known — no need to buffer/replay.
+            await self.app(scope, receive, send)
+            return
 
         body = bytearray()
         while True:
@@ -187,11 +193,27 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._lock = asyncio.Lock()
         self._minute_buckets: dict[str, deque[float]] = {}
         self._burst_buckets: dict[str, deque[float]] = {}
+        self._last_sweep = 0.0
 
     @staticmethod
     def _evict(bucket: deque[float], cutoff: float) -> None:
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
+
+    def _sweep_idle(self, now: float) -> None:
+        """Drop client keys whose windows are fully expired.
+
+        Without this the per-client dicts grow without bound — every distinct
+        source IP (or spoofed ``X-Forwarded-For`` value) would leave a permanent
+        empty deque behind. Called at most once per minute under the lock.
+        """
+
+        for buckets, window in ((self._minute_buckets, 60.0), (self._burst_buckets, 5.0)):
+            cutoff = now - window
+            for key in list(buckets):
+                self._evict(buckets[key], cutoff)
+                if not buckets[key]:
+                    del buckets[key]
 
     def _client_key(self, request: Request) -> str:
         if self.trust_forwarded_for:
@@ -208,6 +230,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client_key = self._client_key(request)
         now = time.monotonic()
         async with self._lock:
+            if now - self._last_sweep >= 60.0:
+                self._sweep_idle(now)
+                self._last_sweep = now
             minute_bucket = self._minute_buckets.setdefault(client_key, deque())
             burst_bucket = self._burst_buckets.setdefault(client_key, deque())
             self._evict(minute_bucket, now - 60.0)

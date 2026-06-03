@@ -88,6 +88,40 @@ async def test_fetch_image_returns_bytes_and_mime() -> None:
         await client.aclose()
 
 
+async def test_fetch_image_rejects_oversized_stream() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # No Content-Length declared up front; the cap must trigger while streaming.
+        return httpx.Response(200, content=b"\x89PNG" + b"x" * 4096)
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0, max_image_bytes=64)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.fetch_image("https://cdn.test/huge.png", "UA")
+        assert info.value.status == 502
+        assert "过大" in info.value.message
+    finally:
+        await client.aclose()
+
+
+async def test_fetch_image_rejects_oversized_content_length() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"\x89PNG",
+            headers={"Content-Length": "999999999"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0, max_image_bytes=64)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.fetch_image("https://cdn.test/huge.png", "UA")
+        assert info.value.status == 502
+    finally:
+        await client.aclose()
+
+
 async def test_run_responses_parses_sse() -> None:
     sse_body = (
         b"event: response.image_generation_call.partial_image\n"
