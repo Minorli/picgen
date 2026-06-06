@@ -289,6 +289,7 @@ class ConfigResponse(BaseModel):
     upstream_timeout_seconds: float
     auth_enabled: bool
     bug_report_notifications_enabled: bool
+    error_alert_notifications_enabled: bool
 
 
 class HealthResponse(BaseModel):

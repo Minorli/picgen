@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     bug_report_webhook_url: str = ""
     bug_report_webhook_kind: str = "wecom"
     bug_report_webhook_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    error_alert_telegram_bot_token: str = ""
+    error_alert_telegram_chat_id: str = ""
+    error_alert_telegram_timeout_seconds: float = Field(default=3.0, ge=1.0, le=30.0)
 
     log_level: str = "INFO"
     log_format: str = "console"
@@ -101,6 +104,8 @@ class Settings(BaseSettings):
         "proxy_auth_token",
         "upstream_user_agent",
         "bug_report_webhook_url",
+        "error_alert_telegram_bot_token",
+        "error_alert_telegram_chat_id",
         mode="after",
     )
     @classmethod

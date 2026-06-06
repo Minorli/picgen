@@ -10,12 +10,13 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import __version__
 from .auth import AuthStore
 from .config import Settings
 from .errors import APIError
-from .logging_config import configure_logging, get_logger, log_event
+from .logging_config import configure_logging, get_logger, get_request_id, log_event
 from .middleware import (
     BodySizeLimitMiddleware,
     ProxyAuthMiddleware,
@@ -23,7 +24,14 @@ from .middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
     api_error_response,
+    api_error_response_with,
 )
+from .notifications import (
+    ErrorAlert,
+    error_alert_notifications_enabled,
+    send_error_alert_notification,
+)
+from .redaction import redact_sensitive_text
 from .routes import create_router
 from .storage import prune_old_outputs
 from .upstream import HttpxAsyncClient
@@ -32,6 +40,17 @@ logger = get_logger("picgen.app")
 
 # How often the background task re-checks for day-folders past the retention window.
 _RETENTION_SWEEP_SECONDS = 6 * 60 * 60
+_ALERTABLE_ERROR_CODES = frozenset(
+    {
+        "internal_error",
+        "upstream_error",
+        "upstream_timeout",
+        "upstream_network_error",
+        "upstream_invalid_response",
+        "upstream_rate_limited",
+        "upstream_blocked",
+    }
+)
 
 
 async def _retention_loop(settings: Settings) -> None:
@@ -151,8 +170,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
 
     @app.exception_handler(APIError)
-    async def api_error_handler(_request: Request, exc: APIError) -> Any:
-        return api_error_response(exc)
+    async def api_error_handler(request: Request, exc: APIError) -> Any:
+        if not _should_use_operational_response(exc):
+            return api_error_response(exc)
+        should_alert = _should_alert_api_error(exc)
+        alert_enabled = error_alert_notifications_enabled(resolved_settings)
+        response = api_error_response_with(
+            status=exc.status,
+            message=_public_operational_error_message(exc, alert_enabled=alert_enabled and should_alert),
+            details=_public_operational_error_details(exc),
+            code=exc.code,
+        )
+        if alert_enabled and should_alert:
+            response.background = BackgroundTask(
+                _send_error_alert,
+                settings=resolved_settings,
+                alert=_build_error_alert(
+                    request=request,
+                    status=exc.status,
+                    code=exc.code,
+                    public_message=_public_operational_error_message(exc, alert_enabled=True),
+                    technical_message=exc.message,
+                    details=exc.details,
+                ),
+            )
+        return response
+
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception) -> Any:
+        log_event(
+            logger,
+            logging.ERROR,
+            "unhandled_exception",
+            method=request.method,
+            path=request.url.path,
+            error=type(exc).__name__,
+        )
+        alert_enabled = error_alert_notifications_enabled(resolved_settings)
+        public_message = (
+            "系统暂时遇到问题，后台已收到告警。请稍后再试。"
+            if alert_enabled
+            else "系统暂时遇到问题，请稍后再试。若问题持续，请联系管理员并提供 request_id。"
+        )
+        details = f"{type(exc).__name__}: {exc}"
+        response = api_error_response_with(
+            status=500,
+            message=public_message,
+            details=details,
+            code="internal_error",
+        )
+        if alert_enabled:
+            response.background = BackgroundTask(
+                _send_error_alert,
+                settings=resolved_settings,
+                alert=_build_error_alert(
+                    request=request,
+                    status=500,
+                    code="internal_error",
+                    public_message=public_message,
+                    technical_message=f"{type(exc).__name__}: {exc}",
+                    details=details,
+                ),
+            )
+        return response
 
     app.include_router(create_router())
 
@@ -167,3 +247,103 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def _should_alert_api_error(exc: APIError) -> bool:
+    if _is_content_policy_error(exc):
+        return False
+    if exc.code in _ALERTABLE_ERROR_CODES:
+        return not (exc.code == "upstream_error" and exc.status < 500)
+    return exc.status >= 500
+
+
+def _should_use_operational_response(exc: APIError) -> bool:
+    return exc.status >= 500 or exc.code.startswith("upstream_")
+
+
+def _public_operational_error_message(exc: APIError, *, alert_enabled: bool) -> str:
+    base = _base_operational_message(exc).rstrip("。")
+    if _is_content_policy_error(exc):
+        return f"{base}。"
+    if exc.code == "upstream_content_policy":
+        return f"{base}。"
+    if alert_enabled:
+        return f"{base}，后台已收到告警。请稍后再试。"
+    return f"{base}。若问题持续，请联系管理员并提供 request_id。"
+
+
+def _base_operational_message(exc: APIError) -> str:
+    if _is_content_policy_error(exc) or exc.code == "upstream_content_policy":
+        return "这次提示词没有通过上游内容审核，请调整描述后重试。"
+    if exc.code == "upstream_rate_limited":
+        return "图片生成服务当前请求较多，请稍后再试。"
+    if exc.code == "upstream_timeout":
+        return "图片生成服务响应超时，请稍后再试。"
+    if exc.code == "upstream_network_error":
+        return "暂时无法连接图片生成服务，请稍后再试。"
+    if exc.code == "upstream_invalid_response":
+        return "图片生成服务返回了无法解析的响应，请稍后再试。"
+    if exc.code == "upstream_blocked":
+        return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
+    if exc.code == "upstream_error":
+        return "图片生成服务暂时不可用，请稍后再试。"
+    if exc.status >= 500:
+        return "系统暂时遇到问题，请稍后再试。"
+    return redact_sensitive_text(exc.message, limit=500) or "系统暂时遇到问题，请稍后再试。"
+
+
+def _is_content_policy_error(exc: APIError) -> bool:
+    haystack = f"{exc.message}\n{exc.details or ''}".lower()
+    return any(
+        needle in haystack
+        for needle in (
+            "content policy",
+            "safety",
+            "moderation",
+            "not allowed",
+            "disallowed",
+            "policy violation",
+        )
+    )
+
+
+def _public_operational_error_details(exc: APIError) -> str | None:
+    details = redact_sensitive_text(exc.details or exc.message, limit=3600)
+    if not details:
+        return None
+    return details
+
+
+def _build_error_alert(
+    *,
+    request: Request,
+    status: int,
+    code: str,
+    public_message: str,
+    technical_message: str,
+    details: str | None,
+) -> ErrorAlert:
+    return ErrorAlert(
+        request_id=get_request_id(),
+        method=request.method,
+        path=request.url.path,
+        status=status,
+        code=code,
+        client=request.client.host if request.client else "",
+        public_message=public_message,
+        technical_message=technical_message,
+        details=details,
+    )
+
+
+async def _send_error_alert(*, settings: Settings, alert: ErrorAlert) -> None:
+    result = await send_error_alert_notification(settings=settings, alert=alert)
+    if not result.sent:
+        log_event(
+            logger,
+            logging.WARNING,
+            "error_alert_notification_failed",
+            status=result.status,
+            error=redact_sensitive_text(result.error, limit=300),
+            request_id=alert.request_id,
+        )

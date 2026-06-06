@@ -169,6 +169,8 @@ def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     assert 'id="resultActions" class="result-actions hidden"' in index_html
     assert 'id="sourcePreviewCard" class="preview-card source-card hidden"' in index_html
     assert "setStatusMessage(\"已复制本次提示词。\")" in app_js
+    assert "errorDetailsWithRequestId" in app_js
+    assert "request_id:" in app_js
     assert "flowConnect" not in app_js
     assert "setFlowState" not in app_js
     assert 'id="toastMessage"' in index_html
@@ -214,6 +216,9 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     dockerfile = (ROOT_DIR / "Dockerfile").read_text(encoding="utf-8")
     compose = (ROOT_DIR / "docker-compose.yml").read_text(encoding="utf-8")
     build_script = (ROOT_DIR / "scripts" / "docker-build-push.sh").read_text(encoding="utf-8")
+    pyproject = (ROOT_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    version_line = next(line for line in pyproject.splitlines() if line.startswith("version = "))
+    version = version_line.split('"', 2)[1]
 
     assert ".env" in dockerignore
     assert ".env.*" in dockerignore
@@ -221,7 +226,7 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "/*.png" in dockerignore
     assert "!static/*.png" in dockerignore
     assert "env_file:" not in compose
-    assert "image: minorli/picgen:0.1.14" in compose
+    assert f"image: minorli/picgen:{version}" in compose
     assert "picgen-data:/app/data" in compose
     assert "VOLUME [\"/app/data\"]" in dockerfile
     assert "PICGEN_STATIC_DIR=/app/static" in dockerfile
@@ -235,12 +240,15 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "https://sub.tidba.com/v1/images/edits" in dockerfile
     assert "https://sub.tidba.com/v1/responses" in dockerfile
     assert 'IMAGE="${IMAGE:-minorli/picgen}"' in build_script
-    assert 'VERSION="${VERSION:-0.1.14}"' in build_script
+    assert f'VERSION="${{VERSION:-{version}}}"' in build_script
     assert "--push" in build_script
 
 
 def test_static_footer_version_matches_release() -> None:
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    pyproject = (ROOT_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    version_line = next(line for line in pyproject.splitlines() if line.startswith("version = "))
+    version = version_line.split('"', 2)[1]
 
-    assert "PicGen Console　v0.1.14" in index_html
+    assert f"PicGen Console　v{version}" in index_html
     assert "PicGen Console　v0.1.2" not in index_html

@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from ..errors import APIError
+from ..redaction import redact_sensitive_text
 
 
 def compact_log_text(value: str, limit: int = 300) -> str:
@@ -41,7 +42,7 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
             if zone or ray_id:
                 detail_lines.append(f"Zone: {zone or '-'}; Ray ID: {ray_id or '-'}")
             details = "\n".join(detail_lines)
-            return message, details
+            return message, redact_sensitive_text(details, limit=4000)
 
         error_block = parsed_body.get("error")
         if isinstance(error_block, dict):
@@ -52,7 +53,40 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
     else:
         details = json.dumps(parsed_body, ensure_ascii=False, indent=2)
 
-    return message, details
+    return redact_sensitive_text(message, limit=1000), redact_sensitive_text(details, limit=4000)
+
+
+def classify_upstream_error(status: int, message: str, details: str | None = None) -> str:
+    haystack = f"{message}\n{details or ''}".lower()
+    if status == 429 or "rate limit" in haystack or "rate_limit" in haystack:
+        return "upstream_rate_limited"
+    if any(
+        needle in haystack
+        for needle in (
+            "content policy",
+            "safety",
+            "moderation",
+            "not allowed",
+            "disallowed",
+            "policy violation",
+        )
+    ):
+        return "upstream_content_policy"
+    if "cloudflare" in haystack or "error 1010" in haystack:
+        return "upstream_blocked"
+    return "upstream_error"
+
+
+def public_upstream_error_message(status: int, code: str, action: str) -> str:
+    if code == "upstream_rate_limited":
+        return "图片生成服务当前请求较多，请稍后再试。"
+    if code == "upstream_content_policy":
+        return "这次提示词没有通过上游内容审核，请调整描述后重试。"
+    if code == "upstream_blocked":
+        return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
+    if status in {502, 503, 504}:
+        return f"{action}暂时不可用，请稍后再试。"
+    return "图片生成服务返回了错误，请稍后再试。"
 
 
 def upstream_api_error(
@@ -62,7 +96,10 @@ def upstream_api_error(
     *,
     code: str | None = None,
 ) -> APIError:
-    return APIError(status, message, details, code=code)
+    safe_details = redact_sensitive_text(details, limit=4000)
+    safe_message = redact_sensitive_text(message, limit=1000)
+    resolved_code = code or classify_upstream_error(status, safe_message, safe_details)
+    return APIError(status, safe_message, safe_details, code=resolved_code)
 
 
 def coerce_error_payload(payload: Any, context: str) -> APIError:
