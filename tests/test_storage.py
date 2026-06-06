@@ -90,6 +90,7 @@ def test_sanitize_filename_strips_unsafe_characters() -> None:
     assert sanitize_filename("") == "image.png"
     assert sanitize_filename("a/b\\c") == "abc"
     assert "\x00" not in sanitize_filename("ev\x00il.png")
+    assert sanitize_filename("张 三") == "张-三"
 
 
 def test_save_output_image_atomic(tmp_path: Path) -> None:
@@ -114,6 +115,29 @@ def test_save_output_image_atomic(tmp_path: Path) -> None:
     assert saved_image.read_bytes() == png_bytes
     # No temp files should be left behind
     assert not any(p.name.startswith(".tmp-") for p in saved_image.parent.iterdir())
+
+
+def test_save_output_image_can_prefix_filename_with_user(tmp_path: Path) -> None:
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x02"
+        b"\x00\x00\x00\x03"
+        b"\x08\x02\x00\x00\x00"
+        b"\x00\x00\x00\x00"
+    )
+
+    payload = save_output_image(
+        data_dir=tmp_path,
+        outputs_dir=tmp_path / "outputs",
+        mode="reference",
+        image_bytes=png_bytes,
+        image_mime="image/png",
+        metadata={"mode": "reference", "prompt": "hi"},
+        filename_prefix="wilson wei",
+    )
+
+    assert Path(payload["saved_image_path"]).name.startswith("wilson-wei-reference-")
 
 
 def test_prune_old_outputs_removes_old_folders(tmp_path: Path) -> None:

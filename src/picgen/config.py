@@ -29,12 +29,12 @@ class Settings(BaseSettings):
     static_dir: Path = Field(default=PROJECT_ROOT / "static")
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
 
-    default_generate_url: str = "https://api.openai.com/v1/images/generations"
-    default_edit_url: str = "https://api.openai.com/v1/images/edits"
-    default_responses_url: str = "https://api.openai.com/v1/responses"
+    default_generate_url: str = "https://sub.tidba.com/v1/images/generations"
+    default_edit_url: str = "https://sub.tidba.com/v1/images/edits"
+    default_responses_url: str = "https://sub.tidba.com/v1/responses"
     default_model: str = "gpt-image-2"
     default_responses_model: str = "gpt-5.5"
-    default_size: str = "auto"
+    default_size: str = "1088x2240"
     default_api_key: str = ""
 
     upstream_user_agent: str = DEFAULT_USER_AGENT
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     cors_allow_credentials: bool = False
     proxy_auth_token: str = ""
     trust_forwarded_for: bool = False
+
+    auth_enabled: bool = True
+    auth_db_path: Path | None = None
+    auth_cookie_name: str = "picgen_session"
+    auth_cookie_secure: bool = False
+    auth_session_days: int = Field(default=14, ge=1, le=365)
+    admin_username: str = "admin"
+    admin_password: str = ""
+
+    bug_report_webhook_url: str = ""
+    bug_report_webhook_kind: str = "wecom"
+    bug_report_webhook_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
 
     log_level: str = "INFO"
     log_format: str = "console"
@@ -84,10 +96,44 @@ class Settings(BaseSettings):
     def _strip(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("default_api_key", "proxy_auth_token", "upstream_user_agent", mode="after")
+    @field_validator(
+        "default_api_key",
+        "proxy_auth_token",
+        "upstream_user_agent",
+        "bug_report_webhook_url",
+        mode="after",
+    )
     @classmethod
     def _strip_secret(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("bug_report_webhook_kind", mode="after")
+    @classmethod
+    def _normalize_bug_report_webhook_kind(cls, value: str) -> str:
+        normalized = value.strip().lower() or "wecom"
+        if normalized not in {"wecom", "serverchan", "generic"}:
+            raise ValueError("PICGEN_BUG_REPORT_WEBHOOK_KIND 只能是 wecom、serverchan 或 generic")
+        return normalized
+
+    @field_validator("admin_username", mode="after")
+    @classmethod
+    def _validate_admin_username(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2 or len(cleaned) > 64:
+            raise ValueError("管理员用户名长度必须在 2 到 64 个字符之间")
+        if any(char.isspace() for char in cleaned):
+            raise ValueError("管理员用户名不能包含空白字符")
+        if any(ord(char) < 32 for char in cleaned):
+            raise ValueError("管理员用户名包含非法字符")
+        return cleaned
+
+    @field_validator("admin_password", mode="after")
+    @classmethod
+    def _validate_admin_password(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned and len(cleaned) < 8:
+            raise ValueError("管理员密码至少需要 8 个字符")
+        return cleaned
 
     @field_validator("log_level", mode="after")
     @classmethod
@@ -115,6 +161,10 @@ class Settings(BaseSettings):
     @property
     def outputs_dir(self) -> Path:
         return self.data_dir / "outputs"
+
+    @property
+    def resolved_auth_db_path(self) -> Path:
+        return self.auth_db_path or self.data_dir / "auth.sqlite3"
 
     @classmethod
     def from_env(cls, **overrides: object) -> Settings:

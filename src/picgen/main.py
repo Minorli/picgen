@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .auth import AuthStore
 from .config import Settings
 from .errors import APIError
 from .logging_config import configure_logging, get_logger, log_event
@@ -60,13 +61,41 @@ async def _retention_loop(settings: Settings) -> None:
         await asyncio.sleep(_RETENTION_SWEEP_SECONDS)
 
 
+async def _initialize_auth_store(settings: Settings, auth_store: AuthStore) -> None:
+    if not settings.auth_enabled:
+        return
+    await anyio.to_thread.run_sync(auth_store.initialize)
+    if settings.admin_password:
+        admin = await anyio.to_thread.run_sync(
+            lambda: auth_store.ensure_admin_user(settings.admin_username, settings.admin_password)
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "auth_admin_bootstrap_ok",
+            username=admin.username,
+            user_id=admin.id,
+        )
+        return
+    user_count = await anyio.to_thread.run_sync(auth_store.user_count)
+    if user_count == 0:
+        log_event(
+            logger,
+            logging.WARNING,
+            "auth_admin_password_missing",
+            message="PICGEN_ADMIN_PASSWORD is required before users can log in.",
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
     configure_logging(resolved_settings.log_level, resolved_settings.log_format)
+    auth_store = AuthStore(resolved_settings.resolved_auth_db_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved_settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+        await _initialize_auth_store(resolved_settings, auth_store)
         client = HttpxAsyncClient(
             total_timeout=resolved_settings.upstream_timeout_seconds,
             connect_timeout=resolved_settings.upstream_connect_timeout_seconds,
@@ -96,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = resolved_settings
+    app.state.auth_store = auth_store
 
     if resolved_settings.cors_allow_origins:
         app.add_middleware(

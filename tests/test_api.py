@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import anyio
 import pytest
 from starlette.types import Scope
 
 from picgen.errors import APIError
 from picgen.middleware import BodySizeLimitMiddleware
+from picgen.routes import _with_timing
 from picgen.upstream import parse_sse_json_events, stream_events_to_image_payload
 
 TINY_PNG_B64 = (
@@ -39,8 +41,9 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert response.status_code == 200
     payload = response.json()
     assert payload["has_default_api_key"] is True
-    assert payload["responses_url"] == "https://api.openai.com/v1/responses"
+    assert payload["responses_url"] == "https://sub.tidba.com/v1/responses"
     assert payload["default_responses_model"] == "gpt-5.5"
+    assert payload["default_size"] == "1088x2240"
     assert "sk-secret" not in response.text
     assert payload["max_image_bytes"] > 0
     assert payload["upstream_timeout_seconds"] > 0
@@ -544,7 +547,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["stream"] is True
-    assert upstream_payload["tools"] == [{"type": "image_generation"}]
+    assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240"}]
 
 
 def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settings_factory):
@@ -794,6 +797,26 @@ def test_logo_compose_endpoint_is_removed(make_client):
     assert response.status_code in {404, 405}
 
 
+def test_final_image_upload_requires_auth(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/final-images",
+        json={
+            "generated_image_id": 1,
+            "image": {
+                "name": "result-logo.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "unauthorized"
+
+
 def test_responses_image_can_fallback_to_inline_after_file_upload_error(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
@@ -1005,6 +1028,37 @@ def test_proxy_auth_token_enforced(make_client, settings_factory):
     assert response2.status_code in {400}
     health_response = client.get("/api/health")
     assert health_response.status_code == 200  # health is allowlisted
+
+
+def test_with_timing_cancels_handler_when_client_disconnects(settings_factory):
+    class DisconnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    cancelled = False
+
+    async def slow_handler(_body, _settings, _client, _user):
+        nonlocal cancelled
+        try:
+            await anyio.sleep(10)
+        finally:
+            cancelled = True
+
+    async def run_check():
+        with pytest.raises(APIError) as exc_info:
+            await _with_timing(
+                "/api/generate",
+                slow_handler,
+                {},
+                settings_factory(default_api_key="sk-test"),
+                object(),
+                request=DisconnectedRequest(),
+            )
+        assert exc_info.value.status == 499
+        assert exc_info.value.code == "client_cancelled"
+
+    anyio.run(run_check)
+    assert cancelled is True
 
 
 def test_responses_sse_parser_keeps_partial_image() -> None:

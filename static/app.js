@@ -1,18 +1,19 @@
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
-const COMPANY_LOGO_B64_URL = "6renyou.png.b64"
+const COMPANY_LOGO_URL = "6renyou.png"
 const COMPANY_LOGO_NAME = "6renyou.png"
 const COMPANY_LOGO_MIME = "image/png"
-const COMPANY_LOGO_GUIDANCE = [
-  "",
-  "6 人游 LOGO 合成要求：",
-  "请把参考图中的 6 人游 LOGO 作为公司官方标识整合进最终画面，默认放在左上角的合理位置，整体 LOGO 面积要小一些，做成克制的品牌角标而不是主视觉元素。",
-  "LOGO 由左侧图标和右侧两行文字组成：第一行文字必须精确保留为“6 人游定制旅行”，第二行文字必须精确保留为“Friends & Family”。",
-  "必须保持 LOGO 的图标样式、文字内容、文字顺序、两行布局、比例、笔画结构和透明区域不变；不能删减、改写、翻译、替换大小写或改变这些文字内容。",
-  "左侧图标原本的几种绿色必须保持不变，不能改成白色、黑色、单色或其他品牌色，也不能重新绘制图标。",
-  "为了画面可读性，只能调整右侧两行文字的颜色；文字颜色应与背景和整体设计协调，避免突兀，可使用白色、浅色、深色或轻微描边/阴影来保证清晰。",
-  "请让 LOGO 与最终设计的构图、光影、材质和留白协调，避免像后期随意贴上去的水印；尺寸控制在不抢主视觉的较小比例。",
+const COMPANY_LOGO_WIDTH_RATIO = 0.16
+const COMPANY_LOGO_MIN_WIDTH = 86
+const COMPANY_LOGO_MAX_WIDTH = 220
+const COMPANY_LOGO_MARGIN_RATIO = 0.04
+const COMPANY_LOGO_MIN_MARGIN = 16
+const COMPANY_LOGO_MAX_MARGIN = 42
+const COMPANY_LOGO_LAYOUT_PROMPT = [
+  "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留干净留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
+  "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
+  "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
 ].join("\n")
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
@@ -43,6 +44,9 @@ const state = {
   activeMode: "generate",
   generateIntent: "fresh",
   serverConfig: null,
+  currentUser: null,
+  authMode: "login",
+  appReady: false,
   editImage: null,
   editMaskImage: null,
   generateReferenceImage: null,
@@ -64,18 +68,86 @@ const state = {
   progressLabel: "",
   progressExpectedCount: 1,
   progressEstimatedSecondsPerImage: 210,
+  activeRequestController: null,
+  activeRequestCancelled: false,
   preview: {
     mode: "single",
     target: "result",
   },
+  previewZoom: {
+    scale: 1,
+    x: 0,
+    y: 0,
+    dragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    startX: 0,
+    startY: 0,
+  },
+  copyrightRisk: {
+    status: "等待检查",
+    text: "生成完成后自动检查。",
+    hidden: true,
+  },
   rawResponsePreview: null,
   debugLines: [],
   persistTimer: null,
+  toastTimer: null,
   persistenceReady: false,
   isBusy: false,
+  companyLogoCanvas: null,
+  lastFeedbackPayload: null,
+  lastFeedbackRating: null,
+  lastRegenerationRequest: null,
+  shareRecipients: [],
+  shareSelectedRecipientIds: new Set(),
+  sharedResults: [],
+  userPreferences: null,
 }
 
 const refs = {
+  authOverlay: document.querySelector("#authOverlay"),
+  authForm: document.querySelector("#authForm"),
+  authTitle: document.querySelector("#authTitle"),
+  authSubtitle: document.querySelector("#authSubtitle"),
+  authUsernameInput: document.querySelector("#authUsernameInput"),
+  authPasswordInput: document.querySelector("#authPasswordInput"),
+  authError: document.querySelector("#authError"),
+  loginAuthButton: document.querySelector("#loginAuthButton"),
+  registerAuthButton: document.querySelector("#registerAuthButton"),
+  forgotPasswordButton: document.querySelector("#forgotPasswordButton"),
+  passwordResetRequestForm: document.querySelector("#passwordResetRequestForm"),
+  passwordResetUsernameInput: document.querySelector("#passwordResetUsernameInput"),
+  passwordResetRequestStatus: document.querySelector("#passwordResetRequestStatus"),
+  submitPasswordResetRequestButton: document.querySelector("#submitPasswordResetRequestButton"),
+  cancelPasswordResetRequestButton: document.querySelector("#cancelPasswordResetRequestButton"),
+  bugReportButton: document.querySelector("#bugReportButton"),
+  logoutButton: document.querySelector("#logoutButton"),
+  currentUsername: document.querySelector("#currentUsername"),
+  userAvatar: document.querySelector("#userAvatar"),
+  userUsageSummary: document.querySelector("#userUsageSummary"),
+  adminPanel: document.querySelector("#adminPanel"),
+  adminPasswordResetPanel: document.querySelector("#adminPasswordResetPanel"),
+  passwordResetRequestsList: document.querySelector("#passwordResetRequestsList"),
+  refreshPasswordResetRequestsButton: document.querySelector("#refreshPasswordResetRequestsButton"),
+  adminCreateUserForm: document.querySelector("#adminCreateUserForm"),
+  adminNewUsernameInput: document.querySelector("#adminNewUsernameInput"),
+  adminNewPasswordInput: document.querySelector("#adminNewPasswordInput"),
+  adminNewRoleSelect: document.querySelector("#adminNewRoleSelect"),
+  adminCreateUserButton: document.querySelector("#adminCreateUserButton"),
+  adminUserError: document.querySelector("#adminUserError"),
+  adminUsersList: document.querySelector("#adminUsersList"),
+  refreshAdminUsersButton: document.querySelector("#refreshAdminUsersButton"),
+  adminFeedbackSummary: document.querySelector("#adminFeedbackSummary"),
+  adminBugReportsPanel: document.querySelector("#adminBugReportsPanel"),
+  refreshFeedbackSummaryButton: document.querySelector("#refreshFeedbackSummaryButton"),
+  refreshBugReportsButton: document.querySelector("#refreshBugReportsButton"),
+  feedbackGoodCount: document.querySelector("#feedbackGoodCount"),
+  feedbackOkCount: document.querySelector("#feedbackOkCount"),
+  feedbackBadCount: document.querySelector("#feedbackBadCount"),
+  feedbackSummaryRate: document.querySelector("#feedbackSummaryRate"),
+  feedbackRecentList: document.querySelector("#feedbackRecentList"),
+  bugReportsList: document.querySelector("#bugReportsList"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   generateUrlInput: document.querySelector("#generateUrlInput"),
   editUrlInput: document.querySelector("#editUrlInput"),
@@ -90,13 +162,11 @@ const refs = {
   navModeButtons: Array.from(document.querySelectorAll(".nav-link[data-mode]")),
   historyList: document.querySelector("#historyList"),
   historyEmpty: document.querySelector("#historyEmpty"),
+  sharedResultsList: document.querySelector("#sharedResultsList"),
+  sharedResultsEmpty: document.querySelector("#sharedResultsEmpty"),
+  refreshSharedResultsButton: document.querySelector("#refreshSharedResultsButton"),
   requestStatus: document.querySelector("#requestStatus"),
   requestBadge: document.querySelector("#requestBadge"),
-  flowConnect: document.querySelector("#flowConnect"),
-  flowGenerate: document.querySelector("#flowGenerate"),
-  flowEdit: document.querySelector("#flowEdit"),
-  flowCompare: document.querySelector("#flowCompare"),
-  flowExport: document.querySelector("#flowExport"),
   generateTab: document.querySelector("#generateTab"),
   editTab: document.querySelector("#editTab"),
   generatePanel: document.querySelector("#generatePanel"),
@@ -133,6 +203,7 @@ const refs = {
   visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
+  cancelRequestButton: document.querySelector("#cancelRequestButton"),
   imageDropzone: document.querySelector("#imageDropzone"),
   imageDropzoneTitle: document.querySelector("#imageDropzoneTitle"),
   imageDropzoneSubtitle: document.querySelector("#imageDropzoneSubtitle"),
@@ -149,6 +220,7 @@ const refs = {
   editModelInput: document.querySelector("#editModelInput"),
   clearEditButton: document.querySelector("#clearEditButton"),
   editButton: document.querySelector("#editButton"),
+  comparisonGrid: document.querySelector("#comparisonGrid"),
   sourcePreviewCard: document.querySelector("#sourcePreviewCard"),
   sourcePreviewLabel: document.querySelector("#sourcePreviewLabel"),
   sourcePreviewTrigger: document.querySelector("#sourcePreviewTrigger"),
@@ -159,6 +231,7 @@ const refs = {
   resultPreviewTrigger: document.querySelector("#resultPreviewTrigger"),
   resultImage: document.querySelector("#resultImage"),
   resultPreviewEmpty: document.querySelector("#resultPreviewEmpty"),
+  resultActions: document.querySelector("#resultActions"),
   resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
   generationOverlay: document.querySelector("#generationOverlay"),
   generationOrbit: document.querySelector(".generation-orbit"),
@@ -180,11 +253,13 @@ const refs = {
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
   generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
+  openResultPreviewButton: document.querySelector("#openResultPreviewButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
+  toastMessage: document.querySelector("#toastMessage"),
   errorDetails: document.querySelector("#errorDetails"),
   errorDetailsText: document.querySelector("#errorDetailsText"),
   debugOutput: document.querySelector("#debugOutput"),
@@ -195,6 +270,9 @@ const refs = {
   previewModalMeta: document.querySelector("#previewModalMeta"),
   previewSingleModeButton: document.querySelector("#previewSingleModeButton"),
   previewCompareModeButton: document.querySelector("#previewCompareModeButton"),
+  previewZoomOutButton: document.querySelector("#previewZoomOutButton"),
+  previewZoomResetButton: document.querySelector("#previewZoomResetButton"),
+  previewZoomInButton: document.querySelector("#previewZoomInButton"),
   closePreviewButton: document.querySelector("#closePreviewButton"),
   previewSinglePane: document.querySelector("#previewSinglePane"),
   previewComparePane: document.querySelector("#previewComparePane"),
@@ -202,6 +280,28 @@ const refs = {
   previewCompareSourceImage: document.querySelector("#previewCompareSourceImage"),
   previewCompareResultImage: document.querySelector("#previewCompareResultImage"),
   promptChips: Array.from(document.querySelectorAll(".prompt-chip")),
+  feedbackStatus: document.querySelector("#feedbackStatus"),
+  resultFeedbackPanel: document.querySelector("#resultFeedbackPanel"),
+  feedbackRatingButtons: Array.from(document.querySelectorAll(".feedback-rating-button")),
+  feedbackReasonPanel: document.querySelector("#feedbackReasonPanel"),
+  feedbackReasonInput: document.querySelector("#feedbackReasonInput"),
+  submitBadFeedbackButton: document.querySelector("#submitBadFeedbackButton"),
+  regenerateFromBadFeedbackButton: document.querySelector("#regenerateFromBadFeedbackButton"),
+  shareResultPanel: document.querySelector("#shareResultPanel"),
+  shareResultStatus: document.querySelector("#shareResultStatus"),
+  shareRecipientsList: document.querySelector("#shareRecipientsList"),
+  shareRecipientSearchInput: document.querySelector("#shareRecipientSearchInput"),
+  shareResultNoteInput: document.querySelector("#shareResultNoteInput"),
+  submitShareResultButton: document.querySelector("#submitShareResultButton"),
+  bugReportModal: document.querySelector("#bugReportModal"),
+  bugReportBackdrop: document.querySelector("#bugReportBackdrop"),
+  bugReportForm: document.querySelector("#bugReportForm"),
+  bugReportTitleInput: document.querySelector("#bugReportTitleInput"),
+  bugReportDescriptionInput: document.querySelector("#bugReportDescriptionInput"),
+  bugReportContactInput: document.querySelector("#bugReportContactInput"),
+  bugReportStatus: document.querySelector("#bugReportStatus"),
+  submitBugReportButton: document.querySelector("#submitBugReportButton"),
+  closeBugReportButton: document.querySelector("#closeBugReportButton"),
 }
 
 function loadJSON(key, fallbackValue) {
@@ -218,6 +318,1047 @@ function loadJSON(key, fallbackValue) {
 
 function saveJSON(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value))
+}
+
+function escapeHTML(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+function scopedStorageKey(baseKey) {
+  return state.currentUser?.id ? `${baseKey}:user:${state.currentUser.id}` : baseKey
+}
+
+function settingsStorageKey() {
+  return scopedStorageKey(STORAGE_KEY)
+}
+
+function legacySettingsStorageKey() {
+  return state.currentUser?.id ? scopedStorageKey(LEGACY_STORAGE_KEY) : LEGACY_STORAGE_KEY
+}
+
+function historyStorageKey() {
+  return scopedStorageKey(HISTORY_KEY)
+}
+
+function workspaceStorageKey() {
+  return scopedStorageKey(WORKSPACE_KEY)
+}
+
+async function fetchJSON(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  })
+  let data = {}
+  try {
+    data = await response.json()
+  } catch {
+    data = {}
+  }
+  return { response, data }
+}
+
+function enterAuthGate(mode = state.authMode || "login", message = "") {
+  state.authMode = mode === "register" ? "register" : "login"
+  document.body.classList.add("auth-gate")
+  document.body.classList.remove("app-shell")
+  refs.authOverlay?.setAttribute("aria-hidden", "false")
+  refs.authForm?.classList.remove("hidden")
+  refs.passwordResetRequestForm?.classList.add("hidden")
+  if (refs.authTitle) {
+    refs.authTitle.textContent = state.authMode === "register" ? "注册 PicGen" : "登录 PicGen"
+  }
+  if (refs.authSubtitle) {
+    refs.authSubtitle.textContent = state.authMode === "register"
+      ? "填写用户名和密码即可创建账号。之后用同一账号登录。"
+      : "已有账号可直接登录；新用户可以注册后进入图像工作台。"
+  }
+  if (refs.loginAuthButton) {
+    refs.loginAuthButton.textContent = state.authMode === "register" ? "创建账号" : "登录"
+  }
+  if (refs.registerAuthButton) {
+    refs.registerAuthButton.classList.remove("hidden")
+    refs.registerAuthButton.removeAttribute("aria-hidden")
+    refs.registerAuthButton.tabIndex = 0
+    refs.registerAuthButton.textContent = state.authMode === "register" ? "已有账号，去登录" : "注册"
+  }
+  if (refs.authPasswordInput) {
+    refs.authPasswordInput.autocomplete = state.authMode === "register" ? "new-password" : "current-password"
+  }
+  if (refs.authError) {
+    refs.authError.textContent = message
+  }
+  if (refs.passwordResetRequestStatus) {
+    refs.passwordResetRequestStatus.textContent = ""
+    refs.passwordResetRequestStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.authUsernameInput?.focus(), 0)
+}
+
+function enterAppShell() {
+  document.body.classList.remove("auth-gate")
+  document.body.classList.add("app-shell")
+  refs.authOverlay?.setAttribute("aria-hidden", "true")
+  if (refs.authError) {
+    refs.authError.textContent = ""
+  }
+}
+
+function enterPasswordResetRequest() {
+  refs.authForm?.classList.add("hidden")
+  refs.passwordResetRequestForm?.classList.remove("hidden")
+  if (refs.authTitle) {
+    refs.authTitle.textContent = "找回密码"
+  }
+  if (refs.authSubtitle) {
+    refs.authSubtitle.textContent = "提交申请后，请联系管理员为你重置密码。"
+  }
+  if (refs.passwordResetUsernameInput && refs.authUsernameInput) {
+    refs.passwordResetUsernameInput.value = refs.authUsernameInput.value.trim()
+  }
+  if (refs.passwordResetRequestStatus) {
+    refs.passwordResetRequestStatus.textContent = ""
+    refs.passwordResetRequestStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.passwordResetUsernameInput?.focus(), 0)
+}
+
+function leavePasswordResetRequest() {
+  if (refs.authUsernameInput && refs.passwordResetUsernameInput?.value.trim()) {
+    refs.authUsernameInput.value = refs.passwordResetUsernameInput.value.trim()
+  }
+  enterAuthGate("login")
+}
+
+function setCurrentUser(user) {
+  state.currentUser = user || null
+  const username = state.currentUser?.username || "未登录"
+  const roleLabel = state.currentUser?.is_admin || state.currentUser?.role === "admin" ? "管理员" : "用户"
+  if (refs.currentUsername) {
+    refs.currentUsername.textContent = state.currentUser ? `${username} · ${roleLabel}` : username
+  }
+  if (refs.userAvatar) {
+    refs.userAvatar.textContent = state.currentUser?.username?.slice(0, 1).toUpperCase() || "?"
+  }
+  updateAdminPanelVisibility()
+}
+
+async function checkAuthSession({ showLogin = true } = {}) {
+  if (state.serverConfig?.auth_enabled === false) {
+    setCurrentUser(null)
+    enterAppShell()
+    return true
+  }
+  const { response, data } = await fetchJSON("/api/me", { cache: "no-store" })
+  if (!response.ok) {
+    setCurrentUser(null)
+    if (showLogin) {
+      enterAuthGate("login")
+    }
+    return false
+  }
+  setCurrentUser(data.user)
+  enterAppShell()
+  return true
+}
+
+async function refreshUsageSummary() {
+  if (state.serverConfig?.auth_enabled === false || !refs.userUsageSummary) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/usage", { cache: "no-store" })
+    if (!response.ok) {
+      refs.userUsageSummary.textContent = "登录后自动统计。"
+      return
+    }
+    const currentUserId = state.currentUser?.id
+    const row = Array.isArray(data.users)
+      ? data.users.find((item) => item.id === currentUserId)
+      : null
+    if (!row) {
+      refs.userUsageSummary.textContent = "当前用户暂无生成记录。"
+      return
+    }
+    const megabytes = row.saved_bytes ? (row.saved_bytes / 1024 / 1024).toFixed(1) : "0.0"
+    refs.userUsageSummary.textContent = `${row.request_count} 次请求 · ${row.image_count} 张图 · ${megabytes} MB`
+  } catch {
+    refs.userUsageSummary.textContent = "用量统计暂时不可用。"
+  }
+  await refreshAdminUsers()
+  await refreshFeedbackSummary()
+  await refreshBugReports()
+  await refreshPasswordResetRequests()
+  await refreshSharedResults()
+  await refreshShareRecipients()
+}
+
+function updateAdminPanelVisibility() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  refs.adminPanel?.classList.toggle("hidden", !isAdmin)
+  if (!isAdmin && refs.adminUsersList) {
+    refs.adminUsersList.innerHTML = ""
+  }
+  if (!isAdmin && refs.feedbackRecentList) {
+    refs.feedbackRecentList.innerHTML = ""
+  }
+  if (!isAdmin && refs.adminUserError) {
+    refs.adminUserError.textContent = ""
+  }
+  if (!isAdmin && refs.passwordResetRequestsList) {
+    refs.passwordResetRequestsList.innerHTML = ""
+  }
+}
+
+function formatAdminBytes(bytes) {
+  if (!bytes) {
+    return "0.0 MB"
+  }
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function renderAdminUsers(users) {
+  if (!refs.adminUsersList) {
+    return
+  }
+  if (!Array.isArray(users) || users.length === 0) {
+    refs.adminUsersList.innerHTML = '<p class="admin-empty">暂无用户。</p>'
+    return
+  }
+  refs.adminUsersList.innerHTML = users.map((user) => {
+    const roleLabel = user.role === "admin" ? "管理员" : "普通用户"
+    const disabled = user.id === state.currentUser?.id ? "disabled" : ""
+    const activeLabel = user.is_active ? "启用" : "停用"
+    return `
+      <article class="admin-user-row">
+        <div>
+          <strong>${escapeHTML(user.username || "")}</strong>
+          <span>${roleLabel} · ${activeLabel}</span>
+        </div>
+        <div class="admin-user-usage">
+          <span>${Number(user.request_count || 0)} 次</span>
+          <span>${Number(user.image_count || 0)} 张</span>
+          <span>${formatAdminBytes(Number(user.saved_bytes || 0))}</span>
+        </div>
+        <button class="ghost-button admin-delete-user-button" type="button" data-user-id="${user.id}" ${disabled}>删除</button>
+      </article>
+    `
+  }).join("")
+}
+
+async function refreshAdminUsers() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.adminPanel) {
+    return
+  }
+  if (refs.adminUserError) {
+    refs.adminUserError.textContent = ""
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/admin/users", { cache: "no-store" })
+    if (!response.ok) {
+      if (refs.adminUserError) {
+        refs.adminUserError.textContent = data.error || "无法读取用户列表"
+      }
+      return
+    }
+    renderAdminUsers(data.users)
+  } catch {
+    if (refs.adminUserError) {
+      refs.adminUserError.textContent = "用户列表暂时不可用。"
+    }
+  }
+}
+
+function renderFeedbackSummary(summary) {
+  const totals = summary?.totals || {}
+  if (refs.feedbackGoodCount) {
+    refs.feedbackGoodCount.textContent = String(totals.good || 0)
+  }
+  if (refs.feedbackOkCount) {
+    refs.feedbackOkCount.textContent = String(totals.ok || 0)
+  }
+  if (refs.feedbackBadCount) {
+    refs.feedbackBadCount.textContent = String(totals.bad || 0)
+  }
+  if (refs.feedbackSummaryRate) {
+    const totalCount = Number(summary?.total_count || 0)
+    refs.feedbackSummaryRate.textContent = totalCount
+      ? `满意率 ${(Number(summary.satisfaction_rate || 0) * 100).toFixed(1)}% · 共 ${totalCount} 条反馈`
+      : "暂无反馈。"
+  }
+  if (!refs.feedbackRecentList) {
+    return
+  }
+  const recent = Array.isArray(summary?.recent) ? summary.recent : []
+  if (!recent.length) {
+    refs.feedbackRecentList.innerHTML = '<p class="admin-empty">暂无近期反馈。</p>'
+    return
+  }
+  refs.feedbackRecentList.innerHTML = recent.slice(0, 6).map((item) => {
+    const label = item.rating === "good" ? "满意" : item.rating === "ok" ? "一般" : "不好"
+    const reason = item.reason || "未填写原因"
+    return `
+      <article class="feedback-recent-row">
+        <div>
+          <strong>${escapeHTML(label)} · ${escapeHTML(item.username || "")}</strong>
+          <span>${escapeHTML(item.mode || "生成")} · ${escapeHTML(item.model || "")}</span>
+        </div>
+        <p>${escapeHTML(reason)}</p>
+      </article>
+    `
+  }).join("")
+}
+
+async function refreshFeedbackSummary() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.adminFeedbackSummary) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/feedback/summary", { cache: "no-store" })
+    if (response.ok) {
+      renderFeedbackSummary(data)
+    }
+  } catch {
+    if (refs.feedbackSummaryRate) {
+      refs.feedbackSummaryRate.textContent = "满意度统计暂时不可用。"
+    }
+  }
+}
+
+function renderBugReports(reports) {
+  if (!refs.bugReportsList) {
+    return
+  }
+  if (!Array.isArray(reports) || !reports.length) {
+    refs.bugReportsList.innerHTML = '<p class="admin-empty">暂无 Bug 反馈。</p>'
+    return
+  }
+  refs.bugReportsList.innerHTML = reports.slice(0, 8).map((report) => `
+    <article class="feedback-recent-row">
+      <div>
+        <strong>${escapeHTML(report.title || "Bug 反馈")} · ${escapeHTML(report.username || "")}</strong>
+        <span>${escapeHTML(report.notification_status || "not_configured")} · ${escapeHTML(report.created_at || "")}</span>
+      </div>
+      <p>${escapeHTML(report.description || "")}</p>
+    </article>
+  `).join("")
+}
+
+async function refreshBugReports() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.bugReportsList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/bug-reports", { cache: "no-store" })
+    if (response.ok) {
+      renderBugReports(data.reports)
+    }
+  } catch {
+    refs.bugReportsList.innerHTML = '<p class="admin-empty">Bug 反馈暂时不可用。</p>'
+  }
+}
+
+function createPasswordResetRequestRow(item) {
+  const row = document.createElement("article")
+  row.className = "password-reset-row"
+
+  const header = document.createElement("div")
+  header.className = "password-reset-row-main"
+
+  const title = document.createElement("strong")
+  title.textContent = item.matched_user
+    ? `${item.matched_username || item.username} 申请找回密码`
+    : `${item.username || item.username_normalized} 未匹配到账号`
+
+  const meta = document.createElement("span")
+  const timeText = item.created_at ? ` · ${item.created_at}` : ""
+  meta.textContent = item.matched_user
+    ? `待管理员重置${timeText}`
+    : `请先核对用户名${timeText}`
+
+  header.append(title, meta)
+  row.append(header)
+
+  if (!item.matched_user || !item.user_id) {
+    const hint = document.createElement("p")
+    hint.className = "password-reset-hint"
+    hint.textContent = "该申请没有匹配到现有账号，可能是用户输错了用户名。"
+    row.append(hint)
+    return row
+  }
+
+  const form = document.createElement("form")
+  form.className = "password-reset-admin-form"
+  form.dataset.userId = String(item.user_id)
+
+  const input = document.createElement("input")
+  input.type = "password"
+  input.name = "password"
+  input.autocomplete = "new-password"
+  input.minLength = 8
+  input.maxLength = 256
+  input.placeholder = "输入新密码"
+  input.required = true
+
+  const button = document.createElement("button")
+  button.className = "ghost-button"
+  button.type = "submit"
+  button.textContent = "重置"
+
+  form.append(input, button)
+  row.append(form)
+  return row
+}
+
+function renderPasswordResetRequests(requests) {
+  if (!refs.passwordResetRequestsList) {
+    return
+  }
+  refs.passwordResetRequestsList.replaceChildren()
+  if (!Array.isArray(requests) || !requests.length) {
+    const empty = document.createElement("p")
+    empty.className = "admin-empty"
+    empty.textContent = "暂无待处理找回申请。"
+    refs.passwordResetRequestsList.append(empty)
+    return
+  }
+  const fragment = document.createDocumentFragment()
+  requests.forEach((item) => {
+    fragment.append(createPasswordResetRequestRow(item))
+  })
+  refs.passwordResetRequestsList.append(fragment)
+}
+
+async function refreshPasswordResetRequests() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.passwordResetRequestsList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/admin/password-reset-requests", { cache: "no-store" })
+    if (response.ok) {
+      renderPasswordResetRequests(data.requests)
+    }
+  } catch {
+    refs.passwordResetRequestsList.innerHTML = '<p class="admin-empty">密码找回申请暂时不可用。</p>'
+  }
+}
+
+async function submitPasswordResetAdminForm(form) {
+  const userId = form?.dataset?.userId
+  const input = form?.querySelector('input[name="password"]')
+  const button = form?.querySelector("button")
+  const password = input?.value || ""
+  if (!userId || password.length < 8) {
+    setStatusMessage("请输入至少 8 位新密码。")
+    return
+  }
+  if (button) {
+    button.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/admin/users/${encodeURIComponent(userId)}/password`, {
+      method: "PUT",
+      body: JSON.stringify({ password }),
+    })
+    if (!response.ok) {
+      setError(data.error || "重置密码失败")
+      return
+    }
+    if (input) {
+      input.value = ""
+    }
+    setStatusMessage("密码已重置，用户旧会话已失效。")
+    await refreshPasswordResetRequests()
+    await refreshAdminUsers()
+  } catch {
+    setError("重置密码时网络连接错误")
+  } finally {
+    if (button) {
+      button.disabled = false
+    }
+  }
+}
+
+async function submitAdminCreateUser(event) {
+  event.preventDefault()
+  const username = refs.adminNewUsernameInput?.value.trim() || ""
+  const password = refs.adminNewPasswordInput?.value || ""
+  const role = refs.adminNewRoleSelect?.value || "user"
+  if (refs.adminUserError) {
+    refs.adminUserError.textContent = ""
+  }
+  if (!username || password.length < 8) {
+    if (refs.adminUserError) {
+      refs.adminUserError.textContent = "请填写用户名和至少 8 位密码。"
+    }
+    return
+  }
+  if (refs.adminCreateUserButton) {
+    refs.adminCreateUserButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify({ username, password, role }),
+    })
+    if (!response.ok) {
+      if (refs.adminUserError) {
+        refs.adminUserError.textContent = data.error || "创建用户失败"
+      }
+      return
+    }
+    if (refs.adminNewUsernameInput) {
+      refs.adminNewUsernameInput.value = ""
+    }
+    if (refs.adminNewPasswordInput) {
+      refs.adminNewPasswordInput.value = ""
+    }
+    if (refs.adminNewRoleSelect) {
+      refs.adminNewRoleSelect.value = "user"
+    }
+    await refreshAdminUsers()
+    await refreshUsageSummary()
+  } catch {
+    if (refs.adminUserError) {
+      refs.adminUserError.textContent = "网络连接错误"
+    }
+  } finally {
+    if (refs.adminCreateUserButton) {
+      refs.adminCreateUserButton.disabled = false
+    }
+  }
+}
+
+async function deleteAdminUser(userId) {
+  if (!userId) {
+    return
+  }
+  if (refs.adminUserError) {
+    refs.adminUserError.textContent = ""
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+    })
+    if (!response.ok) {
+      if (refs.adminUserError) {
+        refs.adminUserError.textContent = data.error || "删除用户失败"
+      }
+      return
+    }
+    await refreshAdminUsers()
+    await refreshUsageSummary()
+  } catch {
+    if (refs.adminUserError) {
+      refs.adminUserError.textContent = "网络连接错误"
+    }
+  }
+}
+
+function updateFeedbackPanelVisibility() {
+  const hasResult = Boolean(state.resultPreview?.src)
+  refs.resultFeedbackPanel?.classList.toggle("hidden", !hasResult)
+  if (!hasResult) {
+    refs.feedbackReasonPanel?.classList.add("hidden")
+    refs.shareResultPanel?.classList.add("hidden")
+  }
+}
+
+function buildFeedbackPayload(rating, reason = "") {
+  const candidate = state.resultCandidates[state.selectedCandidateIndex] || {}
+  return {
+    rating,
+    reason,
+    prompt: state.lastResultPrompt || "",
+    mode: state.lastResultMode || "",
+    model: state.lastResultModel || "",
+    generated_image_id: candidate.generated_image_id || state.lastResultImage?.generatedImageId || null,
+    saved_image_path: candidate.saved_image_path || state.lastResultImage?.savedPath || "",
+    saved_image_url: serverShareableImageUrl(candidate),
+  }
+}
+
+function serverShareableImageUrl(candidate = {}) {
+  const candidates = [
+    candidate.saved_image_url,
+    state.lastResultImage?.savedUrl,
+    state.lastResultImage?.fileUrl,
+    state.resultPreview?.src,
+  ]
+  return candidates.find((value) => value && !String(value).startsWith("data:")) || ""
+}
+
+function setFeedbackStatus(text) {
+  if (refs.feedbackStatus) {
+    refs.feedbackStatus.textContent = text
+  }
+}
+
+function buildSharePayload() {
+  const candidate = state.resultCandidates[state.selectedCandidateIndex] || {}
+  return {
+    recipient_ids: Array.from(state.shareSelectedRecipientIds).map((value) => Number(value)).filter(Boolean),
+    prompt: state.lastResultPrompt || "",
+    mode: state.lastResultMode || "",
+    model: state.lastResultModel || "",
+    rating: state.lastFeedbackRating || "",
+    generated_image_id: candidate.generated_image_id || state.lastResultImage?.generatedImageId || null,
+    saved_image_path: candidate.saved_image_path || state.lastResultImage?.savedPath || "",
+    saved_image_url: serverShareableImageUrl(candidate),
+    note: refs.shareResultNoteInput?.value.trim() || "",
+  }
+}
+
+function setShareStatus(text) {
+  if (refs.shareResultStatus) {
+    refs.shareResultStatus.textContent = text
+  }
+}
+
+function filteredShareRecipients() {
+  const query = refs.shareRecipientSearchInput?.value.trim().toLowerCase() || ""
+  if (!query) {
+    return state.shareRecipients
+  }
+  return state.shareRecipients.filter((user) => String(user.username || "").toLowerCase().includes(query))
+}
+
+function renderShareRecipientOptions() {
+  if (!refs.shareRecipientsList) {
+    return
+  }
+  refs.shareRecipientsList.replaceChildren()
+  const users = filteredShareRecipients()
+  if (!state.shareRecipients.length) {
+    const empty = document.createElement("p")
+    empty.className = "admin-empty"
+    empty.textContent = "暂无可分享用户。"
+    refs.shareRecipientsList.appendChild(empty)
+    setShareStatus("暂无接收人")
+    return
+  }
+  if (!users.length) {
+    const empty = document.createElement("p")
+    empty.className = "admin-empty"
+    empty.textContent = "没有匹配的用户。"
+    refs.shareRecipientsList.appendChild(empty)
+    setShareStatus("未找到")
+    return
+  }
+  users.forEach((user) => {
+    const userId = Number(user.id || 0)
+    const label = document.createElement("label")
+    label.className = "share-recipient-option"
+    const input = document.createElement("input")
+    input.type = "checkbox"
+    input.value = String(userId)
+    input.checked = state.shareSelectedRecipientIds.has(userId)
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        state.shareSelectedRecipientIds.add(userId)
+      } else {
+        state.shareSelectedRecipientIds.delete(userId)
+      }
+      setShareStatus(state.shareSelectedRecipientIds.size ? `已选 ${state.shareSelectedRecipientIds.size} 人` : "选择接收人")
+    })
+    const name = document.createElement("span")
+    name.textContent = user.username || ""
+    label.append(input, name)
+    refs.shareRecipientsList.appendChild(label)
+  })
+  setShareStatus(state.shareSelectedRecipientIds.size ? `已选 ${state.shareSelectedRecipientIds.size} 人` : "选择接收人")
+}
+
+function renderShareRecipients(users) {
+  state.shareRecipients = Array.isArray(users) ? users : []
+  renderShareRecipientOptions()
+}
+
+async function refreshShareRecipients() {
+  if (!state.currentUser || !refs.shareRecipientsList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/users", { cache: "no-store" })
+    if (response.ok) {
+      renderShareRecipients(data.users)
+      return
+    }
+  } catch {
+    // fall through to local status
+  }
+  refs.shareRecipientsList.innerHTML = '<p class="admin-empty">用户列表暂时不可用。</p>'
+  setShareStatus("读取失败")
+}
+
+function showSharePanel() {
+  if (!state.resultPreview?.src) {
+    return
+  }
+  refs.shareResultPanel?.classList.remove("hidden")
+  state.shareSelectedRecipientIds = new Set()
+  if (refs.shareRecipientSearchInput) {
+    refs.shareRecipientSearchInput.value = ""
+  }
+  setShareStatus("选择接收人")
+  void refreshShareRecipients()
+}
+
+async function submitShareResult() {
+  if (!state.resultPreview?.src) {
+    setError("当前没有可分享的结果图。")
+    return
+  }
+  const payload = buildSharePayload()
+  if (!payload.recipient_ids.length) {
+    setShareStatus("请选择接收人")
+    return
+  }
+  if (refs.submitShareResultButton) {
+    refs.submitShareResultButton.disabled = true
+  }
+  setShareStatus("分享中")
+  try {
+    const { response, data } = await fetchJSON("/api/shares", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      setShareStatus("分享失败")
+      setError(data.error || "分享失败")
+      return
+    }
+    const count = Array.isArray(data.shares) ? data.shares.length : payload.recipient_ids.length
+    setShareStatus(`已分享给 ${count} 人`)
+    if (refs.shareResultNoteInput) {
+      refs.shareResultNoteInput.value = ""
+    }
+    state.shareSelectedRecipientIds = new Set()
+    renderShareRecipientOptions()
+  } catch {
+    setShareStatus("分享失败")
+    setError("分享时网络连接错误")
+  } finally {
+    if (refs.submitShareResultButton) {
+      refs.submitShareResultButton.disabled = false
+    }
+  }
+}
+
+function renderSharedResults(shares) {
+  state.sharedResults = Array.isArray(shares) ? shares : []
+  if (!refs.sharedResultsList || !refs.sharedResultsEmpty) {
+    return
+  }
+  refs.sharedResultsEmpty.classList.toggle("hidden", state.sharedResults.length > 0)
+  if (!state.sharedResults.length) {
+    refs.sharedResultsList.innerHTML = ""
+    return
+  }
+  refs.sharedResultsList.innerHTML = state.sharedResults.slice(0, 10).map((share) => {
+    const imageUrl = share.saved_image_url || ""
+    const sender = share.sender_username || "用户"
+    const prompt = share.prompt || "未附提示词"
+    return `
+      <button class="shared-result-item" type="button" data-share-id="${Number(share.id || 0)}">
+        ${imageUrl ? `<img src="${escapeHTML(imageUrl)}" alt="">` : '<span class="shared-result-thumb"></span>'}
+        <span class="shared-result-copy">
+          <strong>${escapeHTML(sender)}</strong>
+          <span>${escapeHTML(share.mode || "生成")} · ${escapeHTML(share.model || "")}</span>
+          <p>${escapeHTML(prompt)}</p>
+        </span>
+      </button>
+    `
+  }).join("")
+}
+
+async function refreshSharedResults() {
+  if (!state.currentUser || !refs.sharedResultsList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/shares/inbox", { cache: "no-store" })
+    if (response.ok) {
+      renderSharedResults(data.shares)
+      return
+    }
+  } catch {
+    // handled below
+  }
+  refs.sharedResultsList.innerHTML = '<p class="empty-history">收到分享暂时不可用。</p>'
+  refs.sharedResultsEmpty?.classList.add("hidden")
+}
+
+function openSharedResult(shareId) {
+  const share = state.sharedResults.find((item) => Number(item.id) === Number(shareId))
+  const asset = shareToAsset(share)
+  if (!share || !asset) {
+    setError("这条分享没有可打开的图片。")
+    return
+  }
+  state.resultCandidates = [{
+    saved_image_url: share.saved_image_url || "",
+    saved_image_path: share.saved_image_path || "",
+    generated_image_id: share.generated_image_id || null,
+    image_url: share.saved_image_url || "",
+    asset,
+  }]
+  state.selectedCandidateIndex = 0
+  state.lastResultPrompt = share.prompt || ""
+  state.lastResultModel = share.model || ""
+  state.lastResultMode = share.mode || "share"
+  state.lastResultImage = cloneImageAsset(asset)
+  state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
+  refs.resultPreviewLabel.textContent = "收到分享"
+  refs.resultImage.src = state.resultPreview.src
+  refs.resultImage.classList.add("visible")
+  refs.resultPreviewEmpty.classList.add("hidden")
+  refs.resultPrompt.textContent = state.lastResultPrompt || "未附提示词"
+  refs.resultMeta.textContent = `来自 ${share.sender_username || "用户"}`
+  refs.resultTiming.textContent = ""
+  refs.resultStorage.textContent = share.saved_image_path ? `已落盘到 ${share.saved_image_path}` : ""
+  refs.downloadButton.href = state.resultPreview.src
+  refs.downloadButton.classList.remove("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "false")
+  refs.downloadButton.download = asset.name
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
+  refs.shareResultPanel?.classList.add("hidden")
+  renderResultCandidates()
+  updatePreviewAvailability()
+  scheduleWorkspacePersist()
+  document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function openBugReportModal() {
+  refs.bugReportModal?.classList.remove("hidden")
+  refs.bugReportModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  if (refs.bugReportStatus) {
+    refs.bugReportStatus.textContent = ""
+  }
+  window.setTimeout(() => refs.bugReportDescriptionInput?.focus(), 0)
+}
+
+function closeBugReportModal() {
+  refs.bugReportModal?.classList.add("hidden")
+  refs.bugReportModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open")
+}
+
+async function submitBugReport(event) {
+  event.preventDefault()
+  const title = refs.bugReportTitleInput?.value.trim() || ""
+  const description = refs.bugReportDescriptionInput?.value.trim() || ""
+  const contact = refs.bugReportContactInput?.value.trim() || ""
+  if (!description) {
+    if (refs.bugReportStatus) {
+      refs.bugReportStatus.textContent = "请填写问题描述。"
+    }
+    return
+  }
+  if (refs.submitBugReportButton) {
+    refs.submitBugReportButton.disabled = true
+  }
+  if (refs.bugReportStatus) {
+    refs.bugReportStatus.textContent = "提交中"
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/bug-reports", {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        description,
+        contact,
+        page_url: window.location.href,
+      }),
+    })
+    if (!response.ok) {
+      refs.bugReportStatus.textContent = data.error || "提交失败"
+      return
+    }
+    const notified = data.notification?.sent
+    refs.bugReportStatus.textContent = notified ? "已提交，并已发送通知。" : "已提交，管理员可在后台查看。"
+    refs.bugReportForm?.reset()
+    await refreshBugReports()
+  } catch {
+    refs.bugReportStatus.textContent = "提交时网络连接错误"
+  } finally {
+    if (refs.submitBugReportButton) {
+      refs.submitBugReportButton.disabled = false
+    }
+  }
+}
+
+function updateFeedbackSelection(rating) {
+  state.lastFeedbackRating = rating || null
+  refs.feedbackRatingButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.rating === rating)
+  })
+}
+
+async function submitResultFeedback(rating, { reason = "", showReason = true } = {}) {
+  if (!state.resultPreview?.src) {
+    setError("当前没有可评价的结果图。")
+    return false
+  }
+  updateFeedbackSelection(rating)
+  if (rating === "bad" && showReason) {
+    refs.feedbackReasonPanel?.classList.remove("hidden")
+    refs.feedbackReasonInput?.focus()
+    setFeedbackStatus("可补充原因")
+    return false
+  }
+  const payload = buildFeedbackPayload(rating, reason)
+  state.lastFeedbackPayload = payload
+  setFeedbackStatus("提交中")
+  try {
+    const { response, data } = await fetchJSON("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      setFeedbackStatus("提交失败")
+      setError(data.error || "反馈提交失败")
+      return false
+    }
+    setFeedbackStatus(rating === "good" ? "已记录满意" : rating === "ok" ? "已记录一般" : "已记录不好")
+    if (rating === "good") {
+      showSharePanel()
+    } else {
+      refs.shareResultPanel?.classList.add("hidden")
+    }
+    await refreshFeedbackSummary()
+    return true
+  } catch {
+    setFeedbackStatus("提交失败")
+    setError("反馈提交时网络连接错误")
+    return false
+  }
+}
+
+async function submitBadFeedbackReason() {
+  const reason = refs.feedbackReasonInput?.value.trim() || ""
+  await submitResultFeedback("bad", { reason, showReason: false })
+}
+
+async function regenerateFromBadFeedback() {
+  const reason = refs.feedbackReasonInput?.value.trim() || ""
+  await submitResultFeedback("bad", { reason, showReason: false })
+  await rerunLastGeneration()
+}
+
+async function submitAuthForm(event) {
+  event.preventDefault()
+  const username = refs.authUsernameInput.value.trim()
+  const password = refs.authPasswordInput.value
+  const endpoint = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login"
+  refs.authError.textContent = ""
+  refs.loginAuthButton.disabled = true
+  if (refs.registerAuthButton) {
+    refs.registerAuthButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) {
+      refs.authError.textContent = data.error || "认证失败"
+      return
+    }
+    setCurrentUser(data.user)
+    refs.authPasswordInput.value = ""
+    enterAppShell()
+    await startAuthenticatedApp()
+  } catch {
+    refs.authError.textContent = "网络连接错误"
+  } finally {
+    refs.loginAuthButton.disabled = false
+    if (refs.registerAuthButton) {
+      refs.registerAuthButton.disabled = false
+    }
+  }
+}
+
+async function submitPasswordResetRequest(event) {
+  event.preventDefault()
+  const username = refs.passwordResetUsernameInput?.value.trim() || ""
+  if (!username) {
+    if (refs.passwordResetRequestStatus) {
+      refs.passwordResetRequestStatus.textContent = "请输入用户名。"
+      refs.passwordResetRequestStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (refs.passwordResetRequestStatus) {
+    refs.passwordResetRequestStatus.textContent = ""
+    refs.passwordResetRequestStatus.classList.remove("is-error")
+  }
+  if (refs.submitPasswordResetRequestButton) {
+    refs.submitPasswordResetRequestButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/password-reset-requests", {
+      method: "POST",
+      body: JSON.stringify({ username }),
+    })
+    if (!response.ok) {
+      if (refs.passwordResetRequestStatus) {
+        refs.passwordResetRequestStatus.textContent = data.error || "提交失败"
+        refs.passwordResetRequestStatus.classList.add("is-error")
+      }
+      return
+    }
+    if (refs.passwordResetRequestStatus) {
+      refs.passwordResetRequestStatus.textContent = data.message || "申请已提交，请联系管理员。"
+      refs.passwordResetRequestStatus.classList.remove("is-error")
+    }
+  } catch {
+    if (refs.passwordResetRequestStatus) {
+      refs.passwordResetRequestStatus.textContent = "网络连接错误"
+      refs.passwordResetRequestStatus.classList.add("is-error")
+    }
+  } finally {
+    if (refs.submitPasswordResetRequestButton) {
+      refs.submitPasswordResetRequestButton.disabled = false
+    }
+  }
+}
+
+async function logout() {
+  try {
+    await fetchJSON("/api/auth/logout", { method: "POST" })
+  } finally {
+    state.persistenceReady = false
+    state.appReady = false
+    state.history = []
+    state.shareRecipients = []
+    state.sharedResults = []
+    state.savedApiKey = ""
+    clearResult()
+    clearGenerateForm()
+    clearEditForm()
+    setCurrentUser(null)
+    enterAuthGate("login")
+    if (refs.userUsageSummary) {
+      refs.userUsageSummary.textContent = "登录后自动统计。"
+    }
+    updateAdminPanelVisibility()
+  }
 }
 
 function openWorkspaceDb() {
@@ -242,7 +1383,7 @@ async function loadWorkspaceSnapshot() {
   return await new Promise((resolve, reject) => {
     const tx = db.transaction(WORKSPACE_STORE_NAME, "readonly")
     const store = tx.objectStore(WORKSPACE_STORE_NAME)
-    const request = store.get(WORKSPACE_KEY)
+    const request = store.get(workspaceStorageKey())
 
     request.onsuccess = () => resolve(request.result || null)
     request.onerror = () => reject(request.error || new Error("读取工作台快照失败"))
@@ -257,7 +1398,7 @@ async function saveWorkspaceSnapshot(snapshot) {
   return await new Promise((resolve, reject) => {
     const tx = db.transaction(WORKSPACE_STORE_NAME, "readwrite")
     const store = tx.objectStore(WORKSPACE_STORE_NAME)
-    store.put(snapshot, WORKSPACE_KEY)
+    store.put(snapshot, workspaceStorageKey())
 
     tx.oncomplete = () => {
       db.close()
@@ -382,6 +1523,7 @@ function createWorkspaceSnapshot() {
       lastResultImage: state.lastResultImage,
       currentComparisonSource: state.currentComparisonSource,
       rawResponsePreview: state.rawResponsePreview,
+      copyrightRisk: state.copyrightRisk,
       resultCandidates: state.resultCandidates,
       selectedCandidateIndex: state.selectedCandidateIndex,
     },
@@ -468,6 +1610,9 @@ async function restoreWorkspaceState() {
       }
     : null
   state.rawResponsePreview = result.rawResponsePreview || null
+  if (result.copyrightRisk && typeof result.copyrightRisk === "object") {
+    state.copyrightRisk = result.copyrightRisk
+  }
 
   if (state.resultPreview?.src) {
     refs.resultPreviewLabel.textContent = result.labelText || "输出"
@@ -483,6 +1628,7 @@ async function restoreWorkspaceState() {
     refs.downloadButton.setAttribute("aria-disabled", "false")
     refs.downloadButton.download = state.lastResultImage?.name || `picgen-${state.lastResultMode || "result"}-restored.png`
     renderResultCandidates()
+    restoreCopyrightRiskPanel()
   }
 
   const source = snapshot.source || {}
@@ -525,8 +1671,45 @@ function cloneImageAsset(asset, overrides = {}) {
   return { ...asset, ...overrides }
 }
 
+function modelInputAssetForLogoWorkflow(asset, logoRequested) {
+  if (!logoRequested || !asset?.logoOverlayApplied) {
+    return asset
+  }
+
+  const source = {
+    ...asset,
+    name: imageDataUrlName(asset.name || "picgen-result.png", "base"),
+    dataUrl: asset.originalDataUrl || "",
+    savedUrl: asset.originalSavedUrl || "",
+    fileUrl: asset.originalFileUrl || "",
+    src: asset.originalDataUrl || asset.originalSavedUrl || asset.originalFileUrl || "",
+    savedPath: asset.originalSavedPath || asset.savedPath || "",
+    logoOverlayApplied: false,
+    description: `未贴 LOGO 的生成主体图 · ${asset.name || "最新结果"}`,
+  }
+  return getAssetDisplaySrc(source) ? source : asset
+}
+
 function getAssetDisplaySrc(asset) {
   return asset?.savedUrl || asset?.dataUrl || asset?.fileUrl || asset?.src || ""
+}
+
+function shareToAsset(share) {
+  const imageSrc = share?.saved_image_url || ""
+  if (!imageSrc) {
+    return null
+  }
+  return {
+    name: `shared-${share.id || Date.now()}.png`,
+    type: "",
+    dataUrl: "",
+    savedUrl: imageSrc,
+    savedPath: share.saved_image_path || "",
+    fileUrl: imageSrc,
+    origin: "share",
+    description: `来自 ${share.sender_username || "用户"} 的分享`,
+    src: imageSrc,
+  }
 }
 
 function formatFileSize(bytes) {
@@ -644,37 +1827,12 @@ function styleTransferPrompt(userPrompt) {
   ].filter(Boolean).join("\n")
 }
 
-function setFlowState(element, stateName) {
-  if (!element) {
-    return
-  }
-
-  element.dataset.state = stateName
-  element.classList.toggle("is-active", stateName === "active")
-  element.classList.toggle("is-complete", stateName === "complete")
-}
-
 function updateWorkflowStatus() {
-  const savedApiKey = state.savedApiKey || ""
-  const hasConnection = Boolean(
-    refs.generateUrlInput.value.trim()
-      || refs.editUrlInput.value.trim()
-      || refs.responsesUrlInput.value.trim()
-      || refs.apiKeyInput.value.trim()
-      || savedApiKey
-      || state.serverConfig?.has_default_api_key,
-  )
   const hasResult = Boolean(state.resultPreview?.src)
-  const hasGenerated = Boolean(hasResult && ["generate", "variant"].includes(state.lastResultMode))
-  const hasEdited = Boolean(hasResult && ["edit", "variant"].includes(state.lastResultMode))
-  const hasCompare = canComparePreviews()
-  const hasExport = Boolean(state.lastResultImage?.savedPath || refs.downloadButton.getAttribute("href"))
-
-  setFlowState(refs.flowConnect, hasConnection ? "complete" : "active")
-  setFlowState(refs.flowGenerate, hasGenerated ? "complete" : state.activeMode === "generate" ? "active" : "idle")
-  setFlowState(refs.flowEdit, hasEdited ? "complete" : state.activeMode === "edit" ? "active" : "idle")
-  setFlowState(refs.flowCompare, hasCompare ? "complete" : state.lastResultMode === "edit" ? "active" : "idle")
-  setFlowState(refs.flowExport, hasExport ? "complete" : hasResult ? "active" : "idle")
+  const hasSource = Boolean(getAssetDisplaySrc(state.displayedSourceImage))
+  refs.resultActions?.classList.toggle("hidden", !hasResult)
+  refs.comparisonGrid?.classList.toggle("single-result", !hasSource)
+  refs.sourcePreviewCard?.classList.toggle("hidden", !hasSource)
 }
 
 function appendPromptSnippet(target, snippet) {
@@ -702,8 +1860,8 @@ function isTypingElement(element) {
 }
 
 function saveSettings() {
-  const local = loadJSON(STORAGE_KEY, {})
-  const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
+  const local = loadJSON(settingsStorageKey(), {})
+  const legacy = loadJSON(legacySettingsStorageKey(), {})
   const newApiKey = refs.apiKeyInput.value.trim()
   const nextApiKey = newApiKey || local.apiKey || legacy.apiKey || ""
   state.savedApiKey = nextApiKey
@@ -715,15 +1873,17 @@ function saveSettings() {
     responsesModel: refs.responsesModelInput.value.trim(),
     imageTransport: getImageTransport(),
   }
-  saveJSON(STORAGE_KEY, payload)
+  saveJSON(settingsStorageKey(), payload)
   refs.apiKeyInput.value = ""
   flashHint(newApiKey ? "新 API Key 已保存在当前浏览器本地；输入框已清空，不会回显 key。" : "设置已保存；API Key 未变更。")
+  void syncUserPreferences()
   updateWorkflowStatus()
 }
 
 function loadSettings() {
-  const local = loadJSON(STORAGE_KEY, {})
-  const legacy = loadJSON(LEGACY_STORAGE_KEY, {})
+  const local = loadJSON(settingsStorageKey(), {})
+  const legacy = loadJSON(legacySettingsStorageKey(), {})
+  const prefs = state.userPreferences || {}
   const localResponsesUrl = local.responsesUrl || ""
   const responsesUrl = DEPRECATED_RESPONSES_URLS.has(localResponsesUrl) && state.serverConfig.responses_url
     ? state.serverConfig.responses_url
@@ -733,12 +1893,23 @@ function loadSettings() {
   refs.generateUrlInput.value = local.generateUrl || legacy.generateUrl || state.serverConfig.generate_url || ""
   refs.editUrlInput.value = local.editUrl || legacy.editUrl || state.serverConfig.edit_url || ""
   refs.responsesUrlInput.value = responsesUrl
-  refs.responsesModelInput.value = normalizeResponsesModel(local.responsesModel || state.serverConfig.default_responses_model)
+  refs.responsesModelInput.value = normalizeResponsesModel(
+    local.responsesModel || prefs.default_responses_model || state.serverConfig.default_responses_model,
+  )
 
-  refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
-  refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
-  setGenerateSize(state.serverConfig.default_size || "auto")
-  setImageTransport(local.imageTransport === "responses" ? "responses" : "images")
+  refs.generateModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.editModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  setGenerateSize(prefs.default_size || state.serverConfig.default_size || "auto")
+  if (prefs.default_quality) {
+    refs.qualitySelect.value = prefs.default_quality
+  }
+  if (prefs.default_output_format) {
+    refs.outputFormatSelect.value = prefs.default_output_format
+  }
+  if (typeof prefs.logo_overlay_enabled === "boolean") {
+    refs.logoOverlayEnabled.checked = prefs.logo_overlay_enabled
+  }
+  setImageTransport(local.imageTransport || prefs.default_image_transport || "images")
 
   if (state.savedApiKey) {
     refs.settingsHint.textContent = "浏览器本地已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
@@ -747,6 +1918,61 @@ function loadSettings() {
   }
 
   updateWorkflowStatus()
+}
+
+function currentUserPreferencesPayload() {
+  let size = ""
+  try {
+    size = getGenerateSize()
+  } catch {
+    size = getSizeSnapshotValue()
+  }
+  return {
+    default_model: refs.generateModelInput.value.trim(),
+    default_responses_model: normalizeResponsesModel(refs.responsesModelInput.value),
+    default_size: size,
+    default_quality: refs.qualitySelect.value || "",
+    default_output_format: refs.outputFormatSelect.value || "",
+    default_image_transport: getImageTransport(),
+    logo_overlay_enabled: refs.logoOverlayEnabled.checked,
+    auto_copyright_check_enabled: true,
+  }
+}
+
+async function loadUserPreferences() {
+  if (state.serverConfig?.auth_enabled === false || !state.currentUser) {
+    state.userPreferences = null
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/preferences", { cache: "no-store" })
+    state.userPreferences = response.ok ? data.preferences || null : null
+  } catch {
+    state.userPreferences = null
+  }
+}
+
+async function syncUserPreferences({ quiet = true } = {}) {
+  if (state.serverConfig?.auth_enabled === false || !state.currentUser) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/preferences", {
+      method: "PUT",
+      body: JSON.stringify(currentUserPreferencesPayload()),
+    })
+    if (response.ok) {
+      state.userPreferences = data.preferences || null
+      return
+    }
+    if (!quiet) {
+      flashHint(data.error || "偏好保存失败，本地配置仍已保存。")
+    }
+  } catch {
+    if (!quiet) {
+      flashHint("偏好保存暂时不可用，本地配置仍已保存。")
+    }
+  }
 }
 
 function getImageTransport() {
@@ -806,7 +2032,7 @@ function getSettings() {
 }
 
 function updateLogoControlUI() {
-  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled.checked ? "AI 合成" : "未启用"
+  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled.checked ? "本地贴图" : "未启用"
   updateGenerateSampleCountUI()
 }
 
@@ -814,11 +2040,15 @@ function shouldUseCompanyLogo() {
   return Boolean(refs.logoOverlayEnabled?.checked)
 }
 
+function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+  const basePrompt = String(prompt || "").trim()
+  return logoRequested ? `${basePrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : basePrompt
+}
+
 function updateGenerateSampleCountUI() {
   const hasReference = Boolean(generateReferenceImages().length)
   const isVariant = state.generateIntent === "variant"
-  const logoRequested = shouldUseCompanyLogo()
-  const disabled = logoRequested || hasReference || isVariant
+  const disabled = hasReference || isVariant
   refs.generateSampleCountInput.disabled = disabled
   refs.generateSampleCountInput.closest("label")?.classList.toggle("is-disabled", disabled)
 
@@ -828,55 +2058,9 @@ function updateGenerateSampleCountUI() {
     refs.generateSampleCountHint.textContent = hasStyleTransferReferences()
       ? "模板 + 素材图仍按现有逻辑默认 3 张。"
       : "带参考图生成固定 1 张。"
-  } else if (logoRequested) {
-    refs.generateSampleCountHint.textContent = "带 LOGO 会走 AI 参考图合成，固定 1 张。"
   } else {
     refs.generateSampleCountHint.textContent = "纯文字生图可填 1-3；留空默认 1。"
   }
-}
-
-function withCompanyLogoPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
-  return logoRequested ? `${prompt.trim()}\n${COMPANY_LOGO_GUIDANCE}` : prompt
-}
-
-function logoContextPrompt(prompt, contextLabel, logoRequested = shouldUseCompanyLogo()) {
-  if (!logoRequested) {
-    return prompt
-  }
-  return withCompanyLogoPrompt(
-    `${prompt.trim()}\n本次任务需要基于${contextLabel}进行整体设计，不是简单覆盖贴图。`,
-    logoRequested,
-  )
-}
-
-async function buildCompanyLogoReferencePart() {
-  const response = await fetch(COMPANY_LOGO_B64_URL)
-  if (!response.ok) {
-    throw new Error("无法读取 6 人游 LOGO 图片。")
-  }
-  const logoBase64 = (await response.text()).replace(/\s+/g, "")
-  if (!logoBase64) {
-    throw new Error("6 人游 LOGO 图片内容为空。")
-  }
-  return {
-    name: COMPANY_LOGO_NAME,
-    type: COMPANY_LOGO_MIME,
-    data_url: `data:${COMPANY_LOGO_MIME};base64,${logoBase64}`,
-    role: "brand_logo",
-  }
-}
-
-async function appendCompanyLogoReference(parts, logoRequested = shouldUseCompanyLogo()) {
-  if (!logoRequested) {
-    refs.logoComposeStatus.textContent = "未启用"
-    return parts
-  }
-  refs.logoComposeStatus.textContent = "随请求提交"
-  appendDebugLine("将 6 人游 LOGO 作为 AI 参考图提交", {
-    placement: "top-left",
-    source: COMPANY_LOGO_NAME,
-  })
-  return [...parts, await buildCompanyLogoReferencePart()]
 }
 
 function requireEditSettings(settings, contextLabel) {
@@ -1048,6 +2232,85 @@ function getOpenAIImageOptions() {
   return options
 }
 
+function currentFormSnapshot() {
+  return {
+    activeMode: state.activeMode,
+    generateIntent: state.generateIntent,
+    imageTransport: getImageTransport(),
+    generatePrompt: refs.generatePromptInput.value,
+    generateModel: refs.generateModelInput.value,
+    generateSize: getSizeSnapshotValue(),
+    quality: refs.qualitySelect.value,
+    background: refs.backgroundSelect.value,
+    outputFormat: refs.outputFormatSelect.value,
+    outputCompression: refs.outputCompressionInput.value,
+    moderation: refs.moderationSelect.value,
+    generateSampleCount: refs.generateSampleCountInput.value,
+    logoOverlayEnabled: refs.logoOverlayEnabled.checked,
+    editPrompt: refs.editPromptInput.value,
+    editModel: refs.editModelInput.value,
+  }
+}
+
+function getSizeSnapshotValue() {
+  if (refs.generateSizePreset.value === "auto" && !refs.generateWidthInput.value && !refs.generateHeightInput.value) {
+    return "auto"
+  }
+  if (refs.generateWidthInput.value && refs.generateHeightInput.value) {
+    return `${refs.generateWidthInput.value}x${refs.generateHeightInput.value}`
+  }
+  return refs.generateSizePreset.value || "auto"
+}
+
+function applyFormSnapshot(snapshot) {
+  if (!snapshot) {
+    return
+  }
+  setImageTransport(snapshot.imageTransport || "images")
+  refs.generatePromptInput.value = snapshot.generatePrompt || ""
+  refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
+  setGenerateSize(snapshot.generateSize || "auto")
+  refs.qualitySelect.value = snapshot.quality || "auto"
+  refs.backgroundSelect.value = snapshot.background || "auto"
+  refs.outputFormatSelect.value = snapshot.outputFormat || "png"
+  refs.outputCompressionInput.value = snapshot.outputCompression || "100"
+  refs.moderationSelect.value = snapshot.moderation || "auto"
+  refs.generateSampleCountInput.value = snapshot.generateSampleCount || ""
+  refs.logoOverlayEnabled.checked = snapshot.logoOverlayEnabled !== false
+  refs.editPromptInput.value = snapshot.editPrompt || ""
+  refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
+  setGenerateIntent(snapshot.generateIntent || "fresh")
+  setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
+  updateLogoControlUI()
+  updatePromptCounters()
+}
+
+function rememberRegenerationRequest(kind, snapshot) {
+  state.lastRegenerationRequest = {
+    kind,
+    snapshot: { ...snapshot },
+  }
+}
+
+async function rerunLastGeneration() {
+  if (!state.lastRegenerationRequest) {
+    setError("当前没有可复用的生成参数。")
+    return
+  }
+  const currentSnapshot = currentFormSnapshot()
+  const { kind, snapshot } = state.lastRegenerationRequest
+  try {
+    applyFormSnapshot(snapshot)
+    if (kind === "edit") {
+      await submitEdit()
+    } else {
+      await submitGenerate()
+    }
+  } finally {
+    applyFormSnapshot(currentSnapshot)
+  }
+}
+
 function getGenerateSampleCount() {
   const rawValue = refs.generateSampleCountInput.value.trim()
   if (!rawValue) {
@@ -1187,15 +2450,15 @@ function startProgress(label, options = {}) {
   state.progressTimer = window.setInterval(renderProgress, 100)
 }
 
-function stopProgress() {
+function stopProgress({ cancelled = false } = {}) {
   window.clearInterval(state.progressTimer)
   state.progressTimer = null
   state.progressStartedAt = 0
   state.progressPhase = "idle"
   state.progressExpectedCount = 1
-  refs.requestProgressFill.style.width = "100%"
-  refs.generationOrbit?.style.setProperty("--progress-degrees", "360deg")
-  refs.generationOrbit?.setAttribute("data-progress", "100%")
+  refs.requestProgressFill.style.width = cancelled ? "0%" : "100%"
+  refs.generationOrbit?.style.setProperty("--progress-degrees", cancelled ? "0deg" : "360deg")
+  refs.generationOrbit?.setAttribute("data-progress", cancelled ? "0%" : "100%")
   window.setTimeout(() => {
     if (state.isBusy) {
       return
@@ -1211,21 +2474,50 @@ function stopProgress() {
 
 function setBusy(isBusy, label, options = {}) {
   state.isBusy = isBusy
+  if (!isBusy) {
+    state.activeRequestController = null
+    refs.cancelRequestButton.textContent = "中断生成"
+  }
   refs.generateButton.disabled = isBusy
   refs.editButton.disabled = isBusy
   refs.generateTab.disabled = isBusy
   refs.editTab.disabled = isBusy
+  refs.cancelRequestButton?.classList.toggle("hidden", !isBusy)
+  refs.cancelRequestButton.disabled = !isBusy
   refs.requestStatus.textContent = label
   refs.requestBadge.textContent = label
   refs.requestBadge.className = `status-badge ${isBusy ? "working" : "idle"}`
   if (isBusy) {
+    state.activeRequestCancelled = false
     startProgress(options.progressLabel || label, options)
   } else {
-    stopProgress()
+    stopProgress({ cancelled: options.cancelled === true })
   }
 }
 
+function cancelActiveRequest() {
+  if (!state.isBusy) {
+    return
+  }
+  state.activeRequestCancelled = true
+  appendDebugLine("用户已中断当前生成")
+  setProgressPhase("receiving", "正在中断生成")
+  refs.cancelRequestButton.disabled = true
+  refs.cancelRequestButton.textContent = "正在中断"
+  state.activeRequestController?.abort()
+}
+
+function ensureRequestNotCancelled() {
+  if (!state.activeRequestCancelled) {
+    return
+  }
+  const requestError = new Error("用户已中断当前生成。")
+  requestError.cancelled = true
+  throw requestError
+}
+
 function setError(message = "", details = "") {
+  refs.errorMessage.classList.remove("neutral")
   refs.errorMessage.textContent = message
   // Keep the alert to one plain-language sentence; technical details (raw
   // upstream JSON, stack-ish text) go into a collapsed panel so non-technical
@@ -1243,7 +2535,20 @@ function setError(message = "", details = "") {
   }
 }
 
+function setStatusMessage(message = "") {
+  if (!refs.toastMessage || !message) {
+    return
+  }
+  refs.toastMessage.textContent = message
+  refs.toastMessage.classList.remove("hidden")
+  window.clearTimeout(state.toastTimer)
+  state.toastTimer = window.setTimeout(() => {
+    refs.toastMessage?.classList.add("hidden")
+  }, 2600)
+}
+
 function setRiskPanel(status, text, { hidden = false } = {}) {
+  state.copyrightRisk = { status, text, hidden }
   refs.copyrightRiskPanel?.classList.toggle("hidden", hidden)
   if (refs.copyrightRiskStatus) {
     refs.copyrightRiskStatus.textContent = status
@@ -1251,6 +2556,16 @@ function setRiskPanel(status, text, { hidden = false } = {}) {
   if (refs.copyrightRiskText) {
     refs.copyrightRiskText.textContent = text
   }
+  scheduleWorkspacePersist()
+}
+
+function restoreCopyrightRiskPanel() {
+  const risk = state.copyrightRisk || {}
+  setRiskPanel(
+    risk.status || "等待检查",
+    risk.text || "生成完成后自动检查。",
+    { hidden: risk.hidden !== false },
+  )
 }
 
 function updateGenerateReferenceUI() {
@@ -1437,9 +2752,13 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
     return false
   }
 
-  const asset = cloneImageAsset(state.lastResultImage, {
+  const usesBaseImage = shouldUseCompanyLogo() && Boolean(state.lastResultImage.logoOverlayApplied)
+  const inputAsset = modelInputAssetForLogoWorkflow(state.lastResultImage, usesBaseImage)
+  const asset = cloneImageAsset(inputAsset, {
     origin: "result",
-    description: `自动使用最新结果 · ${state.lastResultImage.name}`,
+    description: usesBaseImage
+      ? `自动使用未贴 LOGO 的主体图 · ${inputAsset.name}`
+      : `自动使用最新结果 · ${inputAsset.name}`,
   })
   setEditImage(asset, { showPreview, previewLabel: "输入图" })
 
@@ -1503,8 +2822,10 @@ function updatePreviewAvailability() {
   refs.resultPreviewTrigger.classList.toggle("preview-frame-clickable", hasResult)
   refs.previewCompareButton.disabled = !canComparePreviews()
   refs.previewCompareModeButton.disabled = !canComparePreviews()
+  refs.openResultPreviewButton.disabled = !hasResult
   refs.continueEditButton.disabled = !state.lastResultImage
   refs.startVariantButton.disabled = !state.lastResultImage
+  updateFeedbackPanelVisibility()
   updateWorkflowStatus()
 }
 
@@ -1512,6 +2833,81 @@ function closePreview() {
   refs.previewModal.classList.add("hidden")
   refs.previewModal.setAttribute("aria-hidden", "true")
   document.body.classList.remove("modal-open")
+  stopPreviewDrag()
+}
+
+function resetPreviewZoom() {
+  state.previewZoom = {
+    scale: 1,
+    x: 0,
+    y: 0,
+    dragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    startX: 0,
+    startY: 0,
+  }
+  applyPreviewZoom()
+}
+
+function applyPreviewZoom() {
+  const zoom = state.previewZoom
+  if (!refs.previewSingleImage) {
+    return
+  }
+  refs.previewSingleImage.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`
+  refs.previewSingleImage.classList.toggle("is-zoomed", zoom.scale > 1.01)
+  refs.previewZoomOutButton.disabled = zoom.scale <= 1.01
+  refs.previewZoomResetButton.disabled = zoom.scale <= 1.01 && zoom.x === 0 && zoom.y === 0
+}
+
+function changePreviewZoom(delta) {
+  const nextScale = Math.max(1, Math.min(4, Number((state.previewZoom.scale + delta).toFixed(2))))
+  state.previewZoom.scale = nextScale
+  if (nextScale <= 1.01) {
+    state.previewZoom.x = 0
+    state.previewZoom.y = 0
+  }
+  applyPreviewZoom()
+}
+
+function stopPreviewDrag() {
+  state.previewZoom.dragging = false
+  refs.previewSinglePane?.classList.remove("is-dragging")
+}
+
+function startPreviewDrag(event) {
+  if (state.preview.mode === "compare" || state.previewZoom.scale <= 1.01 || event.button !== 0) {
+    return
+  }
+  event.preventDefault()
+  state.previewZoom.dragging = true
+  state.previewZoom.dragStartX = event.clientX
+  state.previewZoom.dragStartY = event.clientY
+  state.previewZoom.startX = state.previewZoom.x
+  state.previewZoom.startY = state.previewZoom.y
+  refs.previewSinglePane?.classList.add("is-dragging")
+}
+
+function movePreviewDrag(event) {
+  if (!state.previewZoom.dragging) {
+    return
+  }
+  event.preventDefault()
+  state.previewZoom.x = state.previewZoom.startX + event.clientX - state.previewZoom.dragStartX
+  state.previewZoom.y = state.previewZoom.startY + event.clientY - state.previewZoom.dragStartY
+  applyPreviewZoom()
+}
+
+function handlePreviewWheel(event) {
+  if (state.preview.mode === "compare") {
+    return
+  }
+  if (!(event.ctrlKey || event.metaKey)) {
+    return
+  }
+  event.preventDefault()
+  changePreviewZoom(event.deltaY < 0 ? 0.2 : -0.2)
 }
 
 function getPreviewItem(target) {
@@ -1553,6 +2949,7 @@ function renderPreviewModal() {
     refs.previewModalTitle.textContent = `${singleItem.label}预览`
     refs.previewModalMeta.textContent = singleItem.meta
     refs.previewSingleImage.src = singleItem.src
+    applyPreviewZoom()
     return
   }
 
@@ -1570,6 +2967,7 @@ function openPreview(target = "result", mode = "single") {
 
   state.preview.target = target
   state.preview.mode = mode
+  resetPreviewZoom()
   renderPreviewModal()
   refs.previewModal.classList.remove("hidden")
   refs.previewModal.setAttribute("aria-hidden", "false")
@@ -1586,13 +2984,24 @@ function clearResult() {
   refs.resultMeta.textContent = ""
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = ""
-  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled?.checked ? "AI 合成" : "未启用"
+  refs.logoComposeStatus.textContent = refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用"
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
   refs.downloadButton.classList.add("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
+  refs.openResultPreviewButton.disabled = true
+  refs.feedbackReasonPanel?.classList.add("hidden")
+  if (refs.feedbackReasonInput) {
+    refs.feedbackReasonInput.value = ""
+  }
+  refs.shareResultPanel?.classList.add("hidden")
+  if (refs.shareResultNoteInput) {
+    refs.shareResultNoteInput.value = ""
+  }
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
 
   state.lastResultPrompt = ""
   state.lastResultImage = null
@@ -1603,6 +3012,8 @@ function clearResult() {
   state.resultCandidates = []
   state.selectedCandidateIndex = 0
   state.rawResponsePreview = null
+  state.lastFeedbackPayload = null
+  state.lastFeedbackRating = null
   state.debugLines = []
   state.generateIntent = "fresh"
 
@@ -1665,6 +3076,7 @@ function candidateAsset(candidate, payload, index) {
     dataUrl: candidate.image_data_url || "",
     savedUrl: candidate.saved_image_url || "",
     savedPath: candidate.saved_image_path || "",
+    generatedImageId: candidate.generated_image_id || null,
     metadataPath: candidate.saved_metadata_path || "",
     fileUrl: candidate.saved_image_url || candidate.image_url || "",
     origin: "result",
@@ -1693,7 +3105,14 @@ function selectResultCandidate(index, { persist = true } = {}) {
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
   refs.downloadButton.download = candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`
+  refs.feedbackReasonPanel?.classList.add("hidden")
+  if (refs.feedbackReasonInput) {
+    refs.feedbackReasonInput.value = ""
+  }
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
   renderResultCandidates()
+  updateFeedbackPanelVisibility()
   updatePreviewAvailability()
   if (persist) {
     scheduleWorkspacePersist()
@@ -1727,7 +3146,60 @@ function renderResultCandidates() {
   })
 }
 
-function setResult(payload, durationMs, requestSource = null) {
+function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durationMs) {
+  const actualSize = formatActualSize(payload)
+  refs.resultImage.src = imageSource
+  refs.resultImage.classList.add("visible")
+  refs.resultPreviewEmpty.classList.add("hidden")
+  refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
+  state.resultPreview = {
+    src: imageSource,
+    mode: payload.mode || null,
+  }
+  state.lastResultImage = cloneImageAsset(firstCandidate.asset)
+  refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
+  if (firstCandidate.logo_overlay_applied) {
+    refs.resultStorage.textContent = firstCandidate.saved_image_path
+      ? `LOGO 成品已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+      : `LOGO 已在浏览器本地贴入，分享前需要重新保存${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+  } else {
+    refs.resultStorage.textContent = firstCandidate.saved_image_path
+      ? `已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+      : actualSize
+        ? `实际尺寸 ${actualSize}`
+        : ""
+  }
+  refs.downloadButton.href = firstCandidate.saved_image_url || imageSource
+  refs.downloadButton.classList.remove("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "false")
+  refs.downloadButton.download = firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
+}
+
+async function composeLogoOverlayAfterDisplay(payload, durationMs) {
+  try {
+    const composedCandidates = await composeLogoOverlayForCandidates(state.resultCandidates, true)
+    if (!composedCandidates.length || state.activeRequestController) {
+      return
+    }
+    state.resultCandidates = composedCandidates
+    const selectedIndex = Math.min(state.selectedCandidateIndex, composedCandidates.length - 1)
+    const selectedCandidate = composedCandidates[selectedIndex] || composedCandidates[0]
+    const imageSource = candidateImageSource(selectedCandidate)
+    if (!imageSource) {
+      return
+    }
+    applyPrimaryResultCandidate(selectedCandidate, payload, imageSource, durationMs)
+    renderResultCandidates()
+    updatePreviewAvailability()
+    refs.logoComposeStatus.textContent = selectedCandidate.logo_final_persisted ? "成品已保存" : "本地已贴图"
+    scheduleWorkspacePersist()
+  } catch (error) {
+    appendDebugLine("本地 LOGO 合成失败", { error: error.message })
+    refs.logoComposeStatus.textContent = "贴图失败，可先下载原图"
+  }
+}
+
+async function setResult(payload, durationMs, requestSource = null) {
   const candidates = Array.isArray(payload.images) && payload.images.length
     ? payload.images
     : [payload]
@@ -1753,22 +3225,12 @@ function setResult(payload, durationMs, requestSource = null) {
       : payload.mode === "reference"
         ? "参考生成"
         : "输出"
-  refs.resultImage.src = imageSource
-  refs.resultImage.classList.add("visible")
-  refs.resultPreviewEmpty.classList.add("hidden")
-  refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
-
   const displayedPrompt = payload.prompt || "结果已生成"
   state.lastResultPrompt = displayedPrompt
   refs.resultPrompt.textContent = displayedPrompt
   state.lastResultModel = payload.model || ""
   state.lastResultMode = payload.mode || null
-  state.resultPreview = {
-    src: imageSource,
-    mode: payload.mode || null,
-  }
-
-  state.lastResultImage = cloneImageAsset(firstCandidate.asset)
+  applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durationMs)
 
   if (isTransformMode && getAssetDisplaySrc(requestSource)) {
     state.currentComparisonSource = cloneImageAsset(requestSource)
@@ -1823,12 +3285,6 @@ function setResult(payload, durationMs, requestSource = null) {
     metaParts.push(`实际 ${actualSize}`)
   }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
-  refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
-  refs.resultStorage.textContent = firstCandidate.saved_image_path
-    ? `已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
-    : actualSize
-      ? `实际尺寸 ${actualSize}`
-      : ""
   if (payload.size && actualSize && !isSameSize(payload.size, actualSize)) {
     setError(`上游返回尺寸为 ${actualSize}，与请求尺寸 ${payload.size} 不一致。图片已按上游原始返回保存，本地没有缩放。`)
   } else {
@@ -1837,13 +3293,20 @@ function setResult(payload, durationMs, requestSource = null) {
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
 
-  refs.downloadButton.href = firstCandidate.saved_image_url || imageSource
-  refs.downloadButton.classList.remove("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.download = firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
+  refs.feedbackReasonPanel?.classList.add("hidden")
+  if (refs.feedbackReasonInput) {
+    refs.feedbackReasonInput.value = ""
+  }
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
   renderResultCandidates()
-  refs.logoComposeStatus.textContent = payload.logo_requested ? "AI 已处理" : "未启用"
+  updateFeedbackPanelVisibility()
+  refs.logoComposeStatus.textContent = payload.logo_requested ? "原图已显示，正在贴 LOGO" : "未启用"
+  if (payload.logo_requested) {
+    void composeLogoOverlayAfterDisplay(payload, durationMs)
+  }
   void checkCopyrightRisk(payload)
+  void refreshUsageSummary()
 
   updateEditSourceUI()
   updateGenerateIntentUI()
@@ -1934,7 +3397,7 @@ function renderHistory() {
 
 function pushHistory(item) {
   state.history = [item, ...state.history].slice(0, MAX_HISTORY_ITEMS)
-  saveJSON(HISTORY_KEY, state.history)
+  saveJSON(historyStorageKey(), state.history)
   renderHistory()
 }
 
@@ -1951,6 +3414,8 @@ async function postJSON(url, payload, options = {}) {
   setProgressPhase("uploading", options.progressLabel || "正在提交请求")
 
   const controller = new AbortController()
+  state.activeRequestController = controller
+  state.activeRequestCancelled = false
   const timeoutId = window.setTimeout(() => {
     appendDebugLine("请求超过等待时间，主动中断", { requestId, timeoutMs })
     controller.abort()
@@ -1969,24 +3434,35 @@ async function postJSON(url, payload, options = {}) {
     setProgressPhase("waiting", options.waitingLabel || "等待上游生成")
     response = await fetch(url, {
       method: "POST",
+      credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal: options.signal || controller.signal,
     })
   } catch (error) {
     appendDebugLine("fetch 失败", {
       requestId,
       elapsedMs: Math.round(performance.now() - startedAt),
-      error: error.name === "AbortError" ? "请求超时或被中断" : error.message,
+      error: error.name === "AbortError"
+        ? state.activeRequestCancelled ? "用户已中断当前生成" : "请求超时或被中断"
+        : error.message,
     })
-    throw error.name === "AbortError"
-      ? new Error("请求等待超时。请查看本地服务终端日志，确认后端是否卡在上游接口。")
-      : error
+    if (error.name === "AbortError") {
+      const requestError = new Error(state.activeRequestCancelled
+        ? "用户已中断当前生成。"
+        : "请求等待超时。请查看本地服务终端日志，确认后端是否卡在上游接口。")
+      requestError.cancelled = state.activeRequestCancelled
+      throw requestError
+    }
+    throw error
   } finally {
     window.clearTimeout(timeoutId)
     window.clearTimeout(waitingNoticeId)
+    if (state.activeRequestController === controller) {
+      state.activeRequestController = null
+    }
   }
 
   appendDebugLine("本地服务已返回响应头", {
@@ -2018,6 +3494,9 @@ async function postJSON(url, payload, options = {}) {
       error: data.error || "请求失败",
       details: data.details || "",
     })
+    if (response.status === 401) {
+      enterAuthGate("login", "登录已过期，请重新登录。")
+    }
     const requestError = new Error(data.error || "请求失败")
     requestError.details = data.details || ""
     throw requestError
@@ -2037,6 +3516,7 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
   try {
     const response = await fetch(url, {
       method: "POST",
+      credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
       },
@@ -2045,6 +3525,9 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
     })
     const data = await response.json()
     if (!response.ok) {
+      if (response.status === 401) {
+        enterAuthGate("login", "登录已过期，请重新登录。")
+      }
       const requestError = new Error(data.error || "请求失败")
       requestError.details = data.details || ""
       throw requestError
@@ -2128,16 +3611,356 @@ async function blobToDataURL(blob) {
   })
 }
 
+async function loadImageElement(src, errorMessage = "无法读取图片。") {
+  return await new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error(errorMessage))
+    image.src = src
+  })
+}
+
+function imageDataUrlName(baseName, suffix) {
+  const safeBase = String(baseName || "picgen-result.png")
+  const dotIndex = safeBase.lastIndexOf(".")
+  if (dotIndex <= 0) {
+    return `${safeBase}-${suffix}.png`
+  }
+  return `${safeBase.slice(0, dotIndex)}-${suffix}.png`
+}
+
+function findOpaqueContentBounds(imageData, alphaThreshold = 0) {
+  const { data, width, height } = imageData
+  let minX = width
+  let minY = height
+  let maxX = -1
+  let maxY = -1
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const alpha = data[(y * width + x) * 4 + 3]
+      if (alpha <= alphaThreshold) {
+        continue
+      }
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    return { x: 0, y: 0, width, height }
+  }
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  }
+}
+
+function hasTransparentLogoBackground(imageData) {
+  let hasVisiblePixel = false
+  let hasFullyTransparentPixel = false
+  for (let index = 3; index < imageData.data.length; index += 4) {
+    const alpha = imageData.data[index]
+    if (alpha === 0) {
+      hasFullyTransparentPixel = true
+    } else {
+      hasVisiblePixel = true
+    }
+    if (hasVisiblePixel && hasFullyTransparentPixel) {
+      return true
+    }
+  }
+  return false
+}
+
+function createOfficialLogoCanvas(image) {
+  const sourceCanvas = document.createElement("canvas")
+  sourceCanvas.width = image.naturalWidth || image.width
+  sourceCanvas.height = image.naturalHeight || image.height
+  const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true })
+  if (!sourceCtx) {
+    throw new Error("当前浏览器无法处理 LOGO 图片。")
+  }
+
+  sourceCtx.drawImage(image, 0, 0)
+  const imageData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height)
+  if (!hasTransparentLogoBackground(imageData)) {
+    throw new Error("官方 LOGO 缺少透明背景，请上传带透明通道的 6renyou.png。")
+  }
+  const bounds = findOpaqueContentBounds(imageData, 0)
+
+  const logoCanvas = document.createElement("canvas")
+  logoCanvas.width = bounds.width
+  logoCanvas.height = bounds.height
+  const logoCtx = logoCanvas.getContext("2d")
+  if (!logoCtx) {
+    throw new Error("当前浏览器无法处理 LOGO 图片。")
+  }
+  logoCtx.putImageData(imageData, -bounds.x, -bounds.y)
+  return logoCanvas
+}
+
+function calculateRegionComplexity(ctx, region) {
+  const x = Math.max(0, Math.floor(region.x))
+  const y = Math.max(0, Math.floor(region.y))
+  const width = Math.max(1, Math.min(ctx.canvas.width - x, Math.floor(region.width)))
+  const height = Math.max(1, Math.min(ctx.canvas.height - y, Math.floor(region.height)))
+  const sampleWidth = Math.max(1, Math.min(24, width))
+  const sampleHeight = Math.max(1, Math.min(12, height))
+  const imageData = ctx.getImageData(x, y, width, height)
+  let total = 0
+  let count = 0
+  let previous = null
+  for (let sy = 0; sy < sampleHeight; sy += 1) {
+    const py = Math.min(height - 1, Math.floor((sy / sampleHeight) * height))
+    for (let sx = 0; sx < sampleWidth; sx += 1) {
+      const px = Math.min(width - 1, Math.floor((sx / sampleWidth) * width))
+      const index = (py * width + px) * 4
+      const luminance = 0.2126 * imageData.data[index]
+        + 0.7152 * imageData.data[index + 1]
+        + 0.0722 * imageData.data[index + 2]
+      if (previous !== null) {
+        total += Math.abs(luminance - previous)
+        count += 1
+      }
+      previous = luminance
+    }
+  }
+  return count ? total / count : 0
+}
+
+async function loadCompanyLogoCanvas() {
+  if (state.companyLogoCanvas) {
+    return state.companyLogoCanvas
+  }
+  const logoImage = await loadImageElement(COMPANY_LOGO_URL, "无法读取 6 人游 LOGO 图片。")
+  state.companyLogoCanvas = createOfficialLogoCanvas(logoImage)
+  return state.companyLogoCanvas
+}
+
+function calculateLogoPlacement(canvas, logoCanvas) {
+  const targetWidth = Math.round(
+    Math.min(
+      COMPANY_LOGO_MAX_WIDTH,
+      Math.max(COMPANY_LOGO_MIN_WIDTH, canvas.width * COMPANY_LOGO_WIDTH_RATIO),
+    ),
+  )
+  const targetHeight = Math.max(1, Math.round(targetWidth * (logoCanvas.height / logoCanvas.width)))
+  const margin = Math.round(
+    Math.min(
+      COMPANY_LOGO_MAX_MARGIN,
+      Math.max(COMPANY_LOGO_MIN_MARGIN, Math.min(canvas.width, canvas.height) * COMPANY_LOGO_MARGIN_RATIO),
+    ),
+  )
+  const candidates = [
+    { x: margin, y: margin, width: targetWidth, height: targetHeight },
+    { x: margin, y: Math.min(canvas.height - targetHeight - margin, margin + Math.round(targetHeight * 0.72)), width: targetWidth, height: targetHeight },
+    { x: Math.min(canvas.width - targetWidth - margin, margin + Math.round(targetWidth * 0.42)), y: margin, width: targetWidth, height: targetHeight },
+  ].filter((placement) => placement.x >= 0 && placement.y >= 0)
+
+  const ctx = canvas.getContext("2d")
+  if (!ctx) {
+    return candidates[0]
+  }
+  return candidates
+    .map((placement) => ({
+      placement,
+      complexity: calculateRegionComplexity(ctx, {
+        x: placement.x,
+        y: placement.y,
+        width: placement.width,
+        height: placement.height,
+      }),
+    }))
+    .sort((left, right) => left.complexity - right.complexity)[0]?.placement || candidates[0]
+}
+
+function drawCanvasWithHighQuality(ctx, canvas, width, height) {
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = "high"
+  ctx.drawImage(canvas, 0, 0, width, height)
+}
+
+function resizeCanvasHighQuality(sourceCanvas, targetWidth, targetHeight) {
+  const finalWidth = Math.max(1, Math.round(targetWidth))
+  const finalHeight = Math.max(1, Math.round(targetHeight))
+  let currentCanvas = sourceCanvas
+
+  while (currentCanvas.width > finalWidth * 2 && currentCanvas.height > finalHeight * 2) {
+    const nextCanvas = document.createElement("canvas")
+    nextCanvas.width = Math.max(finalWidth, Math.round(currentCanvas.width / 2))
+    nextCanvas.height = Math.max(finalHeight, Math.round(currentCanvas.height / 2))
+    const nextCtx = nextCanvas.getContext("2d")
+    if (!nextCtx) {
+      throw new Error("当前浏览器无法缩放 LOGO。")
+    }
+    drawCanvasWithHighQuality(nextCtx, currentCanvas, nextCanvas.width, nextCanvas.height)
+    currentCanvas = nextCanvas
+  }
+
+  if (currentCanvas.width === finalWidth && currentCanvas.height === finalHeight) {
+    return currentCanvas
+  }
+
+  const finalCanvas = document.createElement("canvas")
+  finalCanvas.width = finalWidth
+  finalCanvas.height = finalHeight
+  const finalCtx = finalCanvas.getContext("2d")
+  if (!finalCtx) {
+    throw new Error("当前浏览器无法缩放 LOGO。")
+  }
+  drawCanvasWithHighQuality(finalCtx, currentCanvas, finalWidth, finalHeight)
+  return finalCanvas
+}
+
+async function applyLogoOverlayToDataUrl(dataUrl) {
+  if (!dataUrl) {
+    return null
+  }
+
+  const [baseImage, logoCanvas] = await Promise.all([
+    loadImageElement(dataUrl, "无法读取上游返回图片。"),
+    loadCompanyLogoCanvas(),
+  ])
+  const width = baseImage.naturalWidth || baseImage.width
+  const height = baseImage.naturalHeight || baseImage.height
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext("2d")
+  if (!ctx) {
+    throw new Error("当前浏览器无法合成 LOGO。")
+  }
+
+  ctx.drawImage(baseImage, 0, 0, width, height)
+  const placement = calculateLogoPlacement(canvas, logoCanvas)
+  const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
+  ctx.drawImage(scaledLogoCanvas, placement.x, placement.y)
+  return {
+    dataUrl: canvas.toDataURL(COMPANY_LOGO_MIME),
+    width,
+    height,
+    placement: {
+      ...placement,
+      textColor: "original",
+    },
+  }
+}
+
+async function persistFinalLogoImage(candidate, asset, composed, composedName) {
+  const generatedImageId = candidate.generated_image_id || asset.generatedImageId || null
+  if (!generatedImageId || !composed?.dataUrl) {
+    return null
+  }
+  const response = await postJSONSilent("api/final-images", {
+    generated_image_id: generatedImageId,
+    source_saved_image_path: candidate.saved_image_path || asset.savedPath || asset.originalSavedPath || "",
+    source_saved_image_url: candidate.saved_image_url || asset.savedUrl || asset.originalSavedUrl || "",
+    logo_overlay_applied: true,
+    logo_overlay_source: COMPANY_LOGO_NAME,
+    logo_text_color: composed.placement?.textColor || "original",
+    image: {
+      name: composedName,
+      type: COMPANY_LOGO_MIME,
+      data_url: composed.dataUrl,
+    },
+  }, REQUEST_TIMEOUT_MS)
+  return response.image || null
+}
+
+async function composeLogoOverlayForCandidates(candidates, logoRequested) {
+  if (!logoRequested) {
+    refs.logoComposeStatus.textContent = "未启用"
+    return candidates
+  }
+
+  refs.logoComposeStatus.textContent = "本地合成中"
+  setProgressPhase("receiving", "本地合成 LOGO")
+  appendDebugLine("本地贴入 6 人游 LOGO", {
+    source: COMPANY_LOGO_NAME,
+    placement: "top-left",
+    alphaMode: "official-transparent-png",
+  })
+
+  const composedCandidates = []
+  for (const candidate of candidates) {
+    const asset = candidate.asset
+    if (!asset) {
+      composedCandidates.push(candidate)
+      continue
+    }
+    const sourceDataUrl = asset.dataUrl || await ensureAssetDataUrl(asset)
+    const composed = await applyLogoOverlayToDataUrl(sourceDataUrl)
+    if (!composed) {
+      composedCandidates.push(candidate)
+      continue
+    }
+    const composedName = imageDataUrlName(asset.name || candidate.saved_image_name, "6renyou-logo")
+    let persisted = null
+    try {
+      persisted = await persistFinalLogoImage(candidate, asset, composed, composedName)
+    } catch (error) {
+      appendDebugLine("LOGO 成品回传落盘失败", { error: error.message })
+    }
+    const serverUrl = persisted?.saved_image_url || ""
+    const displaySrc = serverUrl || composed.dataUrl
+    const composedAsset = {
+      ...asset,
+      name: persisted?.saved_image_name || composedName,
+      type: COMPANY_LOGO_MIME,
+      dataUrl: serverUrl ? "" : composed.dataUrl,
+      savedUrl: serverUrl,
+      fileUrl: serverUrl,
+      src: displaySrc,
+      originalDataUrl: sourceDataUrl,
+      originalSavedUrl: asset.savedUrl,
+      originalFileUrl: asset.fileUrl,
+      originalSavedPath: asset.savedPath,
+      savedPath: persisted?.saved_image_path || "",
+      metadataPath: persisted?.saved_metadata_path || "",
+      generatedImageId: persisted?.generated_image_id || candidate.generated_image_id || asset.generatedImageId || null,
+      logoOverlayApplied: true,
+      logoPlacement: composed.placement,
+      description: serverUrl
+        ? `${asset.description || asset.name || "结果图"} · 已保存 6 人游 LOGO 成品`
+        : `${asset.description || asset.name || "结果图"} · 已本地贴入 6 人游 LOGO`,
+    }
+    composedCandidates.push({
+      ...candidate,
+      image_data_url: serverUrl ? null : composed.dataUrl,
+      saved_image_url: serverUrl,
+      saved_image_path: persisted?.saved_image_path || "",
+      saved_metadata_path: persisted?.saved_metadata_path || "",
+      saved_metadata_url: persisted?.saved_metadata_url || "",
+      saved_image_name: persisted?.saved_image_name || composedName,
+      saved_image_mime: COMPANY_LOGO_MIME,
+      saved_image_width: persisted?.saved_image_width || composed.width,
+      saved_image_height: persisted?.saved_image_height || composed.height,
+      saved_image_bytes: persisted?.saved_image_bytes || candidate.saved_image_bytes || 0,
+      generated_image_id: persisted?.generated_image_id || candidate.generated_image_id || null,
+      logo_overlay_applied: true,
+      logo_overlay_source: COMPANY_LOGO_NAME,
+      logo_text_color: composed.placement.textColor || "original",
+      logo_final_persisted: Boolean(serverUrl),
+      asset: composedAsset,
+    })
+  }
+  refs.logoComposeStatus.textContent = composedCandidates.some((candidate) => candidate.logo_final_persisted)
+    ? "成品已保存"
+    : "本地已贴图"
+  return composedCandidates
+}
+
 async function downscaleDataUrlForRisk(dataUrl, maxSide = 768, quality = 0.82) {
   if (!dataUrl) {
     return ""
   }
-  const image = await new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error("无法读取版权风险检查图片。"))
-    img.src = dataUrl
-  })
+  const image = await loadImageElement(dataUrl, "无法读取版权风险检查图片。")
   const naturalWidth = image.naturalWidth || image.width
   const naturalHeight = image.naturalHeight || image.height
   const scale = Math.min(1, maxSide / Math.max(naturalWidth, naturalHeight))
@@ -2276,7 +4099,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = logoContextPrompt(prompt, "当前结果图", logoRequested)
+  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
   let imageOptions
   let size
 
@@ -2310,12 +4133,13 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     return
   }
 
+  const requestSnapshot = currentFormSnapshot()
   saveSettings()
   setError("")
   closePreview()
   setBusy(true, "延展中", { progressLabel: "准备延展图像" })
 
-  const requestSource = cloneImageAsset(state.lastResultImage)
+  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.lastResultImage, logoRequested))
   previewPendingResult({
     mode: "variant",
     prompt,
@@ -2329,13 +4153,13 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     appendDebugLine("读取延展输入图片")
     setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
+    ensureRequestNotCancelled()
     const imagePart = {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
       data_url: requestSourceDataUrl,
       role: "source_image",
     }
-    const requestImages = await appendCompanyLogoReference([imagePart], logoRequested)
     let result
     if (useResponses) {
       result = await postJSON("api/responses-image", {
@@ -2343,14 +4167,13 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         endpoint_url: settings.responsesUrl,
         prompt: requestPrompt,
         model,
-        mode: logoRequested ? "variant-with-logo" : "variant",
+        mode: "variant",
         transport: "responses-image",
-        logo_requested: logoRequested,
         allow_inline_fallback: true,
         size,
         ...imageOptions,
         image: imagePart,
-        images: requestImages,
+        images: [imagePart],
       }, {
         mode: "variant",
         progressLabel: "提交延展请求",
@@ -2362,19 +4185,19 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         endpoint_url: settings.editUrl,
         prompt: requestPrompt,
         model,
-        mode: logoRequested ? "variant-with-logo" : "variant",
-        logo_requested: logoRequested,
+        mode: "variant",
         size,
         ...imageOptions,
         image: imagePart,
-        images: requestImages,
+        images: [imagePart],
       }, {
         mode: "variant",
         progressLabel: "提交延展请求",
         waitingLabel: "等待上游延展",
       })
     }
-    setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    await setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "variant",
       prompt,
@@ -2387,9 +4210,10 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     })
   } catch (error) {
     appendDebugLine("延展请求失败", { error: error.message })
-    setError(error.message, error.details)
+    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
   } finally {
-    setBusy(false, "空闲")
+    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+    state.activeRequestCancelled = false
   }
 }
 
@@ -2410,13 +4234,10 @@ async function submitGenerate() {
   const referenceImages = generateReferenceImages()
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
-  const model = (referenceImages.length || logoRequested) && useResponses ? settings.responsesModel : imageModel
-  const requestPrompt = logoContextPrompt(
-    dualReference ? styleTransferPrompt(prompt) : prompt,
-    referenceImages.length ? "用户提供的参考图" : "6 人游 LOGO 参考图",
-    logoRequested,
-  )
-  const requiresReferenceTransport = referenceImages.length || logoRequested
+  const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
+  const baseRequestPrompt = dualReference ? styleTransferPrompt(prompt) : prompt
+  const requestPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
+  const requiresReferenceTransport = referenceImages.length > 0
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -2434,10 +4255,10 @@ async function submitGenerate() {
 
   if (requiresReferenceTransport) {
     if (useResponses) {
-      if (!requireResponsesSettings(settings, logoRequested ? "带 LOGO 生成" : "带参考图生成")) {
+      if (!requireResponsesSettings(settings, "带参考图生成")) {
         return
       }
-    } else if (!requireEditSettings(settings, logoRequested ? "带 LOGO 生成" : "带参考图生成")) {
+    } else if (!requireEditSettings(settings, "带参考图生成")) {
       return
     }
   }
@@ -2448,13 +4269,14 @@ async function submitGenerate() {
   try {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
-    sampleCount = logoRequested || referenceImages.length ? 1 : getGenerateSampleCount()
+    sampleCount = referenceImages.length ? 1 : getGenerateSampleCount()
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
     return
   }
 
+  const requestSnapshot = currentFormSnapshot()
   saveSettings()
   setError("")
   closePreview()
@@ -2468,7 +4290,7 @@ async function submitGenerate() {
     prompt,
     model,
     size,
-    sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || (logoRequested ? COMPANY_LOGO_NAME : ""),
+    sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || "",
   })
 
   const startedAt = performance.now()
@@ -2481,6 +4303,7 @@ async function submitGenerate() {
       const referenceParts = []
       for (const referenceSource of requestSources) {
         const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
+        ensureRequestNotCancelled()
         referenceParts.push({
           name: referenceSource.name,
           type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
@@ -2488,7 +4311,7 @@ async function submitGenerate() {
           role: referenceSource.role || referenceSource.origin || "reference",
         })
       }
-      const requestParts = await appendCompanyLogoReference(referenceParts, logoRequested)
+      const requestParts = referenceParts
       const referencePart = requestParts.at(-1)
       const transport = useResponses ? "responses-image" : "images-edit"
       const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
@@ -2499,9 +4322,8 @@ async function submitGenerate() {
           endpoint_url: settings.responsesUrl,
           prompt: requestPrompt,
           model: settings.responsesModel,
-          mode: logoRequested ? "reference-with-logo" : "reference",
+          mode: "reference",
           transport: "responses-image",
-          logo_requested: logoRequested,
           allow_inline_fallback: true,
           sample_count: referenceSampleCount,
           size,
@@ -2519,8 +4341,7 @@ async function submitGenerate() {
           endpoint_url: settings.editUrl,
           prompt: requestPrompt,
           model: imageModel,
-          mode: logoRequested ? "reference-with-logo" : "reference",
-          logo_requested: logoRequested,
+          mode: "reference",
           sample_count: referenceSampleCount,
           size,
           ...imageOptions,
@@ -2532,7 +4353,8 @@ async function submitGenerate() {
           waitingLabel: "等待上游参考生成",
         })
       }
-      setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSources.at(-1))
+      await setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSources.at(-1))
+      rememberRegenerationRequest("generate", requestSnapshot)
       pushHistory({
         mode: "reference",
         prompt,
@@ -2550,9 +4372,8 @@ async function submitGenerate() {
     const result = await postJSON("api/generate", {
       api_key: settings.apiKey,
       endpoint_url: settings.generateUrl,
-      prompt,
+      prompt: requestPrompt,
       model,
-      logo_requested: false,
       sample_count: sampleCount,
       size,
       ...imageOptions,
@@ -2561,12 +4382,13 @@ async function submitGenerate() {
       progressLabel: "提交生成请求",
       waitingLabel: "等待上游生成",
     })
-    setResult(result, performance.now() - startedAt)
+    await setResult({ ...result, logo_requested: logoRequested }, performance.now() - startedAt)
+    rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
       prompt,
       model,
-      logoRequested: false,
+      logoRequested,
       sampleCount,
       size,
       ...imageOptions,
@@ -2574,9 +4396,10 @@ async function submitGenerate() {
     })
   } catch (error) {
     appendDebugLine("生成请求失败", { error: error.message })
-    setError(error.message, error.details)
+    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
   } finally {
-    setBusy(false, "空闲")
+    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+    state.activeRequestCancelled = false
   }
 }
 
@@ -2589,7 +4412,7 @@ async function submitEdit() {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = logoContextPrompt(prompt, "输入图", logoRequested)
+  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -2612,12 +4435,13 @@ async function submitEdit() {
     return
   }
 
+  const requestSnapshot = currentFormSnapshot()
   saveSettings()
   setError("")
   closePreview()
   setBusy(true, "编辑中", { progressLabel: "准备编辑图像" })
 
-  const requestSource = cloneImageAsset(state.editImage)
+  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.editImage, logoRequested))
   previewPendingResult({
     mode: "edit",
     prompt,
@@ -2630,18 +4454,19 @@ async function submitEdit() {
     appendDebugLine("读取编辑输入图片")
     setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
+    ensureRequestNotCancelled()
     const imagePart = {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
       data_url: requestSourceDataUrl,
       role: "source_image",
     }
-    const requestImages = await appendCompanyLogoReference([imagePart], logoRequested)
 
     let maskPart = null
     if (state.editMaskImage) {
       appendDebugLine("读取编辑 mask")
       const maskDataUrl = await ensureAssetDataUrl(state.editMaskImage)
+      ensureRequestNotCancelled()
       maskPart = {
         name: state.editMaskImage.name,
         type: state.editMaskImage.type || inferMimeFromDataUrl(maskDataUrl),
@@ -2656,12 +4481,11 @@ async function submitEdit() {
         endpoint_url: settings.responsesUrl,
         prompt: requestPrompt,
         model,
-        mode: logoRequested ? "edit-with-logo" : "edit",
+        mode: "edit",
         transport: "responses-image",
-        logo_requested: logoRequested,
         allow_inline_fallback: true,
         image: imagePart,
-        images: requestImages,
+        images: [imagePart],
       }
       if (maskPart) {
         requestPayload.mask = maskPart
@@ -2677,10 +4501,9 @@ async function submitEdit() {
         endpoint_url: settings.editUrl,
         prompt: requestPrompt,
         model: imageModel,
-        mode: logoRequested ? "edit-with-logo" : "edit",
-        logo_requested: logoRequested,
+        mode: "edit",
         image: imagePart,
-        images: requestImages,
+        images: [imagePart],
       }
       if (maskPart) {
         requestPayload.mask = maskPart
@@ -2691,7 +4514,8 @@ async function submitEdit() {
         waitingLabel: "等待上游编辑",
       })
     }
-    setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    await setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    rememberRegenerationRequest("edit", requestSnapshot)
     pushHistory({
       mode: "edit",
       prompt,
@@ -2702,9 +4526,10 @@ async function submitEdit() {
     })
   } catch (error) {
     appendDebugLine("编辑请求失败", { error: error.message })
-    setError(error.message, error.details)
+    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
   } finally {
-    setBusy(false, "空闲")
+    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+    state.activeRequestCancelled = false
   }
 }
 
@@ -2855,6 +4680,35 @@ function bindReferenceDropzone(dropzone, input, handler) {
 }
 
 function bindEvents() {
+  refs.authForm?.addEventListener("submit", submitAuthForm)
+  refs.registerAuthButton?.addEventListener("click", () => {
+    enterAuthGate(state.authMode === "register" ? "login" : "register")
+  })
+  refs.forgotPasswordButton?.addEventListener("click", enterPasswordResetRequest)
+  refs.passwordResetRequestForm?.addEventListener("submit", submitPasswordResetRequest)
+  refs.cancelPasswordResetRequestButton?.addEventListener("click", leavePasswordResetRequest)
+  refs.logoutButton?.addEventListener("click", logout)
+  refs.adminCreateUserForm?.addEventListener("submit", submitAdminCreateUser)
+  refs.refreshAdminUsersButton?.addEventListener("click", refreshAdminUsers)
+  refs.refreshFeedbackSummaryButton?.addEventListener("click", refreshFeedbackSummary)
+  refs.refreshPasswordResetRequestsButton?.addEventListener("click", refreshPasswordResetRequests)
+  refs.adminUsersList?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null
+    const button = target?.closest(".admin-delete-user-button")
+    if (!button) {
+      return
+    }
+    void deleteAdminUser(button.dataset.userId)
+  })
+  refs.passwordResetRequestsList?.addEventListener("submit", (event) => {
+    event.preventDefault()
+    const form = event.target instanceof HTMLFormElement ? event.target : null
+    if (!form?.classList.contains("password-reset-admin-form")) {
+      return
+    }
+    void submitPasswordResetAdminForm(form)
+  })
+
   refs.newTaskButton.addEventListener("click", () => {
     clearResult()
     clearGenerateForm()
@@ -2872,7 +4726,7 @@ function bindEvents() {
   })
   refs.clearHistoryButton.addEventListener("click", () => {
     state.history = []
-    saveJSON(HISTORY_KEY, state.history)
+    saveJSON(historyStorageKey(), state.history)
     renderHistory()
   })
 
@@ -2897,11 +4751,35 @@ function bindEvents() {
   })
   refs.generateButton.addEventListener("click", submitGenerate)
   refs.editButton.addEventListener("click", submitEdit)
+  refs.cancelRequestButton?.addEventListener("click", cancelActiveRequest)
   refs.clearGenerateButton.addEventListener("click", clearGenerateForm)
   refs.clearEditButton.addEventListener("click", clearEditForm)
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
+  refs.openResultPreviewButton.addEventListener("click", () => openPreview("result", "single"))
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
+  refs.feedbackRatingButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      void submitResultFeedback(button.dataset.rating)
+    })
+  })
+  refs.submitBadFeedbackButton?.addEventListener("click", submitBadFeedbackReason)
+  refs.regenerateFromBadFeedbackButton?.addEventListener("click", regenerateFromBadFeedback)
+  refs.submitShareResultButton?.addEventListener("click", submitShareResult)
+  refs.shareRecipientSearchInput?.addEventListener("input", renderShareRecipientOptions)
+  refs.refreshSharedResultsButton?.addEventListener("click", refreshSharedResults)
+  refs.sharedResultsList?.addEventListener("click", (event) => {
+    const button = event.target.closest(".shared-result-item")
+    if (!button) {
+      return
+    }
+    openSharedResult(button.dataset.shareId)
+  })
+  refs.bugReportButton?.addEventListener("click", openBugReportModal)
+  refs.closeBugReportButton?.addEventListener("click", closeBugReportModal)
+  refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
+  refs.bugReportForm?.addEventListener("submit", submitBugReport)
+  refs.refreshBugReportsButton?.addEventListener("click", refreshBugReports)
 
   refs.copyPromptButton.addEventListener("click", async () => {
     if (!state.lastResultPrompt) {
@@ -2910,7 +4788,7 @@ function bindEvents() {
     }
     try {
       await navigator.clipboard.writeText(state.lastResultPrompt)
-      setError("已复制本次提示词。")
+      setStatusMessage("已复制本次提示词。")
     } catch {
       setError("浏览器不允许复制到剪贴板。")
     }
@@ -3146,8 +5024,23 @@ function bindEvents() {
       return
     }
     state.preview.mode = "compare"
+    resetPreviewZoom()
     renderPreviewModal()
   })
+  refs.previewZoomInButton?.addEventListener("click", () => changePreviewZoom(0.25))
+  refs.previewZoomOutButton?.addEventListener("click", () => changePreviewZoom(-0.25))
+  refs.previewZoomResetButton?.addEventListener("click", resetPreviewZoom)
+  refs.previewSinglePane?.addEventListener("wheel", handlePreviewWheel, { passive: false })
+  refs.previewSinglePane?.addEventListener("pointerdown", (event) => {
+    startPreviewDrag(event)
+    if (state.previewZoom.dragging) {
+      refs.previewSinglePane.setPointerCapture(event.pointerId)
+    }
+  })
+  refs.previewSinglePane?.addEventListener("pointermove", movePreviewDrag)
+  refs.previewSinglePane?.addEventListener("pointerup", stopPreviewDrag)
+  refs.previewSinglePane?.addEventListener("pointercancel", stopPreviewDrag)
+  refs.previewSingleImage?.addEventListener("dragstart", (event) => event.preventDefault())
   refs.closePreviewButton.addEventListener("click", closePreview)
   refs.previewModalBackdrop.addEventListener("click", closePreview)
   refs.previewModal.addEventListener("click", (event) => {
@@ -3157,6 +5050,11 @@ function bindEvents() {
   })
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && refs.bugReportModal && !refs.bugReportModal.classList.contains("hidden")) {
+      closeBugReportModal()
+      return
+    }
+
     if (event.key === "Escape" && !refs.previewModal.classList.contains("hidden")) {
       closePreview()
       return
@@ -3206,8 +5104,6 @@ function bindEvents() {
 async function init() {
   clearResult()
   clearSourcePreview("原图")
-  state.history = loadJSON(HISTORY_KEY, [])
-  renderHistory()
 
   try {
     const response = await fetch("api/config", { cache: "no-store" })
@@ -3217,7 +5113,7 @@ async function init() {
     state.serverConfig = {
       default_model: "gpt-image-2",
       default_responses_model: "gpt-5.5",
-      default_size: "1024x1024",
+      default_size: "1088x2240",
       generate_url: "",
       edit_url: "",
       responses_url: "",
@@ -3225,8 +5121,25 @@ async function init() {
     }
   }
 
-  loadSettings()
   bindEvents()
+  const authenticated = await checkAuthSession()
+  if (!authenticated) {
+    return
+  }
+
+  await startAuthenticatedApp()
+}
+
+async function startAuthenticatedApp() {
+  if (state.appReady) {
+    await refreshUsageSummary()
+    return
+  }
+
+  state.history = loadJSON(historyStorageKey(), [])
+  renderHistory()
+  await loadUserPreferences()
+  loadSettings()
   updateLogoControlUI()
   updatePromptCounters()
   updateGenerateIntentUI()
@@ -3242,7 +5155,9 @@ async function init() {
   }
 
   state.persistenceReady = true
+  state.appReady = true
   updateWorkflowStatus()
+  await refreshUsageSummary()
   scheduleWorkspacePersist()
 }
 

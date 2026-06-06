@@ -40,6 +40,7 @@ def settings_factory(tmp_path: Path):
             "root_dir": tmp_path,
             "static_dir": tmp_path,
             "data_dir": tmp_path / "data",
+            "auth_enabled": False,
             "rate_limit_per_minute": 0,
             "rate_limit_burst": 0,
             "log_level": "WARNING",
