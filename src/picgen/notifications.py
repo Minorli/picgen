@@ -38,6 +38,28 @@ class ErrorAlert:
     details: str | None = None
 
 
+@dataclass(frozen=True)
+class GenerationSuccessAlert:
+    request_id: str
+    job_id: int
+    user_id: int
+    username: str
+    method: str
+    path: str
+    mode: str
+    model: str
+    size: str
+    prompt: str
+    image_count: int
+    candidate_count: int
+    saved_bytes: int
+    elapsed_ms: float
+    logo_requested: bool
+    logo_overlay_applied: bool
+    saved_image_urls: list[str]
+    generated_image_ids: list[int]
+
+
 def error_alert_notifications_enabled(settings: Settings) -> bool:
     return bool(
         settings.error_alert_telegram_bot_token.strip()
@@ -76,6 +98,37 @@ async def send_error_alert_notification(
     return NotificationResult(configured=True, sent=True, status="sent")
 
 
+async def send_generation_success_notification(
+    *,
+    settings: Settings,
+    alert: GenerationSuccessAlert,
+) -> NotificationResult:
+    token = settings.error_alert_telegram_bot_token.strip()
+    chat_id = settings.error_alert_telegram_chat_id.strip()
+    if not token or not chat_id:
+        return NotificationResult(configured=False, sent=False, status="not_configured")
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    content = build_generation_success_alert_text(alert)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.error_alert_telegram_timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            response = await client.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": content,
+                    "disable_web_page_preview": True,
+                },
+            )
+            response.raise_for_status()
+    except Exception as exc:  # pragma: no cover - network failures depend on deployment
+        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+    return NotificationResult(configured=True, sent=True, status="sent")
+
+
 def build_error_alert_text(alert: ErrorAlert) -> str:
     detail_text = redact_sensitive_text(alert.details, limit=1800)
     technical_message = redact_sensitive_text(alert.technical_message, limit=900)
@@ -94,6 +147,41 @@ def build_error_alert_text(alert: ErrorAlert) -> str:
     if detail_text:
         lines.extend(["", "Details:", detail_text])
     return "\n".join(lines)[:3900]
+
+
+def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
+    prompt = redact_sensitive_text(alert.prompt, limit=600)
+    urls = [redact_sensitive_text(url, limit=300) for url in alert.saved_image_urls[:5] if url]
+    image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
+    lines = [
+        "PicGen 生图成功",
+        f"用户：{alert.username or '-'} (#{alert.user_id})",
+        f"任务：#{alert.job_id} / {alert.request_id or '-'}",
+        f"接口：{alert.method} {alert.path}",
+        f"模式：{alert.mode or '-'}",
+        f"模型：{alert.model or '-'}",
+        f"尺寸：{alert.size or '-'}",
+        f"图片数：{alert.image_count}",
+        f"候选数：{alert.candidate_count}",
+        f"落盘：{_format_bytes(alert.saved_bytes)}",
+        f"耗时：{alert.elapsed_ms / 1000:.1f}s",
+        f"LOGO：请求={'是' if alert.logo_requested else '否'} / 成品={'是' if alert.logo_overlay_applied else '否'}",
+        f"图片 ID：{image_ids}",
+    ]
+    if urls:
+        lines.extend(["", "图片：", *urls])
+    if prompt:
+        lines.extend(["", "提示词：", prompt])
+    return "\n".join(lines)[:3900]
+
+
+def _format_bytes(value: int) -> str:
+    size = max(0, int(value or 0))
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
 
 
 async def send_bug_report_notification(

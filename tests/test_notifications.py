@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from picgen.notifications import ErrorAlert, _build_bug_report_content, build_error_alert_text
+from picgen.notifications import (
+    ErrorAlert,
+    GenerationSuccessAlert,
+    _build_bug_report_content,
+    build_error_alert_text,
+    build_generation_success_alert_text,
+)
 
 
 def test_bug_report_markdown_escapes_entities_without_double_escape() -> None:
@@ -52,4 +58,41 @@ def test_error_alert_text_redacts_sensitive_values_and_truncates() -> None:
     assert "Bearer token123456" not in content
     assert "very-secret" not in content
     assert "org-***" in content
+    assert len(content) <= 3900
+
+
+def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
+    alert = GenerationSuccessAlert(
+        request_id="req-ok-123",
+        job_id=42,
+        user_id=7,
+        username="alice",
+        method="POST",
+        path="/api/generate",
+        mode="generate",
+        model="gpt-image-2",
+        size="1088x2240",
+        prompt="生成一张旅行海报，api_key=sk-secret123456",
+        image_count=2,
+        candidate_count=2,
+        saved_bytes=4096,
+        elapsed_ms=1234.5,
+        logo_requested=True,
+        logo_overlay_applied=False,
+        saved_image_urls=["files/outputs/20260606/alice-generate.png"],
+        generated_image_ids=[101, 102],
+    )
+
+    content = build_generation_success_alert_text(alert)
+
+    assert "PicGen 生图成功" in content
+    assert "用户：alice (#7)" in content
+    assert "任务：#42 / req-ok-123" in content
+    assert "模型：gpt-image-2" in content
+    assert "尺寸：1088x2240" in content
+    assert "图片数：2" in content
+    assert "LOGO：请求=是 / 成品=否" in content
+    assert "files/outputs/20260606/alice-generate.png" in content
+    assert "sk-secret123456" not in content
+    assert "api_key=***" in content
     assert len(content) <= 3900
