@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=tg-title-20260606a">
+    <link rel="stylesheet" href="styles.css?v=prompt-tags-20260606a">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -117,12 +117,12 @@
               </label>
 
               <div class="tag-row" aria-label="生成提示词快捷片段">
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="背景干净，主体清晰">背景干净</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="山间湖泊，清晨薄雾">山间湖泊</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="木屋，暖光，真实材质">木屋</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="清晨自然光，空气通透">清晨</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="薄雾，远山，层次分明">薄雾</button>
-                <button class="prompt-chip" type="button" data-target="generate" data-snippet="电影感构图，色彩克制">电影感</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="高级旅行海报质感，商业摄影风格">高级旅行</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="精致商业海报，构图稳定，主体突出">精致海报</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="精品酒店场景，真实材质，精致光影">酒店质感</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="山野度假氛围，户外自然，生活方式摄影">山野度假</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="电影感构图，光影克制，氛围高级">电影光影</button>
+                <button class="prompt-chip" type="button" data-target="generate" data-snippet="色彩克制，统一色调，画面高级">色彩克制</button>
               </div>
 
               <div class="intent-rail" aria-label="生成方式">
@@ -580,7 +580,7 @@
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.19</span>
+        <span>PicGen Console　v0.1.20</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -685,6 +685,6 @@
 
     <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
 
-    <script src="app.js?v=tg-title-20260606a" type="module"></script>
+    <script src="app.js?v=prompt-tags-20260606a" type="module"></script>
   </body>
 </html>

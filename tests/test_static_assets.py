@@ -219,6 +219,19 @@ def test_generation_can_be_interrupted_from_ui() -> None:
     assert ".cancel-request-button" in styles_css
 
 
+def test_generate_prompt_chips_match_travel_brand_keywords() -> None:
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-snippet="高级旅行海报质感，商业摄影风格">高级旅行</button>' in index_html
+    assert 'data-snippet="精致商业海报，构图稳定，主体突出">精致海报</button>' in index_html
+    assert 'data-snippet="精品酒店场景，真实材质，精致光影">酒店质感</button>' in index_html
+    assert 'data-snippet="山野度假氛围，户外自然，生活方式摄影">山野度假</button>' in index_html
+    assert 'data-snippet="电影感构图，光影克制，氛围高级">电影光影</button>' in index_html
+    assert 'data-snippet="色彩克制，统一色调，画面高级">色彩克制</button>' in index_html
+    assert ">山间湖泊</button>" not in index_html
+    assert ">木屋</button>" not in index_html
+
+
 def test_docker_packaging_excludes_local_env_and_persists_container_data() -> None:
     dockerignore = (ROOT_DIR / ".dockerignore").read_text(encoding="utf-8")
     dockerfile = (ROOT_DIR / "Dockerfile").read_text(encoding="utf-8")
@@ -259,4 +272,4 @@ def test_static_footer_version_matches_release() -> None:
     version = version_line.split('"', 2)[1]
 
     assert f"PicGen Console　v{version}" in index_html
-    assert "PicGen Console　v0.1.2" not in index_html
+    assert "PicGen Console　v0.1.2</span>" not in index_html

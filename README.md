@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.19**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.20**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,7 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.19 主要特性
+## 0.1.20 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -32,6 +32,8 @@
 - **健康分级**：`/api/health` 仅看进程存活；`/api/ready` 联动客户端、磁盘可写性、版本号。
 - **Telegram 统一通知**：可配置 Telegram Bot 接收后台/上游异常、成功生图、Bug 反馈和找回密码申请；
   消息以 `【PicGen｜分类】` 开头，Telegram 列表里可直接区分事件类型和关键标题。
+- **旅行提示词标签**：生成提示词下方的快捷标签改为“高级旅行 / 精致海报 / 酒店质感 /
+  山野度假 / 电影光影 / 色彩克制”，更贴近 6 人游当前常用出图方向。
 - **账号自助维护**：普通用户可登录后自助修改密码；忘记密码申请会通知管理员且对外保持枚举安全。
 - **交付一致性**：请求集成 6 人游 LOGO 时，成品保存完成前下载按钮会进入处理中状态，避免误下无 LOGO 底图。
 - **私有文件缓存**：鉴权后的 `/files/...` 图片使用 private cache 指令，避免共享代理缓存私有交付物。
@@ -70,10 +72,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.19 .
+docker build -t minorli/picgen:0.1.20 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.19
+  minorli/picgen:0.1.20
 ```
 
 或：
@@ -88,10 +90,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.19`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.20`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.19 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.20 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -160,7 +162,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.19 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.20 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
