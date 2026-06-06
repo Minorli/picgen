@@ -4,9 +4,11 @@ from picgen.notifications import (
     ErrorAlert,
     GenerationSuccessAlert,
     _build_bug_report_content,
+    build_bug_report_telegram_text,
     build_error_alert_text,
     build_generation_success_alert_text,
     build_password_reset_request_notification_text,
+    build_password_reset_request_telegram_text,
     send_bug_report_notification,
     send_password_reset_request_notification,
 )
@@ -54,7 +56,9 @@ def test_error_alert_text_redacts_sensitive_values_and_truncates() -> None:
 
     content = build_error_alert_text(alert)
 
-    assert "PicGen 后台异常告警" in content
+    assert content.startswith("【PicGen｜后台异常】429 upstream_rate_limited")
+    assert "用户提示：" in content
+    assert "技术信息：" in content
     assert "org-BOvpEHVcDPTe8h4lZnwMO5Ly" not in content
     assert "sk-testsecret123456" not in content
     assert "sk-anothersecret123456" not in content
@@ -88,7 +92,7 @@ def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
 
     content = build_generation_success_alert_text(alert)
 
-    assert "PicGen 生图成功" in content
+    assert content.startswith("【PicGen｜生图成功】alice #42")
     assert "用户：alice (#7)" in content
     assert "任务：#42 / req-ok-123" in content
     assert "模型：gpt-image-2" in content
@@ -121,6 +125,47 @@ def test_password_reset_request_notification_text_is_admin_friendly_and_escaped(
     assert "匹配用户：是 (#3)" in content
     assert r"172\.16\.0\.50" in content
     assert "&lt;script&gt; &amp; bot" in content
+
+
+def test_admin_telegram_text_has_clear_categories_and_titles() -> None:
+    bug_text = build_bug_report_telegram_text(
+        {
+            "id": 7,
+            "title": "下载按钮没有反应",
+            "description": "点击下载后没有保存图片，也没有错误提示。",
+            "contact": "wechat: alice",
+            "page_url": "https://picgen.test/#resultPanel",
+            "created_at": "2026-06-06T20:00:00+08:00",
+        },
+        "alice",
+    )
+    reset_text = build_password_reset_request_telegram_text(
+        {
+            "id": 9,
+            "username": "alice",
+            "username_normalized": "alice",
+            "matched_user": True,
+            "user_id": 3,
+            "requested_ip": "172.16.0.50",
+            "user_agent": "Browser <script> & bot",
+            "created_at": "2026-06-06T20:01:00+08:00",
+        }
+    )
+
+    assert bug_text.startswith("【PicGen｜Bug 反馈】#7 下载按钮没有反应")
+    assert "标题：下载按钮没有反应" in bug_text
+    assert "用户：alice" in bug_text
+    assert "描述：点击下载后没有保存图片，也没有错误提示。" in bug_text
+    assert "###" not in bug_text
+    assert "\n>" not in bug_text
+
+    assert reset_text.startswith("【PicGen｜找回密码】#9 alice")
+    assert "账号：alice" in reset_text
+    assert "匹配：是（用户 #3）" in reset_text
+    assert "来源：172.16.0.50" in reset_text
+    assert "Browser <script> & bot" in reset_text
+    assert "###" not in reset_text
+    assert "\n>" not in reset_text
 
 
 async def test_admin_notifications_use_telegram_when_configured(settings_factory, respx_mock) -> None:
@@ -158,5 +203,5 @@ async def test_admin_notifications_use_telegram_when_configured(settings_factory
     first_payload = route.calls[0].request.content.decode()
     second_payload = route.calls[1].request.content.decode()
     assert "-100123456" in first_payload
-    assert "PicGen Bug" in first_payload
-    assert "PicGen 密码找回申请" in second_payload
+    assert "【PicGen｜Bug 反馈】#7 下载按钮没有反应" in first_payload
+    assert "【PicGen｜找回密码】#9 alice" in second_payload
