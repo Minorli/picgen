@@ -175,15 +175,19 @@ async def test_run_responses_sends_stream_as_json_boolean() -> None:
         await client.aclose()
 
 
-async def test_upstream_http_error_status_and_message_are_preserved() -> None:
+async def test_upstream_http_error_status_and_details_are_sanitized() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             429,
             text=json.dumps(
                 {
                     "error": {
-                        "message": "Rate limit reached for gpt-image-2-codex",
+                        "message": (
+                            "Rate limit reached for gpt-image-2-codex "
+                            "in organization org-BOvpEHVcDPTe8h4lZnwMO5Ly"
+                        ),
                         "type": "rate_limit_error",
+                        "api_key": "sk-secret123456",
                     }
                 }
             ),
@@ -200,8 +204,11 @@ async def test_upstream_http_error_status_and_message_are_preserved() -> None:
                 "UA",
             )
         assert info.value.status == 429
-        assert info.value.code == "upstream_error"
-        assert "Rate limit reached" in info.value.message
+        assert info.value.code == "upstream_rate_limited"
+        assert "图片生成服务当前请求较多" in info.value.message
+        assert "Rate limit reached" not in info.value.message
+        assert "org-BOvpEHVcDPTe8h4lZnwMO5Ly" not in (info.value.details or "")
+        assert "sk-secret123456" not in (info.value.details or "")
         assert "rate_limit_error" in (info.value.details or "")
     finally:
         await client.aclose()

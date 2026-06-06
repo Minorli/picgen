@@ -20,6 +20,7 @@ from .logging_config import (
     reset_request_id,
     set_request_id,
 )
+from .redaction import redact_sensitive_text
 
 logger = get_logger("picgen.middleware")
 
@@ -315,14 +316,29 @@ def _error_response(
 
 
 def api_error_response(exc: APIError) -> JSONResponse:
+    return api_error_response_with(
+        status=exc.status,
+        message=exc.message,
+        details=exc.details,
+        code=exc.code,
+    )
+
+
+def api_error_response_with(
+    *,
+    status: int,
+    message: str,
+    details: str | None,
+    code: str,
+) -> JSONResponse:
     from .logging_config import get_request_id
 
     return JSONResponse(
-        status_code=exc.status,
+        status_code=status,
         content={
-            "error": exc.message,
-            "details": exc.details,
-            "code": exc.code,
+            "error": redact_sensitive_text(message, limit=1000),
+            "details": redact_sensitive_text(details, limit=4000) or None,
+            "code": code,
             "request_id": get_request_id(),
         },
         headers={"X-Request-ID": get_request_id()},

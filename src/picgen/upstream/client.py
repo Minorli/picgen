@@ -14,8 +14,14 @@ import httpx
 
 from ..errors import APIError
 from ..logging_config import get_logger, log_event
+from ..redaction import redact_sensitive_text
 from ..storage import detect_image_mime
-from .errors import compact_log_text, extract_error_message
+from .errors import (
+    classify_upstream_error,
+    compact_log_text,
+    extract_error_message,
+    public_upstream_error_message,
+)
 from .payload import ensure_json_object, normalize_responses_image_payload
 from .responses import parse_sse_json_events, stream_events_to_image_payload
 from .transport import ascii_multipart_filename, encode_multipart, upstream_headers
@@ -524,10 +530,15 @@ class HttpxAsyncClient:
             elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
             attempt=attempt + 1,
             body_chars=len(body_text),
-            body_preview=compact_log_text(body_text),
+            body_preview=compact_log_text(redact_sensitive_text(body_text)),
         )
-        message, details = extract_error_message(body_text)
-        raise APIError(status, message, details, code="upstream_error")
+        upstream_message, upstream_details = extract_error_message(body_text)
+        code = classify_upstream_error(status, upstream_message, upstream_details)
+        public_message = public_upstream_error_message(status, code, _action_from_event_prefix(event_prefix))
+        detail_lines = [f"上游状态码：{status}", f"上游错误：{upstream_message}"]
+        if upstream_details:
+            detail_lines.extend(["", upstream_details])
+        raise APIError(status, public_message, "\n".join(detail_lines)[:4000], code=code)
 
     def _raise_network(
         self,
@@ -550,8 +561,11 @@ class HttpxAsyncClient:
             )
             raise APIError(
                 HTTPStatus.GATEWAY_TIMEOUT,
-                f"{action}超时：上游接口超过 {self.total_timeout:.0f} 秒没有返回",
-                "本地服务已经等满超时阈值。请降低图片尺寸/质量，或换用没有短网关限制的上游接口。",
+                "图片生成服务响应超时，请稍后再试。",
+                (
+                    f"{action}超时：上游接口超过 {self.total_timeout:.0f} 秒没有返回。\n"
+                    "本地服务已经等满超时阈值。请降低图片尺寸/质量，或换用没有短网关限制的上游接口。"
+                ),
                 code="upstream_timeout",
             ) from exc
         log_event(
@@ -565,8 +579,9 @@ class HttpxAsyncClient:
         )
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
-            f"无法连接{action}: {exc}",
-            code="upstream_error",
+            "暂时无法连接图片生成服务，请稍后再试。",
+            f"无法连接{action}: {redact_sensitive_text(str(exc), limit=1200)}",
+            code="upstream_network_error",
         ) from exc
 
     @staticmethod
@@ -576,10 +591,20 @@ class HttpxAsyncClient:
         except json.JSONDecodeError as exc:
             raise APIError(
                 HTTPStatus.BAD_GATEWAY,
-                f"{context} 返回了无法解析的 JSON",
-                text[:4000],
-                code="upstream_error",
+                "图片生成服务返回了无法解析的响应，请稍后再试。",
+                f"{context} 返回了无法解析的 JSON。\n{redact_sensitive_text(text, limit=3600)}",
+                code="upstream_invalid_response",
             ) from exc
+
+
+def _action_from_event_prefix(event_prefix: str) -> str:
+    if "multipart" in event_prefix:
+        return "编辑接口"
+    if "responses" in event_prefix:
+        return "Responses 图像接口"
+    if "image" in event_prefix:
+        return "下载上游返回图片"
+    return "生成接口"
 
 
 # --- module-level singleton with async lifecycle -----------------------

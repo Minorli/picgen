@@ -26,7 +26,8 @@ from .auth import (
 from .config import Settings
 from .errors import APIError
 from .logging_config import get_logger, get_request_id, log_event
-from .notifications import send_bug_report_notification
+from .notifications import error_alert_notifications_enabled, send_bug_report_notification
+from .redaction import redact_sensitive_text
 from .schemas import (
     AdminCreateUserRequest,
     AdminResetPasswordRequest,
@@ -390,6 +391,7 @@ def create_router() -> APIRouter:
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             auth_enabled=settings.auth_enabled,
             bug_report_notifications_enabled=bool(settings.bug_report_webhook_url),
+            error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
         )
 
     @router.get("/api/health", response_model=HealthResponse)
@@ -1202,7 +1204,7 @@ async def _with_timing(
             )
     except APIError as exc:
         error_code = exc.code
-        error_message = exc.message
+        error_message = redact_sensitive_text(exc.message, limit=1000)
         if auth_store is not None and job_id is not None:
             try:
                 await anyio.to_thread.run_sync(

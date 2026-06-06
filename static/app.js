@@ -2535,6 +2535,15 @@ function setError(message = "", details = "") {
   }
 }
 
+function errorDetailsWithRequestId(data = {}) {
+  const details = data.details || ""
+  const requestId = data.request_id || ""
+  if (!requestId) {
+    return details
+  }
+  return details ? `${details}\n\nrequest_id: ${requestId}` : `request_id: ${requestId}`
+}
+
 function setStatusMessage(message = "") {
   if (!refs.toastMessage || !message) {
     return
@@ -3498,7 +3507,7 @@ async function postJSON(url, payload, options = {}) {
       enterAuthGate("login", "登录已过期，请重新登录。")
     }
     const requestError = new Error(data.error || "请求失败")
-    requestError.details = data.details || ""
+    requestError.details = errorDetailsWithRequestId(data)
     throw requestError
   }
 
@@ -3529,7 +3538,7 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
         enterAuthGate("login", "登录已过期，请重新登录。")
       }
       const requestError = new Error(data.error || "请求失败")
-      requestError.details = data.details || ""
+      requestError.details = errorDetailsWithRequestId(data)
       throw requestError
     }
     return data

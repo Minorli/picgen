@@ -8,6 +8,7 @@ from starlette.types import Scope
 
 from picgen.errors import APIError
 from picgen.middleware import BodySizeLimitMiddleware
+from picgen.notifications import NotificationResult
 from picgen.routes import _with_timing
 from picgen.upstream import parse_sse_json_events, stream_events_to_image_payload
 
@@ -35,7 +36,11 @@ def test_ready_endpoint_reports_dependencies(make_client):
 
 
 def test_config_reports_api_key_presence_without_leaking_value(make_client, settings_factory):
-    settings = settings_factory(default_api_key="sk-secret")
+    settings = settings_factory(
+        default_api_key="sk-secret",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
     client, _, _ = make_client(settings=settings)
     response = client.get("/api/config")
     assert response.status_code == 200
@@ -45,8 +50,11 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["default_responses_model"] == "gpt-5.5"
     assert payload["default_size"] == "1088x2240"
     assert "sk-secret" not in response.text
+    assert "123:abc" not in response.text
+    assert "-100123456" not in response.text
     assert payload["max_image_bytes"] > 0
     assert payload["upstream_timeout_seconds"] > 0
+    assert payload["error_alert_notifications_enabled"] is True
 
 
 def test_config_reports_custom_responses_url(make_client, settings_factory):
@@ -227,6 +235,83 @@ def test_generate_does_not_retry_on_content_moderation_400(make_client, settings
     # error: the 400 should surface unchanged with no extra fallback call.
     assert response.status_code == 400
     assert fake.run_json.await_count == 1
+
+
+def test_generate_upstream_rate_limit_returns_friendly_redacted_error(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(
+            429,
+            "Rate limit reached for gpt-image-2-codex in organization org-BOvpEHVcDPTe8h4lZnwMO5Ly",
+            '{"error":{"message":"Rate limit reached","type":"rate_limit_error","api_key":"sk-secret"}}',
+            code="upstream_rate_limited",
+        ),
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["code"] == "upstream_rate_limited"
+    assert "图片生成服务当前请求较多" in payload["error"]
+    assert "Rate limit reached" not in payload["error"]
+    assert "org-BOvpEHVcDPTe8h4lZnwMO5Ly" not in response.text
+    assert "sk-secret" not in response.text
+
+
+def test_generate_upstream_error_mentions_backend_alert_when_telegram_configured(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    alerts = []
+
+    async def _fake_send_error_alert_notification(**kwargs):
+        alerts.append(kwargs["alert"])
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.main.send_error_alert_notification",
+        _fake_send_error_alert_notification,
+    )
+    settings = settings_factory(
+        default_api_key="sk-test",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(
+            504,
+            "图片生成服务响应超时，请稍后再试。",
+            "生成接口超时：上游接口超过 1200 秒没有返回。",
+            code="upstream_timeout",
+        ),
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 504
+    assert "后台已收到告警" in response.json()["error"]
+    assert alerts
+    assert alerts[0].code == "upstream_timeout"
 
 
 def test_generate_fanout_tolerates_partial_failure(make_client, settings_factory):
@@ -898,7 +983,9 @@ def test_responses_image_can_disable_inline_fallback(make_client, settings_facto
     )
 
     assert response.status_code == 502
-    assert response.json()["error"] == "Files 上传接口在接收文件时断开连接"
+    payload = response.json()
+    assert payload["error"].startswith("图片生成服务暂时不可用")
+    assert "Files 上传接口在接收文件时断开连接" in (payload["details"] or "")
     fake.run_responses.assert_not_called()
 
 
