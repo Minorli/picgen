@@ -125,6 +125,59 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "n" not in upstream_payload
 
 
+def test_authenticated_generation_sends_success_telegram_alert(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    alerts = []
+
+    async def _fake_send_generation_success_notification(**kwargs):
+        alerts.append(kwargs["alert"])
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.routes.send_generation_success_notification",
+        _fake_send_generation_success_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        default_api_key="sk-test",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, fake, _ = make_client(settings=settings)
+    register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+            "logo_requested": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert alerts
+    alert = alerts[0]
+    assert alert.username == "alice"
+    assert alert.job_id == payload["generation_job_id"]
+    assert alert.generated_image_ids == [payload["generated_image_id"]]
+    assert alert.saved_image_urls == [payload["saved_image_url"]]
+    assert alert.logo_requested is True
+    assert alert.image_count == 1
+
+
 def test_generate_accepts_three_candidates(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)

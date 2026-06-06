@@ -26,7 +26,12 @@ from .auth import (
 from .config import Settings
 from .errors import APIError
 from .logging_config import get_logger, get_request_id, log_event
-from .notifications import error_alert_notifications_enabled, send_bug_report_notification
+from .notifications import (
+    GenerationSuccessAlert,
+    error_alert_notifications_enabled,
+    send_bug_report_notification,
+    send_generation_success_notification,
+)
 from .redaction import redact_sensitive_text
 from .schemas import (
     AdminCreateUserRequest,
@@ -1109,6 +1114,86 @@ def _attach_generation_record_ids(
         result["generated_image_id"] = image_records[0]["id"]
 
 
+def _result_images(result: dict[str, Any]) -> list[dict[str, Any]]:
+    images = result.get("images")
+    if isinstance(images, list):
+        return [image for image in images if isinstance(image, dict)]
+    if result.get("saved_image_url") or result.get("saved_image_path"):
+        return [result]
+    return []
+
+
+def _result_saved_image_urls(result: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    for image in _result_images(result):
+        url = str(image.get("saved_image_url") or "").strip()
+        if url:
+            urls.append(url)
+    return urls
+
+
+def _result_generated_image_ids(result: dict[str, Any], image_records: list[dict[str, Any]]) -> list[int]:
+    ids: list[int] = []
+    for image in _result_images(result):
+        value = image.get("generated_image_id")
+        if isinstance(value, int):
+            ids.append(value)
+    if ids:
+        return ids
+    return [int(record["id"]) for record in image_records if isinstance(record.get("id"), int)]
+
+
+def _result_logo_overlay_applied(result: dict[str, Any]) -> bool:
+    return any(bool(image.get("logo_overlay_applied")) for image in _result_images(result))
+
+
+def _build_generation_success_alert(
+    *,
+    path: str,
+    body: Any,
+    result: dict[str, Any],
+    user: AuthUser,
+    job_id: int,
+    image_records: list[dict[str, Any]],
+    elapsed_ms: float,
+) -> GenerationSuccessAlert:
+    payload = body if isinstance(body, dict) else {}
+    return GenerationSuccessAlert(
+        request_id=get_request_id(),
+        job_id=job_id,
+        user_id=user.id,
+        username=user.username,
+        method="POST",
+        path=path,
+        mode=str(result.get("mode") or _job_mode(path, payload) or ""),
+        model=str(result.get("model") or payload.get("model") or ""),
+        size=str(result.get("size") or payload.get("size") or ""),
+        prompt=str(result.get("prompt") or payload.get("prompt") or ""),
+        image_count=_result_image_count(result),
+        candidate_count=int(result.get("candidate_count") or _result_image_count(result) or 0),
+        saved_bytes=_result_saved_bytes(result),
+        elapsed_ms=elapsed_ms,
+        logo_requested=bool(result.get("logo_requested") or payload.get("logo_requested")),
+        logo_overlay_applied=_result_logo_overlay_applied(result),
+        saved_image_urls=_result_saved_image_urls(result),
+        generated_image_ids=_result_generated_image_ids(result, image_records),
+    )
+
+
+async def _send_generation_success_alert(settings: Settings, alert: GenerationSuccessAlert) -> None:
+    result = await send_generation_success_notification(settings=settings, alert=alert)
+    if result.configured and not result.sent:
+        log_event(
+            logger,
+            logging.WARNING,
+            "generation_success_notification_failed",
+            status=result.status,
+            error=redact_sensitive_text(result.error, limit=300),
+            request_id=alert.request_id,
+            job_id=alert.job_id,
+        )
+
+
 async def _raise_if_client_disconnects(request: Request) -> None:
     while True:
         if await request.is_disconnected():
@@ -1183,16 +1268,27 @@ async def _with_timing(
             user=user,
             request=request,
         )
+        generation_alert: GenerationSuccessAlert | None = None
         if auth_store is not None and user is not None:
             if job_id is not None:
+                elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
                 image_records = await anyio.to_thread.run_sync(
                     lambda: auth_store.complete_generation_job(
                         job_id=job_id,
                         result=result,
-                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                        elapsed_ms=elapsed_ms,
                     )
                 )
                 _attach_generation_record_ids(result, job_id=job_id, image_records=image_records)
+                generation_alert = _build_generation_success_alert(
+                    path=path,
+                    body=body,
+                    result=result,
+                    user=user,
+                    job_id=job_id,
+                    image_records=image_records,
+                    elapsed_ms=elapsed_ms,
+                )
             await anyio.to_thread.run_sync(
                 lambda: auth_store.record_usage(
                     user_id=user.id,
@@ -1202,6 +1298,8 @@ async def _with_timing(
                     saved_bytes=_result_saved_bytes(result),
                 )
             )
+        if generation_alert is not None:
+            await _send_generation_success_alert(settings, generation_alert)
     except APIError as exc:
         error_code = exc.code
         error_message = redact_sensitive_text(exc.message, limit=1000)
