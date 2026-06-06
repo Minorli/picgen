@@ -55,6 +55,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["max_image_bytes"] > 0
     assert payload["upstream_timeout_seconds"] > 0
     assert payload["error_alert_notifications_enabled"] is True
+    assert payload["bug_report_notifications_enabled"] is True
 
 
 def test_config_reports_custom_responses_url(make_client, settings_factory):

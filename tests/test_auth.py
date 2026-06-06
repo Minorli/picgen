@@ -249,6 +249,38 @@ def test_password_reset_request_notifies_admin_without_enumerating(
     assert request_info["user_id"] is None
 
 
+def test_password_reset_request_notifies_admin_via_telegram_when_webhook_missing(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    notifications = []
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        notifications.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, _, _ = make_client(settings=settings)
+
+    response = client.post("/api/password-reset-requests", json={"username": "alice"})
+
+    assert response.status_code == 200
+    assert len(notifications) == 1
+    assert notifications[0]["settings"].error_alert_telegram_chat_id == "-100123456"
+    assert notifications[0]["request_info"]["username_normalized"] == "alice"
+
+
 def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True)
     client, _, _ = make_client(settings=settings)
@@ -723,6 +755,52 @@ def test_bug_report_is_recorded_and_admin_can_review_it(make_client, settings_fa
     assert reports[0]["username"] == "alice"
     assert reports[0]["description"] == "点击下载后没有保存图片，也没有错误提示。"
     assert reports[0]["notification_status"] == "not_configured"
+
+
+def test_bug_report_uses_telegram_admin_notification_when_configured(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    notifications = []
+
+    async def _fake_send_bug_report_notification(**kwargs):
+        notifications.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr("picgen.routes.send_bug_report_notification", _fake_send_bug_report_notification)
+    settings = settings_factory(
+        auth_enabled=True,
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, _, _ = make_client(settings=settings)
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert register_response.status_code == 200
+
+    report_response = client.post(
+        "/api/bug-reports",
+        json={
+            "title": "下载按钮没有反应",
+            "description": "点击下载后没有保存图片，也没有错误提示。",
+            "contact": "wechat: alice",
+        },
+    )
+
+    assert report_response.status_code == 200
+    payload = report_response.json()
+    assert payload["notification"]["configured"] is True
+    assert payload["notification"]["sent"] is True
+    assert payload["report"]["notification_status"] == "sent"
+    assert len(notifications) == 1
+    assert notifications[0]["settings"].error_alert_telegram_chat_id == "-100123456"
+    assert notifications[0]["username"] == "alice"
 
 
 def test_result_share_flow_between_users(make_client, settings_factory):

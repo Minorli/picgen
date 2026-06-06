@@ -67,10 +67,14 @@ def error_alert_notifications_enabled(settings: Settings) -> bool:
     )
 
 
-async def send_error_alert_notification(
+def admin_notifications_enabled(settings: Settings) -> bool:
+    return error_alert_notifications_enabled(settings) or bool(settings.bug_report_webhook_url.strip())
+
+
+async def _send_telegram_message(
     *,
     settings: Settings,
-    alert: ErrorAlert,
+    content: str,
 ) -> NotificationResult:
     token = settings.error_alert_telegram_bot_token.strip()
     chat_id = settings.error_alert_telegram_chat_id.strip()
@@ -78,7 +82,6 @@ async def send_error_alert_notification(
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    content = build_error_alert_text(alert)
     try:
         async with httpx.AsyncClient(
             timeout=settings.error_alert_telegram_timeout_seconds,
@@ -96,6 +99,14 @@ async def send_error_alert_notification(
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
         return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
     return NotificationResult(configured=True, sent=True, status="sent")
+
+
+async def send_error_alert_notification(
+    *,
+    settings: Settings,
+    alert: ErrorAlert,
+) -> NotificationResult:
+    return await _send_telegram_message(settings=settings, content=build_error_alert_text(alert))
 
 
 async def send_generation_success_notification(
@@ -103,30 +114,7 @@ async def send_generation_success_notification(
     settings: Settings,
     alert: GenerationSuccessAlert,
 ) -> NotificationResult:
-    token = settings.error_alert_telegram_bot_token.strip()
-    chat_id = settings.error_alert_telegram_chat_id.strip()
-    if not token or not chat_id:
-        return NotificationResult(configured=False, sent=False, status="not_configured")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    content = build_generation_success_alert_text(alert)
-    try:
-        async with httpx.AsyncClient(
-            timeout=settings.error_alert_telegram_timeout_seconds,
-            follow_redirects=False,
-        ) as client:
-            response = await client.post(
-                url,
-                json={
-                    "chat_id": chat_id,
-                    "text": content,
-                    "disable_web_page_preview": True,
-                },
-            )
-            response.raise_for_status()
-    except Exception as exc:  # pragma: no cover - network failures depend on deployment
-        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
-    return NotificationResult(configured=True, sent=True, status="sent")
+    return await _send_telegram_message(settings=settings, content=build_generation_success_alert_text(alert))
 
 
 def build_error_alert_text(alert: ErrorAlert) -> str:
@@ -190,11 +178,14 @@ async def send_bug_report_notification(
     report: dict[str, Any],
     username: str,
 ) -> NotificationResult:
+    content = _build_bug_report_content(report, username)
+    if error_alert_notifications_enabled(settings):
+        return await _send_telegram_message(settings=settings, content=content)
+
     webhook_url = settings.bug_report_webhook_url.strip()
     if not webhook_url:
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
-    content = _build_bug_report_content(report, username)
     try:
         async with httpx.AsyncClient(
             timeout=settings.bug_report_webhook_timeout_seconds,
@@ -212,11 +203,14 @@ async def send_password_reset_request_notification(
     settings: Settings,
     request_info: dict[str, Any],
 ) -> NotificationResult:
+    content = build_password_reset_request_notification_text(request_info)
+    if error_alert_notifications_enabled(settings):
+        return await _send_telegram_message(settings=settings, content=content)
+
     webhook_url = settings.bug_report_webhook_url.strip()
     if not webhook_url:
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
-    content = build_password_reset_request_notification_text(request_info)
     try:
         async with httpx.AsyncClient(
             timeout=settings.bug_report_webhook_timeout_seconds,

@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.17**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.18**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,7 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.17 主要特性
+## 0.1.18 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -30,7 +30,7 @@
 - **原子化落盘**：图片与 sidecar JSON 用临时文件 + rename 写入，崩溃不留半截文件；核心生成、
   反馈、分享和取图送达数据会进入 SQLite，便于管理员后续审计。
 - **健康分级**：`/api/health` 仅看进程存活；`/api/ready` 联动客户端、磁盘可写性、版本号。
-- **Telegram 通知**：可配置 Telegram Bot 接收后台/上游异常告警，也会在用户成功生成图片后发送详细摘要。
+- **Telegram 统一通知**：可配置 Telegram Bot 接收后台/上游异常、成功生图、Bug 反馈和找回密码申请。
 - **账号自助维护**：普通用户可登录后自助修改密码；忘记密码申请会通知管理员且对外保持枚举安全。
 - **交付一致性**：请求集成 6 人游 LOGO 时，成品保存完成前下载按钮会进入处理中状态，避免误下无 LOGO 底图。
 - **私有文件缓存**：鉴权后的 `/files/...` 图片使用 private cache 指令，避免共享代理缓存私有交付物。
@@ -69,10 +69,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.17 .
+docker build -t minorli/picgen:0.1.18 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.17
+  minorli/picgen:0.1.18
 ```
 
 或：
@@ -87,10 +87,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.17`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.18`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.17 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.18 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -128,9 +128,9 @@ IMAGE=minorli/picgen VERSION=0.1.17 PLATFORM=linux/amd64 ./scripts/docker-build-
 | `PICGEN_PROXY_AUTH_TOKEN` | 可选 Bearer 鉴权 token；未设置则不校验 | 空 |
 | `PICGEN_AUTH_ENABLED` | 启用应用内账号登录 | `true` |
 | `PICGEN_ADMIN_USERNAME` / `PICGEN_ADMIN_PASSWORD` | 内置管理员账号；生产环境必须设置管理员密码 | `admin` / 空 |
-| `PICGEN_BUG_REPORT_WEBHOOK_URL` | Bug 反馈通知 webhook；空则只落库 | 空 |
+| `PICGEN_BUG_REPORT_WEBHOOK_URL` | 可选兼容 webhook；未配置 Telegram 时用于 Bug 反馈/找回密码通知 | 空 |
 | `PICGEN_BUG_REPORT_WEBHOOK_KIND` | webhook 类型：`wecom` / `serverchan` / `generic` | `wecom` |
-| `PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` / `PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` | 后台/上游异常 Telegram 告警；空则关闭 | 空 |
+| `PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` / `PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` | Telegram 通知；用于后台异常、成功生图、Bug 反馈和找回密码申请 | 空 |
 | `PICGEN_TRUST_FORWARDED_FOR` | 反向代理后启用，用 `X-Forwarded-For` 作为客户端 IP | `false` |
 | `PICGEN_STORAGE_RETENTION_DAYS` | 输出按天清理（0=保留） | 0 |
 | `PICGEN_LOG_LEVEL` / `PICGEN_LOG_FORMAT` | 日志等级 / `console`\|`json` | `INFO` / `console` |
@@ -148,18 +148,18 @@ uv run picgen --print-config
 管理员密码。普通用户只能查看自己的用量；管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈，
 并维护用户。
 
-Bug 反馈会先写入本地认证库，再按配置尝试发送 webhook。需要微信提醒时，推荐使用企业微信机器人
-webhook（`PICGEN_BUG_REPORT_WEBHOOK_KIND=wecom`）；不配置 webhook 时反馈不会丢失，管理员仍可在后台查看。
-运行期通知使用 Telegram Bot：同时配置 `PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` 和
-`PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` 后，上游限流/超时/异常响应、后端未预期错误和成功生图摘要都会发送到
-该 chat；登录失败、参数校验、提示词为空等用户可修正错误不会刷屏。告警正文、成功摘要和返回给用户的技术
+Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 Telegram。配置
+`PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` 和 `PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` 后，上游限流/超时/异常响应、
+后端未预期错误、成功生图摘要、Bug 反馈和找回密码申请都会发送到该 chat；登录失败、参数校验、
+提示词为空等用户可修正错误不会刷屏。旧版企业微信/Server 酱 webhook 仍作为兼容回退：未配置 Telegram
+但配置 `PICGEN_BUG_REPORT_WEBHOOK_URL` 时，Bug 反馈和找回密码申请会走 webhook。通知正文和返回给用户的技术
 详情都会脱敏。
 用户对结果选择“满意”后，可以把图片链接、提示词、模型和备注分享给站内其他用户，接收方会在左侧
 “收到分享”里看到。
 
 ## 图像通道
 
-PicGen 0.1.17 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.18 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
