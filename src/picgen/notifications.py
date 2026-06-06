@@ -122,18 +122,16 @@ def build_error_alert_text(alert: ErrorAlert) -> str:
     technical_message = redact_sensitive_text(alert.technical_message, limit=900)
     public_message = redact_sensitive_text(alert.public_message, limit=500)
     lines = [
-        "PicGen 后台异常告警",
-        f"Request ID: {alert.request_id or '-'}",
-        f"HTTP: {alert.method} {alert.path}",
-        f"Status: {alert.status}",
-        f"Code: {alert.code or '-'}",
-        f"Client: {alert.client or '-'}",
-        f"User message: {public_message or '-'}",
+        f"【PicGen｜后台异常】{alert.status} {alert.code or '-'}",
+        f"请求：{alert.method} {alert.path}",
+        f"Request ID：{alert.request_id or '-'}",
+        f"客户端：{alert.client or '-'}",
+        f"用户提示：{public_message or '-'}",
         "",
-        f"Technical: {technical_message or '-'}",
+        f"技术信息：{technical_message or '-'}",
     ]
     if detail_text:
-        lines.extend(["", "Details:", detail_text])
+        lines.extend(["", "详情：", detail_text])
     return "\n".join(lines)[:3900]
 
 
@@ -142,7 +140,7 @@ def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
     urls = [redact_sensitive_text(url, limit=300) for url in alert.saved_image_urls[:5] if url]
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
     lines = [
-        "PicGen 生图成功",
+        f"【PicGen｜生图成功】{alert.username or '-'} #{alert.job_id}",
         f"用户：{alert.username or '-'} (#{alert.user_id})",
         f"任务：#{alert.job_id} / {alert.request_id or '-'}",
         f"接口：{alert.method} {alert.path}",
@@ -178,14 +176,14 @@ async def send_bug_report_notification(
     report: dict[str, Any],
     username: str,
 ) -> NotificationResult:
-    content = _build_bug_report_content(report, username)
     if error_alert_notifications_enabled(settings):
-        return await _send_telegram_message(settings=settings, content=content)
+        return await _send_telegram_message(settings=settings, content=build_bug_report_telegram_text(report, username))
 
     webhook_url = settings.bug_report_webhook_url.strip()
     if not webhook_url:
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
+    content = _build_bug_report_content(report, username)
     try:
         async with httpx.AsyncClient(
             timeout=settings.bug_report_webhook_timeout_seconds,
@@ -203,14 +201,17 @@ async def send_password_reset_request_notification(
     settings: Settings,
     request_info: dict[str, Any],
 ) -> NotificationResult:
-    content = build_password_reset_request_notification_text(request_info)
     if error_alert_notifications_enabled(settings):
-        return await _send_telegram_message(settings=settings, content=content)
+        return await _send_telegram_message(
+            settings=settings,
+            content=build_password_reset_request_telegram_text(request_info),
+        )
 
     webhook_url = settings.bug_report_webhook_url.strip()
     if not webhook_url:
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
+    content = build_password_reset_request_notification_text(request_info)
     try:
         async with httpx.AsyncClient(
             timeout=settings.bug_report_webhook_timeout_seconds,
@@ -322,6 +323,55 @@ def build_password_reset_request_notification_text(request_info: dict[str, Any])
     return "\n".join(lines)[:5000]
 
 
+def build_bug_report_telegram_text(report: dict[str, Any], username: str) -> str:
+    report_id = _plain_text(str(report.get("id") or ""))
+    title = _plain_text(str(report.get("title") or "未填写标题"), limit=160)
+    user_text = _plain_text(username, limit=80)
+    created_at = _plain_text(str(report.get("created_at") or ""), limit=80)
+    contact = _plain_text(str(report.get("contact") or ""), limit=180)
+    page_url = redact_sensitive_text(str(report.get("page_url") or ""), limit=300)
+    description = redact_sensitive_text(str(report.get("description") or ""), limit=1200)
+    lines = [
+        f"【PicGen｜Bug 反馈】#{report_id or '-'} {title or '-'}",
+        f"标题：{title or '-'}",
+        f"用户：{user_text or '-'}",
+    ]
+    if created_at:
+        lines.append(f"时间：{created_at}")
+    if contact:
+        lines.append(f"联系方式：{contact}")
+    if page_url:
+        lines.append(f"页面：{page_url}")
+    if description:
+        lines.extend(["", f"描述：{description}"])
+    return "\n".join(lines)[:3900]
+
+
+def build_password_reset_request_telegram_text(request_info: dict[str, Any]) -> str:
+    request_id = _plain_text(str(request_info.get("id") or ""))
+    username = _plain_text(str(request_info.get("username") or ""), limit=80)
+    normalized = _plain_text(str(request_info.get("username_normalized") or ""), limit=80)
+    requested_ip = _plain_text(str(request_info.get("requested_ip") or ""), limit=120)
+    user_agent = _plain_text(str(request_info.get("user_agent") or ""), limit=300)
+    created_at = _plain_text(str(request_info.get("created_at") or ""), limit=80)
+    user_id = request_info.get("user_id")
+    matched_user = bool(request_info.get("matched_user"))
+    matched_text = f"是（用户 #{int(user_id)}）" if matched_user and user_id else "否"
+    lines = [
+        f"【PicGen｜找回密码】#{request_id or '-'} {username or '-'}",
+        f"账号：{username or '-'}",
+        f"规范账号：{normalized or '-'}",
+        f"匹配：{matched_text}",
+    ]
+    if requested_ip:
+        lines.append(f"来源：{requested_ip}")
+    if created_at:
+        lines.append(f"时间：{created_at}")
+    if user_agent:
+        lines.extend(["", f"User-Agent：{user_agent}"])
+    return "\n".join(lines)[:3900]
+
+
 def _build_bug_report_content(report: dict[str, Any], username: str) -> str:
     title = _escape_markdown_text(str(report.get("title") or "PicGen Bug 反馈"))
     description = _escape_markdown_text(str(report.get("description") or ""))
@@ -350,3 +400,7 @@ def _escape_markdown_text(value: str) -> str:
     for char in "\\`*_{}[]()#+-.!|":
         escaped = escaped.replace(char, f"\\{char}")
     return escaped.strip()
+
+
+def _plain_text(value: str, *, limit: int = 300) -> str:
+    return redact_sensitive_text(value.replace("\r", " ").strip(), limit=limit)
