@@ -6,6 +6,7 @@ from picgen.notifications import (
     _build_bug_report_content,
     build_error_alert_text,
     build_generation_success_alert_text,
+    build_password_reset_request_notification_text,
 )
 
 
@@ -96,3 +97,25 @@ def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
     assert "sk-secret123456" not in content
     assert "api_key=***" in content
     assert len(content) <= 3900
+
+
+def test_password_reset_request_notification_text_is_admin_friendly_and_escaped() -> None:
+    content = build_password_reset_request_notification_text(
+        {
+            "id": 9,
+            "username": "alice",
+            "username_normalized": "alice",
+            "user_id": 3,
+            "matched_user": True,
+            "requested_ip": "172.16.0.50",
+            "user_agent": "Browser <script> & bot",
+            "created_at": "2026-06-06T20:00:00+08:00",
+        }
+    )
+
+    assert "PicGen 密码找回申请" in content
+    assert "#9" in content
+    assert "账号：alice" in content
+    assert "匹配用户：是 (#3)" in content
+    assert r"172\.16\.0\.50" in content
+    assert "&lt;script&gt; &amp; bot" in content

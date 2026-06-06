@@ -207,6 +207,101 @@ def test_password_reset_request_is_admin_assisted_and_non_enumerating(make_clien
         assert rows[0]["resolved_by_user_id"] == admin_login.json()["user"]["id"]
 
 
+def test_password_reset_request_notifies_admin_without_enumerating(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    notifications = []
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        notifications.append(kwargs["request_info"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        bug_report_webhook_url="https://example.invalid/webhook",
+    )
+    client, _, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/password-reset-requests",
+        json={"username": "alice"},
+        headers={"user-agent": "pytest-browser"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "message": "如果账号存在，管理员会看到找回申请。请联系管理员获取新密码。",
+    }
+    assert len(notifications) == 1
+    request_info = notifications[0]
+    assert request_info["username"] == "alice"
+    assert request_info["username_normalized"] == "alice"
+    assert request_info["matched_user"] is False
+    assert request_info["user_id"] is None
+
+
+def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, _ = make_client(settings=settings)
+
+    register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert register.status_code == 200
+    first_cookie = register.headers["set-cookie"].split(";", 1)[0]
+
+    second_client = TestClient(client.app)
+    second_login = second_client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert second_login.status_code == 200
+    second_cookie = second_login.headers["set-cookie"].split(";", 1)[0]
+
+    wrong_current_password = client.put(
+        "/api/me/password",
+        json={"current_password": "wrong password", "new_password": "new correct horse battery"},
+    )
+    assert wrong_current_password.status_code == 400
+    assert wrong_current_password.json()["code"] == "invalid_credentials"
+
+    changed = client.put(
+        "/api/me/password",
+        json={"current_password": USER_PASSWORD, "new_password": "new correct horse battery"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["status"] == "ok"
+    assert changed.json()["user"]["username"] == "alice"
+
+    current_session = client.get("/api/me", headers={"cookie": first_cookie})
+    assert current_session.status_code == 200
+    revoked_other_session = second_client.get("/api/me", headers={"cookie": second_cookie})
+    assert revoked_other_session.status_code == 401
+
+    old_password = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert old_password.status_code == 400
+    assert old_password.json()["code"] == "invalid_credentials"
+
+    new_password = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "new correct horse battery"},
+    )
+    assert new_password.status_code == 200
+
+
 def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, settings_factory):
     settings = settings_factory(
         auth_enabled=True,
@@ -268,6 +363,7 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
 
     fetched_image = client.get(f"/{payload['saved_image_url']}")
     assert fetched_image.status_code == 200
+    assert fetched_image.headers["cache-control"] == "private, max-age=31536000, immutable"
 
     user_usage_response = client.get("/api/usage")
     assert user_usage_response.status_code == 200

@@ -207,6 +207,36 @@ async def send_bug_report_notification(
     return NotificationResult(configured=True, sent=True, status="sent")
 
 
+async def send_password_reset_request_notification(
+    *,
+    settings: Settings,
+    request_info: dict[str, Any],
+) -> NotificationResult:
+    webhook_url = settings.bug_report_webhook_url.strip()
+    if not webhook_url:
+        return NotificationResult(configured=False, sent=False, status="not_configured")
+
+    content = build_password_reset_request_notification_text(request_info)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.bug_report_webhook_timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            response = await _post_admin_notification(
+                client,
+                settings.bug_report_webhook_kind,
+                webhook_url,
+                "PicGen 密码找回申请",
+                content,
+                "picgen_password_reset_request",
+                request_info,
+            )
+            response.raise_for_status()
+    except Exception as exc:  # pragma: no cover - network failures depend on deployment
+        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+    return NotificationResult(configured=True, sent=True, status="sent")
+
+
 async def _post_webhook(
     client: httpx.AsyncClient,
     kind: str,
@@ -238,6 +268,64 @@ async def _post_webhook(
             "report": report,
         },
     )
+
+
+async def _post_admin_notification(
+    client: httpx.AsyncClient,
+    kind: str,
+    webhook_url: str,
+    title: str,
+    content: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> httpx.Response:
+    if kind == "wecom":
+        return await client.post(
+            webhook_url,
+            json={
+                "msgtype": "markdown",
+                "markdown": {"content": content},
+            },
+        )
+    if kind == "serverchan":
+        return await client.post(
+            webhook_url,
+            data={
+                "title": title,
+                "desp": content,
+            },
+        )
+    return await client.post(
+        webhook_url,
+        json={
+            "type": event_type,
+            "content": content,
+            "payload": payload,
+        },
+    )
+
+
+def build_password_reset_request_notification_text(request_info: dict[str, Any]) -> str:
+    request_id = _escape_markdown_text(str(request_info.get("id") or ""))
+    username = _escape_markdown_text(str(request_info.get("username") or ""))
+    normalized = _escape_markdown_text(str(request_info.get("username_normalized") or ""))
+    requested_ip = _escape_markdown_text(str(request_info.get("requested_ip") or ""))
+    user_agent = _escape_markdown_text(str(request_info.get("user_agent") or ""))
+    created_at = _escape_markdown_text(str(request_info.get("created_at") or ""))
+    user_id = request_info.get("user_id")
+    matched_user = bool(request_info.get("matched_user"))
+    matched_text = f"是 (#{int(user_id)})" if matched_user and user_id else "否"
+    lines = [
+        f"### PicGen 密码找回申请 #{request_id}",
+        f"> 账号：{username or '-'}",
+        f"> 规范账号：{normalized or '-'}",
+        f"> 匹配用户：{matched_text}",
+        f"> 来源 IP：{requested_ip or '-'}",
+        f"> 时间：{created_at or '-'}",
+    ]
+    if user_agent:
+        lines.extend(["", f"User-Agent：{user_agent}"])
+    return "\n".join(lines)[:5000]
 
 
 def _build_bug_report_content(report: dict[str, Any], username: str) -> str:
