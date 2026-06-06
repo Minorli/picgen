@@ -532,6 +532,9 @@ class AuthStore:
             "username": display_username[:64],
             "username_normalized": normalized,
             "status": "pending",
+            "matched_user": user_id is not None,
+            "requested_ip": client_host.strip()[:128],
+            "user_agent": user_agent.strip()[:512],
             "created_at": now,
         }
 
@@ -611,6 +614,60 @@ class AuthStore:
                 """,
                 (now, admin_user_id, user_id, str(row["username_normalized"])),
             )
+        return AuthUser(
+            id=int(row["id"]),
+            username=str(row["username"]),
+            created_at=str(row["created_at"]),
+            last_login_at=row["last_login_at"],
+            role=str(row["role"]),
+            is_active=bool(row["is_active"]),
+        )
+
+    def change_user_password(
+        self,
+        *,
+        user_id: int,
+        current_password: str,
+        new_password: str,
+        current_session_token: str = "",
+    ) -> AuthUser:
+        now = _now_text()
+        token_hash = hash_session_token(current_session_token) if current_session_token else ""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, username, role, is_active, created_at, last_login_at, password_hash
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None or not bool(row["is_active"]):
+                raise InvalidCredentialsError("inactive")
+            if not verify_password(current_password, str(row["password_hash"])):
+                raise InvalidCredentialsError("current_password")
+            conn.execute(
+                """
+                UPDATE users
+                SET
+                    password_hash = ?,
+                    password_changed_at = ?,
+                    failed_login_count = 0,
+                    locked_until = NULL
+                WHERE id = ?
+                """,
+                (hash_password(new_password), now, user_id),
+            )
+            if token_hash:
+                conn.execute(
+                    """
+                    DELETE FROM sessions
+                    WHERE user_id = ? AND token_hash != ?
+                    """,
+                    (user_id, token_hash),
+                )
+            else:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         return AuthUser(
             id=int(row["id"]),
             username=str(row["username"]),

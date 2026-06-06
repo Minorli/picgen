@@ -2152,7 +2152,8 @@ select:focus,
   padding: 24px;
 }
 
-.bug-report-modal {
+.bug-report-modal,
+.change-password-modal {
   position: fixed;
   inset: 0;
   z-index: 60;
@@ -2161,7 +2162,8 @@ select:focus,
   padding: 24px;
 }
 
-.bug-report-dialog {
+.bug-report-dialog,
+.change-password-dialog {
   position: relative;
   width: min(520px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
@@ -2206,6 +2208,10 @@ select:focus,
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.bug-report-status.is-error {
+  color: var(--danger);
 }
 
 .preview-modal-backdrop {

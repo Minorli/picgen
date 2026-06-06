@@ -31,6 +31,7 @@ from .notifications import (
     error_alert_notifications_enabled,
     send_bug_report_notification,
     send_generation_success_notification,
+    send_password_reset_request_notification,
 )
 from .redaction import redact_sensitive_text
 from .schemas import (
@@ -38,6 +39,7 @@ from .schemas import (
     AdminResetPasswordRequest,
     AuthRequest,
     BugReportRequest,
+    ChangePasswordRequest,
     ConfigResponse,
     CopyrightRiskRequest,
     EditRequest,
@@ -446,7 +448,7 @@ def create_router() -> APIRouter:
             )
         return FileResponse(
             target_path,
-            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            headers={"Cache-Control": "private, max-age=31536000, immutable"},
         )
 
     @router.post("/api/auth/register")
@@ -496,18 +498,33 @@ def create_router() -> APIRouter:
     async def password_reset_request(
         request: Request,
         body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
         payload = _ensure_dict(body)
         parsed = _validate_request(PasswordResetRequest, payload)
+        reset_request: dict[str, Any] | None = None
         with suppress(ValueError):
-            await anyio.to_thread.run_sync(
+            reset_request = await anyio.to_thread.run_sync(
                 lambda: auth_store.request_password_reset(
                     parsed.username,
                     client_host=request.client.host if request.client else "",
                     user_agent=request.headers.get("user-agent", ""),
                 )
             )
+        if reset_request is not None:
+            notification = await send_password_reset_request_notification(
+                settings=settings,
+                request_info=reset_request,
+            )
+            if notification.configured and not notification.sent:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "password_reset_notification_failed",
+                    status=notification.status,
+                    error=notification.error,
+                )
         return {"status": "ok", "message": PASSWORD_RESET_REQUEST_MESSAGE}
 
     @router.post("/api/auth/logout")
@@ -525,6 +542,31 @@ def create_router() -> APIRouter:
     @router.get("/api/me")
     async def me(user: AuthUser | None = Depends(require_current_user)) -> dict[str, Any]:
         return {"user": user.public_dict() if user else None}
+
+    @router.put("/api/me/password")
+    async def change_my_password(
+        request: Request,
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(ChangePasswordRequest, payload)
+        try:
+            updated_user = await anyio.to_thread.run_sync(
+                lambda: auth_store.change_user_password(
+                    user_id=user.id,
+                    current_password=parsed.current_password,
+                    new_password=parsed.new_password,
+                    current_session_token=_get_session_token(request, settings),
+                )
+            )
+        except InvalidCredentialsError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, "当前密码不正确", code="invalid_credentials") from exc
+        return {"status": "ok", "user": updated_user.public_dict()}
 
     @router.get("/api/preferences")
     async def get_preferences(

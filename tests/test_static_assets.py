@@ -66,6 +66,9 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert 'id="registerAuthButton"' in index_html
     assert "注册" in index_html
     assert 'id="logoutButton"' in index_html
+    assert 'id="changePasswordButton"' in index_html
+    assert 'id="changePasswordModal"' in index_html
+    assert 'id="changePasswordForm"' in index_html
     assert 'id="userUsageSummary"' in index_html
     assert 'id="adminPanel"' in index_html
     assert 'id="adminCreateUserForm"' in index_html
@@ -75,6 +78,7 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "/api/auth/login" in app_js
     assert "/api/auth/register" in app_js
     assert "/api/auth/logout" in app_js
+    assert "/api/me/password" in app_js
     assert "/api/admin/users" in app_js
     assert "/api/me" in app_js
     assert "/api/usage" in app_js
@@ -87,6 +91,8 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "enterAppShell()" in app_js
     assert "localStorage.setItem('token'" not in app_js
     assert "localStorage.setItem(\"token\"" not in app_js
+    assert "submitChangePassword" in app_js
+    assert ".change-password-dialog" in styles_css
 
 
 def test_result_preview_zoom_and_feedback_controls_are_present() -> None:
@@ -148,6 +154,8 @@ def test_bug_reports_and_result_sharing_controls_are_present() -> None:
     assert "/api/shares/inbox" in app_js
     assert "api/final-images" in app_js
     assert "persistFinalLogoImage" in app_js
+    assert "setDownloadPendingLogo" in app_js
+    assert "成品保存中" in app_js
     assert "submitShareResult" in app_js
     assert "openSharedResult" in app_js
     assert ".share-result-panel" in styles_css

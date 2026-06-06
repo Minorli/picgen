@@ -37,6 +37,7 @@ from .storage import prune_old_outputs
 from .upstream import HttpxAsyncClient
 
 logger = get_logger("picgen.app")
+_auth_store: AuthStore | None = None
 
 # How often the background task re-checks for day-folders past the retention window.
 _RETENTION_SWEEP_SECONDS = 6 * 60 * 60
@@ -60,13 +61,15 @@ async def _retention_loop(settings: Settings) -> None:
     filesystem I/O, so it is dispatched to a worker thread.
     """
 
-    if settings.storage_retention_days <= 0:
+    if settings.storage_retention_days <= 0 and not settings.auth_enabled:
         return
     while True:
         try:
-            removed = await anyio.to_thread.run_sync(
-                prune_old_outputs, settings.outputs_dir, settings.storage_retention_days
-            )
+            removed = 0
+            if settings.storage_retention_days > 0:
+                removed = await anyio.to_thread.run_sync(
+                    prune_old_outputs, settings.outputs_dir, settings.storage_retention_days
+                )
             if removed:
                 log_event(
                     logger,
@@ -75,9 +78,23 @@ async def _retention_loop(settings: Settings) -> None:
                     removed=removed,
                     retention_days=settings.storage_retention_days,
                 )
+            auth_store = get_auth_store()
+            if settings.auth_enabled and auth_store is not None:
+                expired_sessions = await anyio.to_thread.run_sync(auth_store.prune_expired_sessions)
+                if expired_sessions:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "auth_session_retention_sweep",
+                        removed=expired_sessions,
+                    )
         except Exception as exc:  # pragma: no cover - defensive; never kill the loop
             log_event(logger, logging.WARNING, "storage_retention_error", error=str(exc))
         await asyncio.sleep(_RETENTION_SWEEP_SECONDS)
+
+
+def get_auth_store() -> AuthStore | None:
+    return _auth_store
 
 
 async def _initialize_auth_store(settings: Settings, auth_store: AuthStore) -> None:
@@ -107,9 +124,11 @@ async def _initialize_auth_store(settings: Settings, auth_store: AuthStore) -> N
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    global _auth_store
     resolved_settings = settings or Settings.from_env()
     configure_logging(resolved_settings.log_level, resolved_settings.log_format)
     auth_store = AuthStore(resolved_settings.resolved_auth_db_path)
+    _auth_store = auth_store
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

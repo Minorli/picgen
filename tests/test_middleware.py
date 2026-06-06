@@ -31,7 +31,7 @@ def test_rate_limit_sweep_drops_idle_clients() -> None:
 
 
 async def test_retention_loop_noop_when_disabled(settings_factory) -> None:
-    settings = settings_factory(storage_retention_days=0)
+    settings = settings_factory(auth_enabled=False, storage_retention_days=0)
     # Returns immediately instead of entering the sleep loop.
     await asyncio.wait_for(_retention_loop(settings), timeout=1.0)
 
@@ -55,3 +55,24 @@ async def test_retention_loop_runs_a_pass_when_enabled(monkeypatch, settings_fac
 
     assert len(calls) == 1
     assert calls[0][1] == 7
+
+
+async def test_retention_loop_prunes_expired_sessions_when_auth_enabled(monkeypatch, settings_factory) -> None:
+    settings = settings_factory(auth_enabled=True, storage_retention_days=0)
+    calls: list[str] = []
+
+    class FakeAuthStore:
+        def prune_expired_sessions(self) -> int:
+            calls.append("sessions")
+            return 2
+
+    async def stop_after_first(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("picgen.main.get_auth_store", lambda: FakeAuthStore())
+    monkeypatch.setattr("picgen.main.asyncio.sleep", stop_after_first)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _retention_loop(settings)
+
+    assert calls == ["sessions"]

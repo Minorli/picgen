@@ -166,6 +166,13 @@ class AdminResetPasswordRequest(BaseModel):
     password: str = Field(min_length=8, max_length=256)
 
 
+class ChangePasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class FeedbackRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

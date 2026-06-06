@@ -122,6 +122,7 @@ const refs = {
   submitPasswordResetRequestButton: document.querySelector("#submitPasswordResetRequestButton"),
   cancelPasswordResetRequestButton: document.querySelector("#cancelPasswordResetRequestButton"),
   bugReportButton: document.querySelector("#bugReportButton"),
+  changePasswordButton: document.querySelector("#changePasswordButton"),
   logoutButton: document.querySelector("#logoutButton"),
   currentUsername: document.querySelector("#currentUsername"),
   userAvatar: document.querySelector("#userAvatar"),
@@ -293,6 +294,14 @@ const refs = {
   shareRecipientSearchInput: document.querySelector("#shareRecipientSearchInput"),
   shareResultNoteInput: document.querySelector("#shareResultNoteInput"),
   submitShareResultButton: document.querySelector("#submitShareResultButton"),
+  changePasswordModal: document.querySelector("#changePasswordModal"),
+  changePasswordBackdrop: document.querySelector("#changePasswordBackdrop"),
+  changePasswordForm: document.querySelector("#changePasswordForm"),
+  currentPasswordInput: document.querySelector("#currentPasswordInput"),
+  newPasswordInput: document.querySelector("#newPasswordInput"),
+  changePasswordStatus: document.querySelector("#changePasswordStatus"),
+  submitChangePasswordButton: document.querySelector("#submitChangePasswordButton"),
+  closeChangePasswordButton: document.querySelector("#closeChangePasswordButton"),
   bugReportModal: document.querySelector("#bugReportModal"),
   bugReportBackdrop: document.querySelector("#bugReportBackdrop"),
   bugReportForm: document.querySelector("#bugReportForm"),
@@ -1130,10 +1139,7 @@ function openSharedResult(shareId) {
   refs.resultMeta.textContent = `来自 ${share.sender_username || "用户"}`
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = share.saved_image_path ? `已落盘到 ${share.saved_image_path}` : ""
-  refs.downloadButton.href = state.resultPreview.src
-  refs.downloadButton.classList.remove("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.download = asset.name
+  setDownloadAvailable(state.resultPreview.src, asset.name)
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
   refs.shareResultPanel?.classList.add("hidden")
@@ -1157,6 +1163,70 @@ function closeBugReportModal() {
   refs.bugReportModal?.classList.add("hidden")
   refs.bugReportModal?.setAttribute("aria-hidden", "true")
   document.body.classList.remove("modal-open")
+}
+
+function openChangePasswordModal() {
+  refs.changePasswordModal?.classList.remove("hidden")
+  refs.changePasswordModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  refs.changePasswordForm?.reset()
+  if (refs.changePasswordStatus) {
+    refs.changePasswordStatus.textContent = ""
+    refs.changePasswordStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.currentPasswordInput?.focus(), 0)
+}
+
+function closeChangePasswordModal() {
+  refs.changePasswordModal?.classList.add("hidden")
+  refs.changePasswordModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open")
+}
+
+async function submitChangePassword(event) {
+  event.preventDefault()
+  const currentPassword = refs.currentPasswordInput?.value || ""
+  const newPassword = refs.newPasswordInput?.value || ""
+  if (!currentPassword || !newPassword) {
+    if (refs.changePasswordStatus) {
+      refs.changePasswordStatus.textContent = "请填写当前密码和新密码。"
+      refs.changePasswordStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (refs.submitChangePasswordButton) {
+    refs.submitChangePasswordButton.disabled = true
+  }
+  if (refs.changePasswordStatus) {
+    refs.changePasswordStatus.textContent = "保存中"
+    refs.changePasswordStatus.classList.remove("is-error")
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/me/password", {
+      method: "PUT",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    })
+    if (!response.ok) {
+      refs.changePasswordStatus.textContent = data.error || "密码修改失败"
+      refs.changePasswordStatus.classList.add("is-error")
+      return
+    }
+    setCurrentUser(data.user || state.currentUser)
+    refs.changePasswordForm?.reset()
+    refs.changePasswordStatus.textContent = "密码已更新，其它登录会话已失效。"
+    refs.changePasswordStatus.classList.remove("is-error")
+    setStatusMessage("密码已更新。")
+  } catch {
+    refs.changePasswordStatus.textContent = "网络连接错误"
+    refs.changePasswordStatus.classList.add("is-error")
+  } finally {
+    if (refs.submitChangePasswordButton) {
+      refs.submitChangePasswordButton.disabled = false
+    }
+  }
 }
 
 async function submitBugReport(event) {
@@ -1623,10 +1693,10 @@ async function restoreWorkspaceState() {
     refs.resultMeta.textContent = result.metaText || ""
     refs.resultTiming.textContent = result.timingText || ""
     refs.resultStorage.textContent = result.storageText || ""
-    refs.downloadButton.href = state.resultPreview.src
-    refs.downloadButton.classList.remove("disabled-link")
-    refs.downloadButton.setAttribute("aria-disabled", "false")
-    refs.downloadButton.download = state.lastResultImage?.name || `picgen-${state.lastResultMode || "result"}-restored.png`
+    setDownloadAvailable(
+      state.resultPreview.src,
+      state.lastResultImage?.name || `picgen-${state.lastResultMode || "result"}-restored.png`,
+    )
     renderResultCandidates()
     restoreCopyrightRiskPanel()
   }
@@ -2997,9 +3067,7 @@ function clearResult() {
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
-  refs.downloadButton.classList.add("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "true")
-  refs.downloadButton.removeAttribute("href")
+  setDownloadDisabled()
   refs.openResultPreviewButton.disabled = true
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
@@ -3062,9 +3130,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = "请求进行中 0.0s"
   refs.resultStorage.textContent = ""
-  refs.downloadButton.classList.add("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "true")
-  refs.downloadButton.removeAttribute("href")
+  setDownloadDisabled()
   state.resultCandidates = []
   state.selectedCandidateIndex = 0
   renderResultCandidates()
@@ -3094,6 +3160,32 @@ function candidateAsset(candidate, payload, index) {
   }
 }
 
+function setDownloadAvailable(href, filename) {
+  if (!refs.downloadButton) {
+    return
+  }
+  refs.downloadButton.href = href
+  refs.downloadButton.classList.remove("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "false")
+  refs.downloadButton.textContent = "下载图像"
+  refs.downloadButton.download = filename
+}
+
+function setDownloadDisabled(label = "下载图像") {
+  if (!refs.downloadButton) {
+    return
+  }
+  refs.downloadButton.classList.add("disabled-link")
+  refs.downloadButton.setAttribute("aria-disabled", "true")
+  refs.downloadButton.removeAttribute("href")
+  refs.downloadButton.removeAttribute("download")
+  refs.downloadButton.textContent = label
+}
+
+function setDownloadPendingLogo() {
+  setDownloadDisabled("成品保存中")
+}
+
 function selectResultCandidate(index, { persist = true } = {}) {
   const candidate = state.resultCandidates[index]
   const imageSource = candidateImageSource(candidate)
@@ -3110,10 +3202,10 @@ function selectResultCandidate(index, { persist = true } = {}) {
     mode: state.lastResultMode,
   }
   state.lastResultImage = cloneImageAsset(candidate.asset)
-  refs.downloadButton.href = candidate.saved_image_url || imageSource
-  refs.downloadButton.classList.remove("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.download = candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`
+  setDownloadAvailable(
+    candidate.saved_image_url || imageSource,
+    candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`,
+  )
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
     refs.feedbackReasonInput.value = ""
@@ -3178,10 +3270,10 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
         ? `实际尺寸 ${actualSize}`
         : ""
   }
-  refs.downloadButton.href = firstCandidate.saved_image_url || imageSource
-  refs.downloadButton.classList.remove("disabled-link")
-  refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.download = firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`
+  setDownloadAvailable(
+    firstCandidate.saved_image_url || imageSource,
+    firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`,
+  )
 }
 
 async function composeLogoOverlayAfterDisplay(payload, durationMs) {
@@ -3205,6 +3297,14 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs) {
   } catch (error) {
     appendDebugLine("本地 LOGO 合成失败", { error: error.message })
     refs.logoComposeStatus.textContent = "贴图失败，可先下载原图"
+    const fallbackCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
+    const fallbackSource = candidateImageSource(fallbackCandidate)
+    if (fallbackCandidate && fallbackSource) {
+      setDownloadAvailable(
+        fallbackCandidate.saved_image_url || fallbackSource,
+        fallbackCandidate.saved_image_name || `picgen-${payload.mode || "result"}-${Date.now()}.png`,
+      )
+    }
   }
 }
 
@@ -3312,6 +3412,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   updateFeedbackPanelVisibility()
   refs.logoComposeStatus.textContent = payload.logo_requested ? "原图已显示，正在贴 LOGO" : "未启用"
   if (payload.logo_requested) {
+    setDownloadPendingLogo()
     void composeLogoOverlayAfterDisplay(payload, durationMs)
   }
   void checkCopyrightRisk(payload)
@@ -4784,6 +4885,10 @@ function bindEvents() {
     }
     openSharedResult(button.dataset.shareId)
   })
+  refs.changePasswordButton?.addEventListener("click", openChangePasswordModal)
+  refs.closeChangePasswordButton?.addEventListener("click", closeChangePasswordModal)
+  refs.changePasswordBackdrop?.addEventListener("click", closeChangePasswordModal)
+  refs.changePasswordForm?.addEventListener("submit", submitChangePassword)
   refs.bugReportButton?.addEventListener("click", openBugReportModal)
   refs.closeBugReportButton?.addEventListener("click", closeBugReportModal)
   refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
