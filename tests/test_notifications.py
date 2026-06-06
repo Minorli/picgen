@@ -7,6 +7,8 @@ from picgen.notifications import (
     build_error_alert_text,
     build_generation_success_alert_text,
     build_password_reset_request_notification_text,
+    send_bug_report_notification,
+    send_password_reset_request_notification,
 )
 
 
@@ -119,3 +121,42 @@ def test_password_reset_request_notification_text_is_admin_friendly_and_escaped(
     assert "匹配用户：是 (#3)" in content
     assert r"172\.16\.0\.50" in content
     assert "&lt;script&gt; &amp; bot" in content
+
+
+async def test_admin_notifications_use_telegram_when_configured(settings_factory, respx_mock) -> None:
+    settings = settings_factory(
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    route = respx_mock.post("https://api.telegram.org/bot123:abc/sendMessage").respond(200, json={"ok": True})
+
+    bug_result = await send_bug_report_notification(
+        settings=settings,
+        username="alice",
+        report={
+            "id": 7,
+            "title": "下载按钮没有反应",
+            "description": "点击下载后没有保存图片。",
+            "created_at": "2026-06-06T20:00:00+08:00",
+        },
+    )
+    reset_result = await send_password_reset_request_notification(
+        settings=settings,
+        request_info={
+            "id": 9,
+            "username": "alice",
+            "username_normalized": "alice",
+            "matched_user": True,
+            "user_id": 3,
+            "created_at": "2026-06-06T20:00:00+08:00",
+        },
+    )
+
+    assert bug_result.sent is True
+    assert reset_result.sent is True
+    assert route.call_count == 2
+    first_payload = route.calls[0].request.content.decode()
+    second_payload = route.calls[1].request.content.decode()
+    assert "-100123456" in first_payload
+    assert "PicGen Bug" in first_payload
+    assert "PicGen 密码找回申请" in second_payload

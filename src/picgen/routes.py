@@ -28,6 +28,7 @@ from .errors import APIError
 from .logging_config import get_logger, get_request_id, log_event
 from .notifications import (
     GenerationSuccessAlert,
+    admin_notifications_enabled,
     error_alert_notifications_enabled,
     send_bug_report_notification,
     send_generation_success_notification,
@@ -397,7 +398,7 @@ def create_router() -> APIRouter:
             rate_limit_per_minute=settings.rate_limit_per_minute,
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             auth_enabled=settings.auth_enabled,
-            bug_report_notifications_enabled=bool(settings.bug_report_webhook_url),
+            bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
         )
 
