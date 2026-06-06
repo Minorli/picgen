@@ -148,3 +148,60 @@ async def test_run_responses_parses_sse() -> None:
         assert payload["data"][0]["b64_json"] == "abcd"
     finally:
         await client.aclose()
+
+
+async def test_run_responses_sends_stream_as_json_boolean() -> None:
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            text=json.dumps({"id": "resp_1", "output": []}),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0)
+    try:
+        await client.run_responses(
+            "https://upstream.test/responses",
+            "sk-test",
+            {"stream": True, "model": "gpt-5.5", "input": []},
+            "UA",
+        )
+        assert observed["payload"]["stream"] is True
+    finally:
+        await client.aclose()
+
+
+async def test_upstream_http_error_status_and_message_are_preserved() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            text=json.dumps(
+                {
+                    "error": {
+                        "message": "Rate limit reached for gpt-image-2-codex",
+                        "type": "rate_limit_error",
+                    }
+                }
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.run_json(
+                "https://upstream.test/generate",
+                "sk-test",
+                {"prompt": "hi"},
+                "UA",
+            )
+        assert info.value.status == 429
+        assert info.value.code == "upstream_error"
+        assert "Rate limit reached" in info.value.message
+        assert "rate_limit_error" in (info.value.details or "")
+    finally:
+        await client.aclose()

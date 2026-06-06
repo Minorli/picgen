@@ -41,9 +41,15 @@ _FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00"})
 
 def sanitize_filename(name: str) -> str:
     cleaned = "".join(char for char in name if char not in _FORBIDDEN_FILENAME_CHARS).strip()
+    cleaned = "-".join(cleaned.split())
     cleaned = cleaned.replace("..", "")
     cleaned = cleaned.replace(":", "-")
     return cleaned or "image.png"
+
+
+def sanitize_filename_prefix(value: str) -> str:
+    cleaned = sanitize_filename(value).strip(".-_")
+    return cleaned[:48].strip(".-_") or ""
 
 
 def detect_image_mime(image_bytes: bytes) -> str:
@@ -160,10 +166,13 @@ def save_output_image(
     image_bytes: bytes,
     image_mime: str,
     metadata: dict[str, object],
+    filename_prefix: str = "",
 ) -> dict[str, object]:
     now = datetime.now()
     day_dir = outputs_dir / now.strftime("%Y%m%d")
-    stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    safe_prefix = sanitize_filename_prefix(filename_prefix)
+    base_stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    stem = f"{safe_prefix}-{base_stem}" if safe_prefix else base_stem
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
     metadata_path = day_dir / f"{stem}.json"
     image_dimensions = detect_image_dimensions(image_bytes)
@@ -201,6 +210,74 @@ def save_output_image(
         "saved_image_mime": image_mime,
         "saved_image_width": image_dimensions[0] if image_dimensions else None,
         "saved_image_height": image_dimensions[1] if image_dimensions else None,
+        "saved_image_bytes": len(image_bytes),
+        "saved_metadata_path": str(metadata_path),
+        "saved_metadata_url": storage_url_for_path(data_dir, metadata_path),
+    }
+
+
+def save_derived_output_image(
+    *,
+    data_dir: Path,
+    outputs_dir: Path,
+    source_image_path: str,
+    mode: str,
+    image_bytes: bytes,
+    image_mime: str,
+    metadata: dict[str, object],
+    suffix: str,
+) -> dict[str, object]:
+    source_path = Path(source_image_path) if source_image_path else None
+    if source_path is not None and source_path.is_file():
+        day_dir = source_path.parent
+        source_stem = source_path.stem
+    else:
+        now = datetime.now()
+        day_dir = outputs_dir / now.strftime("%Y%m%d")
+        source_stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    safe_suffix = sanitize_filename_prefix(suffix) or "final"
+    stem = f"{source_stem}-{safe_suffix}"
+    image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
+    metadata_path = day_dir / f"{stem}.json"
+    image_dimensions = detect_image_dimensions(image_bytes)
+
+    _atomic_write_bytes(image_path, image_bytes)
+    _atomic_write_text(
+        metadata_path,
+        json.dumps(
+            {
+                **metadata,
+                "source_image_path": source_image_path,
+                "saved_image_width": image_dimensions[0] if image_dimensions else None,
+                "saved_image_height": image_dimensions[1] if image_dimensions else None,
+                "saved_image_bytes": len(image_bytes),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "storage_derived_saved",
+        mode=mode,
+        path=str(image_path),
+        source_path=source_image_path,
+        bytes=len(image_bytes),
+        width=image_dimensions[0] if image_dimensions else None,
+        height=image_dimensions[1] if image_dimensions else None,
+    )
+
+    return {
+        "saved_image_path": str(image_path),
+        "saved_image_url": storage_url_for_path(data_dir, image_path),
+        "saved_image_name": image_path.name,
+        "saved_image_mime": image_mime,
+        "saved_image_width": image_dimensions[0] if image_dimensions else None,
+        "saved_image_height": image_dimensions[1] if image_dimensions else None,
+        "saved_image_bytes": len(image_bytes),
         "saved_metadata_path": str(metadata_path),
         "saved_metadata_url": storage_url_for_path(data_dir, metadata_path),
     }

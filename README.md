@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 图像生成 / 编辑接口的本地工作台，**0.9.2** 起整体重写为企业级架构。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.14**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,7 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.9.2 主要特性
+## 0.1.14 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -27,8 +27,8 @@
   - `RateLimitMiddleware` — 滑动窗口限流（默认 120 req/min + 20 burst/5s）
   - `ProxyAuthMiddleware` — 可选 Bearer / `X-Proxy-Token` 鉴权
   - `CORSMiddleware` — 配置化跨域
-- **原子化落盘**：图片与 sidecar JSON 用临时文件 + rename 写入，崩溃不留半截文件，并可按
-  `PICGEN_STORAGE_RETENTION_DAYS` 自动按天清理。
+- **原子化落盘**：图片与 sidecar JSON 用临时文件 + rename 写入，崩溃不留半截文件；核心生成、
+  反馈、分享和取图送达数据会进入 SQLite，便于管理员后续审计。
 - **健康分级**：`/api/health` 仅看进程存活；`/api/ready` 联动客户端、磁盘可写性、版本号。
 - **OpenAPI**：默认开启 `/api/docs`（Swagger）与 `/api/openapi.json`。
 - **生产级 CLI**：支持 `--workers / --log-level / --log-format / --reload / --prune-now / --print-config`。
@@ -64,11 +64,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t picgen:0.9.2 .
+docker build -t minorli/picgen:0.1.14 .
 docker run --rm -p 8000:8000 \
-  -e PICGEN_DEFAULT_API_KEY=sk-... \
-  -v $(pwd)/data:/app/data \
-  picgen:0.9.2
+  -v picgen-data:/app/data \
+  minorli/picgen:0.1.14
 ```
 
 或：
@@ -77,18 +76,44 @@ docker run --rm -p 8000:8000 \
 docker compose up -d
 ```
 
-容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root 用户 `picgen` 运行。
+发布镜像按 `openai-shelf` 的 Docker Hub 命名方式：
+
+```bash
+./scripts/docker-build-push.sh
+```
+
+默认会构建并推送 `minorli/picgen:0.1.14`。也可以覆盖：
+
+```bash
+IMAGE=minorli/picgen VERSION=0.1.14 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+```
+
+镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
+用户 `picgen` 运行。`docker-compose.yml` 使用 `picgen-data` volume 保存 `/app/data`，因此注册用户、
+用量统计和落盘结果会在容器重启后继续保留。
+
+容器内默认固定三条上游 URL：
+
+- `https://sub.tidba.com/v1/images/generations`
+- `https://sub.tidba.com/v1/images/edits`
+- `https://sub.tidba.com/v1/responses`
+
+用户首次登录后只需要在页面里填写 API Key。该 Key 按登录用户保存在当前浏览器本地存储，容器重启不会清除；
+如果需要全站共用一个服务端默认 Key，可在运行容器时设置 `PICGEN_DEFAULT_API_KEY`，或在持久化 volume 里创建
+`/app/data/.env` 写入该变量。
 
 ## 配置
 
 所有配置走 `Pydantic Settings`，可通过环境变量或 `.env` 文件提供。完整模板见
-[`.env.example`](.env.example)。常用项：
+[`.env.example`](.env.example)。容器镜像把 `PICGEN_ENV_FILE` 指向 `/app/data/.env`，便于把运行期配置
+放在持久化 volume 中；源码目录里的 `.env` 不会被打进镜像。常用项：
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `PICGEN_DEFAULT_API_KEY` | 服务端默认上游 key（浏览器留空即用此值） | 空 |
-| `PICGEN_DEFAULT_GENERATE_URL` / `PICGEN_DEFAULT_EDIT_URL` / `PICGEN_DEFAULT_RESPONSES_URL` | 上游接口 URL | OpenAI 官方 |
+| `PICGEN_DEFAULT_GENERATE_URL` / `PICGEN_DEFAULT_EDIT_URL` / `PICGEN_DEFAULT_RESPONSES_URL` | 上游接口 URL | Tidb 兼容代理 |
 | `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.5` |
+| `PICGEN_DEFAULT_SIZE` | 默认生图尺寸；当前按 6 人游主场景设置 | `1088x2240` |
 | `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 1200 |
 | `PICGEN_UPSTREAM_MAX_RETRIES` | 5xx / 网络瞬时错误重试次数 | 2 |
 | `PICGEN_UPSTREAM_MAX_CONNECTIONS` | 连接池上限 | 64 |
@@ -96,6 +121,10 @@ docker compose up -d
 | `PICGEN_MAX_REQUEST_BODY_BYTES` / `PICGEN_MAX_IMAGE_BYTES` | 请求与图片大小上限 | 64 MB / 32 MB |
 | `PICGEN_CORS_ALLOW_ORIGINS` | 允许跨域来源（逗号分隔，空=禁用 CORS） | 空 |
 | `PICGEN_PROXY_AUTH_TOKEN` | 可选 Bearer 鉴权 token；未设置则不校验 | 空 |
+| `PICGEN_AUTH_ENABLED` | 启用应用内账号登录 | `true` |
+| `PICGEN_ADMIN_USERNAME` / `PICGEN_ADMIN_PASSWORD` | 内置管理员账号；生产环境必须设置管理员密码 | `admin` / 空 |
+| `PICGEN_BUG_REPORT_WEBHOOK_URL` | Bug 反馈通知 webhook；空则只落库 | 空 |
+| `PICGEN_BUG_REPORT_WEBHOOK_KIND` | webhook 类型：`wecom` / `serverchan` / `generic` | `wecom` |
 | `PICGEN_TRUST_FORWARDED_FOR` | 反向代理后启用，用 `X-Forwarded-For` 作为客户端 IP | `false` |
 | `PICGEN_STORAGE_RETENTION_DAYS` | 输出按天清理（0=保留） | 0 |
 | `PICGEN_LOG_LEVEL` / `PICGEN_LOG_FORMAT` | 日志等级 / `console`\|`json` | `INFO` / `console` |
@@ -106,11 +135,21 @@ docker compose up -d
 uv run picgen --print-config
 ```
 
-输出会自动脱敏 `default_api_key` 与 `proxy_auth_token`。
+输出会自动脱敏 `default_api_key`、`proxy_auth_token` 与 Bug 反馈 webhook URL。
+
+应用内注册默认开放。启用认证时，新用户可以自助注册普通账号；系统同时内置
+`PICGEN_ADMIN_USERNAME` 对应的管理员账号，`PICGEN_ADMIN_PASSWORD` 设置后会在启动时创建或更新该
+管理员密码。普通用户只能查看自己的用量；管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈，
+并维护用户。
+
+Bug 反馈会先写入本地认证库，再按配置尝试发送 webhook。需要微信提醒时，推荐使用企业微信机器人
+webhook（`PICGEN_BUG_REPORT_WEBHOOK_KIND=wecom`）；不配置 webhook 时反馈不会丢失，管理员仍可在后台查看。
+用户对结果选择“满意”后，可以把图片链接、提示词、模型和备注分享给站内其他用户，接收方会在左侧
+“收到分享”里看到。
 
 ## 图像通道
 
-PicGen 0.9.2 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.14 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
@@ -135,6 +174,15 @@ Images Edit 的兼容代理（例如 sub2api ChatGPT OAuth）。Responses 通道
 | `/api/edit` | POST | 调上游 Images 编辑接口（默认通道，含参考图 / 延展 / 编辑） |
 | `/api/responses-image` | POST | 调上游 Responses + `image_generation` 工具，含 SSE 流解析（兜底通道） |
 | `/files/{relative_path}` | GET | 服务本地落盘图片（防路径穿越） |
+| `/api/usage` | GET | 登录用户用量；管理员返回全员汇总 |
+| `/api/admin/users` | GET/POST | 管理员查看/创建用户 |
+| `/api/admin/users/{user_id}` | DELETE | 管理员删除用户 |
+| `/api/feedback` | POST | 登录用户提交生成结果满意度 |
+| `/api/feedback/summary` | GET | 管理员查看满意度汇总 |
+| `/api/bug-reports` | POST/GET | 登录用户提交 Bug；管理员查看 Bug 列表 |
+| `/api/users` | GET | 登录用户获取可分享对象 |
+| `/api/shares` | POST | 登录用户分享满意结果给站内用户 |
+| `/api/shares/inbox` | GET | 登录用户查看收到的分享 |
 | `/api/docs` | GET | Swagger UI |
 | `/api/openapi.json` | GET | OpenAPI schema |
 
@@ -159,7 +207,7 @@ Images Edit 的兼容代理（例如 sub2api ChatGPT OAuth）。Responses 通道
 {
   "model": "gpt-image-2",
   "prompt": "...",
-  "size": "1024x1024",
+  "size": "1088x2240",
   "quality": "auto",
   "background": "auto",
   "output_format": "png",
@@ -187,18 +235,31 @@ Responses 兜底通道默认 `stream: true`，并优先把参考图上传到同�
       ]
     }
   ],
-  "tools": [{"type": "image_generation", "size": "1024x1024", "quality": "auto"}]
+  "tools": [{"type": "image_generation", "size": "1088x2240", "quality": "auto"}]
 }
 ```
 
 `/v1/files` 失败时，可通过请求里的 `allow_inline_fallback` 开关决定是否退回内联 Base64。
 
-## 落盘位置
+## 落盘与用户数据
 
 ```text
-data/outputs/YYYYMMDD/<mode>-<HHMMSS>-<uuid>.png
-data/outputs/YYYYMMDD/<mode>-<HHMMSS>-<uuid>.json   # sidecar 元数据
+data/outputs/YYYYMMDD/<username>-<mode>-<HHMMSS>-<uuid>.png
+data/outputs/YYYYMMDD/<username>-<mode>-<HHMMSS>-<uuid>.json   # sidecar 元数据
 ```
+
+登录用户的新图会在文件名里带安全化用户名作为前缀，旧文件名保持兼容。图片仍按日期目录分组；
+sidecar JSON 保留在图片旁边，主要用于排障、人工取证和离线导出。系统事实数据以 SQLite 为准：
+
+- `users / sessions`：账号、角色、登录与活跃时间。
+- `user_preferences`：用户默认模型、尺寸、格式、通道和 LOGO/版权检查开关；不保存 API Key。
+- `generation_jobs / generated_images`：每次生成请求、每张结果图、文件路径、字节数、是否请求 LOGO。
+- `image_delivery_events`：图片是否通过 `/files/...` 成功返回给用户。
+- `result_feedback / shared_results / bug_reports`：满意度、站内分享和 Bug 反馈。
+
+当前下载格式跟随上游 Images API：`png / jpeg / webp`。PSD 是 Photoshop 的分层工程格式，单张 AI
+生成结果本身是扁平位图，不能无损还原成可编辑图层；如需后期微调，建议下载 PNG 或透明 PNG 进入 PS
+编辑。未来可另做“PSD 导出包”，但那需要服务端显式生成图层结构，而不是简单改扩展名。
 
 落盘走临时文件 + `os.replace`，崩溃不会留下半截文件。设置 `PICGEN_STORAGE_RETENTION_DAYS>0`
 后，服务运行期间会有后台任务定期（每 6 小时）清理过期日期目录；也可随时手动跑一次性清理：
@@ -213,6 +274,7 @@ uv run picgen --prune-now
 - 对外部署务必：
   - 设置 `PICGEN_PROXY_AUTH_TOKEN`，前端通过 `Authorization: Bearer <token>` 或
     `X-Proxy-Token: <token>` 调用 `/api/*`。
+  - 设置强随机 `PICGEN_ADMIN_PASSWORD`，不要使用空密码启动对外服务。
   - 通过反代终止 TLS，并设置 `PICGEN_TRUST_FORWARDED_FOR=true`。
   - 按需配置 `PICGEN_CORS_ALLOW_ORIGINS`。
   - 收紧 `PICGEN_MAX_REQUEST_BODY_BYTES` / `PICGEN_MAX_IMAGE_BYTES` 以降低 DoS 面积。

@@ -115,6 +115,165 @@ class CopyrightRiskRequest(BaseModel):
     images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=1)
 
 
+class AuthRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _trim_username(cls, value: str) -> str:
+        stripped = value.strip()
+        if any(char.isspace() for char in stripped):
+            raise ValueError("用户名不能包含空白字符")
+        return stripped
+
+
+class AdminCreateUserRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=8, max_length=256)
+    role: Literal["admin", "user"] = "user"
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _trim_username(cls, value: str) -> str:
+        stripped = value.strip()
+        if any(char.isspace() for char in stripped):
+            raise ValueError("用户名不能包含空白字符")
+        return stripped
+
+
+class PasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username: str = Field(min_length=2, max_length=64)
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _trim_username(cls, value: str) -> str:
+        stripped = value.strip()
+        if any(char.isspace() for char in stripped):
+            raise ValueError("用户名不能包含空白字符")
+        return stripped
+
+
+class AdminResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    password: str = Field(min_length=8, max_length=256)
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    rating: Literal["good", "ok", "bad"]
+    reason: str = Field(default="", max_length=1000)
+    prompt: str = Field(default="", max_length=32_000)
+    mode: str = Field(default="", max_length=64)
+    model: str = Field(default="", max_length=128)
+    saved_image_path: str = Field(default="", max_length=1024)
+    saved_image_url: str = Field(default="", max_length=1024)
+    generated_image_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("reason", "prompt", "mode", "model", "saved_image_path", "saved_image_url", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class BugReportRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(default="", max_length=160)
+    description: str = Field(min_length=1, max_length=4000)
+    contact: str = Field(default="", max_length=256)
+    page_url: str = Field(default="", max_length=1024)
+
+    @field_validator("title", "description", "contact", "page_url", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class ShareResultRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    recipient_ids: list[int] = Field(min_length=1, max_length=50)
+    prompt: str = Field(default="", max_length=32_000)
+    mode: str = Field(default="", max_length=64)
+    model: str = Field(default="", max_length=128)
+    rating: Literal["", "good", "ok", "bad"] = ""
+    saved_image_path: str = Field(default="", max_length=1024)
+    saved_image_url: str = Field(default="", max_length=1024)
+    generated_image_id: int | None = Field(default=None, ge=1)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("recipient_ids", mode="after")
+    @classmethod
+    def _validate_recipient_ids(cls, value: list[int]) -> list[int]:
+        cleaned = [int(user_id) for user_id in value if int(user_id) > 0]
+        if not cleaned:
+            raise ValueError("请选择至少一个分享对象")
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator("prompt", "mode", "model", "rating", "saved_image_path", "saved_image_url", "note", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class FinalImageRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    generated_image_id: int = Field(ge=1)
+    image: FilePayload
+    source_saved_image_path: str = Field(default="", max_length=1024)
+    source_saved_image_url: str = Field(default="", max_length=1024)
+    logo_overlay_applied: bool = False
+    logo_overlay_source: str = Field(default="", max_length=255)
+    logo_text_color: str = Field(default="", max_length=32)
+
+    @field_validator(
+        "source_saved_image_path",
+        "source_saved_image_url",
+        "logo_overlay_source",
+        "logo_text_color",
+        mode="after",
+    )
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class UserPreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    default_model: str = Field(default="", max_length=128)
+    default_responses_model: str = Field(default="", max_length=128)
+    default_size: str = Field(default="", max_length=64)
+    default_quality: Literal["", "auto", "low", "medium", "high"] = ""
+    default_output_format: Literal["", "png", "jpeg", "webp"] = ""
+    default_image_transport: Literal["", "images", "responses"] = ""
+    logo_overlay_enabled: bool = True
+    auto_copyright_check_enabled: bool = True
+
+    @field_validator(
+        "default_model",
+        "default_responses_model",
+        "default_size",
+        "default_quality",
+        "default_output_format",
+        "default_image_transport",
+        mode="after",
+    )
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
 class ConfigResponse(BaseModel):
     generate_url: str
     edit_url: str
@@ -128,6 +287,8 @@ class ConfigResponse(BaseModel):
     max_request_body_bytes: int
     rate_limit_per_minute: int
     upstream_timeout_seconds: float
+    auth_enabled: bool
+    bug_report_notifications_enabled: bool
 
 
 class HealthResponse(BaseModel):

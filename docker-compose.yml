@@ -1,21 +1,37 @@
 services:
   picgen:
-    build: .
-    image: picgen:latest
+    image: minorli/picgen:0.1.14
+    build:
+      context: .
     ports:
-      - "127.0.0.1:8000:8000"
-    env_file:
-      - .env
+      - "8000:8000"
     environment:
       PICGEN_HOST: "0.0.0.0"
       PICGEN_PORT: "8000"
       PICGEN_LOG_FORMAT: "json"
+      PICGEN_ROOT_DIR: "/app"
+      PICGEN_STATIC_DIR: "/app/static"
+      PICGEN_DATA_DIR: "/app/data"
+      PICGEN_ENV_FILE: "/app/data/.env"
+      PICGEN_AUTH_ENABLED: "true"
+      PICGEN_ADMIN_USERNAME: "${PICGEN_ADMIN_USERNAME:-admin}"
+      PICGEN_ADMIN_PASSWORD: "${PICGEN_ADMIN_PASSWORD:-}"
+      PICGEN_DEFAULT_GENERATE_URL: "https://sub.tidba.com/v1/images/generations"
+      PICGEN_DEFAULT_EDIT_URL: "https://sub.tidba.com/v1/images/edits"
+      PICGEN_DEFAULT_RESPONSES_URL: "https://sub.tidba.com/v1/responses"
     volumes:
-      - ./data:/app/data
+      - picgen-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  picgen-data:

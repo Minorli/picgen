@@ -238,6 +238,7 @@ def _image_item_payload(
             mode=str(save_context.get("mode") or "result"),
             image_bytes=image_bytes,
             image_mime=image_mime,
+            filename_prefix=str(save_context.get("filename_prefix") or ""),
             metadata={
                 **save_context,
                 "candidate_index": index,

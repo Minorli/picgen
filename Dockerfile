@@ -5,10 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # Install only the runtime dependencies first for better layer caching.
@@ -35,12 +31,20 @@ USER picgen
 ENV PICGEN_HOST=0.0.0.0 \
     PICGEN_PORT=8000 \
     PICGEN_LOG_FORMAT=json \
-    PICGEN_DATA_DIR=/app/data
+    PICGEN_ROOT_DIR=/app \
+    PICGEN_STATIC_DIR=/app/static \
+    PICGEN_DATA_DIR=/app/data \
+    PICGEN_ENV_FILE=/app/data/.env \
+    PICGEN_DEFAULT_GENERATE_URL=https://sub.tidba.com/v1/images/generations \
+    PICGEN_DEFAULT_EDIT_URL=https://sub.tidba.com/v1/images/edits \
+    PICGEN_DEFAULT_RESPONSES_URL=https://sub.tidba.com/v1/responses
+
+VOLUME ["/app/data"]
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl --fail --silent http://127.0.0.1:8000/api/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()" || exit 1
 
 ENTRYPOINT ["python", "-m", "picgen.cli"]
 CMD ["--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--log-format", "json"]
