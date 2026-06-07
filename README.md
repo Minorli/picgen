@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.20**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.26**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,7 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.20 主要特性
+## 0.1.26 主要特性
 
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -34,7 +34,8 @@
   消息以 `【PicGen｜分类】` 开头，Telegram 列表里可直接区分事件类型和关键标题。
 - **旅行提示词标签**：生成提示词下方的快捷标签改为“高级旅行 / 精致海报 / 酒店质感 /
   山野度假 / 电影光影 / 色彩克制”，更贴近 6 人游当前常用出图方向。
-- **账号自助维护**：普通用户可登录后自助修改密码；忘记密码申请会通知管理员且对外保持枚举安全。
+- **账号自助维护**：普通用户可登录后自助修改密码；忘记密码优先走邮箱自助重置，没有邮箱或
+  SMTP 不可用时仍会通知管理员，且对外保持枚举安全。
 - **交付一致性**：请求集成 6 人游 LOGO 时，成品保存完成前下载按钮会进入处理中状态，避免误下无 LOGO 底图。
 - **私有文件缓存**：鉴权后的 `/files/...` 图片使用 private cache 指令，避免共享代理缓存私有交付物。
 - **会话清理**：后台保留循环会定期清理过期登录会话，避免 sessions 表长期只增不减。
@@ -72,10 +73,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.20 .
+docker build -t minorli/picgen:0.1.26 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.20
+  minorli/picgen:0.1.26
 ```
 
 或：
@@ -90,10 +91,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.20`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.26`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.20 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.26 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -131,6 +132,12 @@ IMAGE=minorli/picgen VERSION=0.1.20 PLATFORM=linux/amd64 ./scripts/docker-build-
 | `PICGEN_PROXY_AUTH_TOKEN` | 可选 Bearer 鉴权 token；未设置则不校验 | 空 |
 | `PICGEN_AUTH_ENABLED` | 启用应用内账号登录 | `true` |
 | `PICGEN_ADMIN_USERNAME` / `PICGEN_ADMIN_PASSWORD` | 内置管理员账号；生产环境必须设置管理员密码 | `admin` / 空 |
+| `PICGEN_PUBLIC_BASE_URL` | 生成密码重置邮件链接时使用的公网地址 | 请求来源 |
+| `PICGEN_SMTP_HOST` / `PICGEN_SMTP_PORT` | SMTP 主机与端口 | 空 / `465` |
+| `PICGEN_SMTP_USERNAME` / `PICGEN_SMTP_PASSWORD` | SMTP 登录账号与授权码/密码 | 空 |
+| `PICGEN_SMTP_FROM_EMAIL` / `PICGEN_SMTP_FROM_NAME` | 发件人地址与名称 | 空 / `PicGen` |
+| `PICGEN_SMTP_USE_TLS` / `PICGEN_SMTP_STARTTLS` | SMTP SSL 或 STARTTLS | `true` / `false` |
+| `PICGEN_PASSWORD_RESET_TOKEN_MINUTES` | 邮箱重置链接有效期 | `30` |
 | `PICGEN_BUG_REPORT_WEBHOOK_URL` | 可选兼容 webhook；未配置 Telegram 时用于 Bug 反馈/找回密码通知 | 空 |
 | `PICGEN_BUG_REPORT_WEBHOOK_KIND` | webhook 类型：`wecom` / `serverchan` / `generic` | `wecom` |
 | `PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` / `PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` | Telegram 通知；用于后台异常、成功生图、Bug 反馈和找回密码申请 | 空 |
@@ -151,9 +158,36 @@ uv run picgen --print-config
 管理员密码。普通用户只能查看自己的用量；管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈，
 并维护用户。
 
+忘记密码支持邮箱自助重置。用户在 Profile 里填写邮箱后，提交“忘记密码”会收到一次性重置链接；
+链接默认 30 分钟有效，成功重置后会清掉该用户其它会话。为避免账号枚举，接口无论账号是否存在都返回同一句
+提示；没有邮箱、SMTP 未配置或邮件发送失败时，系统仍会把找回申请发给管理员作为兜底。
+
+阿里云可用两类 SMTP 来源：
+
+- **阿里云邮件推送 DirectMail**：先在控制台完成发信域名、SPF/DKIM/DMARC 和发信地址配置，再使用
+  SMTP 发信地址作为 `PICGEN_SMTP_USERNAME` 和 `PICGEN_SMTP_FROM_EMAIL`，密码填控制台生成的 SMTP
+  授权密码。常用主机为 `smtpdm.aliyun.com`，SSL 端口 `465`。
+- **阿里云企业邮箱**：用企业邮箱账号作为 `PICGEN_SMTP_USERNAME` 和 `PICGEN_SMTP_FROM_EMAIL`，
+  密码填邮箱密码或客户端授权码；SMTP 主机和端口以企业邮箱控制台为准，通常也是 SSL 465 或 STARTTLS 587。
+
+示例：
+
+```dotenv
+PICGEN_PUBLIC_BASE_URL=https://picgen.example.com
+PICGEN_SMTP_HOST=smtpdm.aliyun.com
+PICGEN_SMTP_PORT=465
+PICGEN_SMTP_USERNAME=noreply@example.com
+PICGEN_SMTP_PASSWORD=your-smtp-auth-code
+PICGEN_SMTP_FROM_EMAIL=noreply@example.com
+PICGEN_SMTP_FROM_NAME=PicGen
+PICGEN_SMTP_USE_TLS=true
+PICGEN_SMTP_STARTTLS=false
+PICGEN_PASSWORD_RESET_TOKEN_MINUTES=30
+```
+
 Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 Telegram。配置
 `PICGEN_ERROR_ALERT_TELEGRAM_BOT_TOKEN` 和 `PICGEN_ERROR_ALERT_TELEGRAM_CHAT_ID` 后，上游限流/超时/异常响应、
-后端未预期错误、成功生图摘要、Bug 反馈和找回密码申请都会发送到该 chat；登录失败、参数校验、
+后端未预期错误、成功生图摘要、Bug 反馈和需要管理员兜底的找回密码申请都会发送到该 chat；登录失败、参数校验、
 提示词为空等用户可修正错误不会刷屏。旧版企业微信/Server 酱 webhook 仍作为兼容回退：未配置 Telegram
 但配置 `PICGEN_BUG_REPORT_WEBHOOK_URL` 时，Bug 反馈和找回密码申请会走 webhook。通知正文和返回给用户的技术
 详情都会脱敏。
@@ -162,7 +196,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.20 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.26 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

@@ -120,14 +120,20 @@ class AuthRequest(BaseModel):
 
     username: str = Field(min_length=2, max_length=64)
     password: str = Field(min_length=8, max_length=256)
+    company: str = Field(default="6renyou", max_length=120)
+    department: str = Field(default="PD & OPS", max_length=120)
+
+    @field_validator("username", "company", "department", mode="after")
+    @classmethod
+    def _trim_text(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("username", mode="after")
     @classmethod
-    def _trim_username(cls, value: str) -> str:
-        stripped = value.strip()
-        if any(char.isspace() for char in stripped):
+    def _validate_username(cls, value: str) -> str:
+        if any(char.isspace() for char in value):
             raise ValueError("用户名不能包含空白字符")
-        return stripped
+        return value
 
 
 class AdminCreateUserRequest(BaseModel):
@@ -160,10 +166,43 @@ class PasswordResetRequest(BaseModel):
         return stripped
 
 
+class PasswordResetConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = Field(min_length=20, max_length=512)
+    password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("token", mode="after")
+    @classmethod
+    def _trim_token(cls, value: str) -> str:
+        return value.strip()
+
+
 class AdminResetPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     password: str = Field(min_length=8, max_length=256)
+
+
+class OrganizationUnitRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    company: str = Field(min_length=1, max_length=120)
+    department: str = Field(min_length=1, max_length=120)
+
+    @field_validator("company", "department", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class AdminUpdateUserOrgRequest(OrganizationUnitRequest):
+    reason: str = Field(default="", max_length=1000)
+
+    @field_validator("reason", mode="after")
+    @classmethod
+    def _strip_reason(cls, value: str) -> str:
+        return value.strip()
 
 
 class ChangePasswordRequest(BaseModel):
@@ -171,6 +210,77 @@ class ChangePasswordRequest(BaseModel):
 
     current_password: str = Field(min_length=8, max_length=256)
     new_password: str = Field(min_length=8, max_length=256)
+
+
+class UserProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    username: str = Field(min_length=2, max_length=64)
+    current_password: str = Field(default="", max_length=256)
+    display_name: str = Field(default="", max_length=80)
+    wechat: str = Field(default="", max_length=120)
+    phone_country_code: str = Field(default="+86", max_length=8)
+    phone: str = Field(default="", max_length=40)
+    email: str = Field(default="", max_length=160)
+    company: str = Field(default="6renyou", max_length=120)
+    department: str = Field(default="PD & OPS", max_length=120)
+    team: str = Field(default="", max_length=120)
+    job_title: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator(
+        "username",
+        "current_password",
+        "display_name",
+        "wechat",
+        "phone_country_code",
+        "phone",
+        "email",
+        "company",
+        "department",
+        "team",
+        "job_title",
+        "note",
+        mode="after",
+    )
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("username", mode="after")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        if any(char.isspace() for char in value):
+            raise ValueError("用户名不能包含空白字符")
+        return value
+
+    @field_validator("phone_country_code", mode="after")
+    @classmethod
+    def _validate_phone_country_code(cls, value: str) -> str:
+        cleaned = value or "+86"
+        if not cleaned.startswith("+") or not cleaned[1:].isdigit():
+            raise ValueError("电话国家码格式不正确")
+        return cleaned
+
+    @field_validator("phone", mode="after")
+    @classmethod
+    def _validate_phone(cls, value: str) -> str:
+        if value and not all(char.isdigit() or char in {"-", " ", "(", ")"} for char in value):
+            raise ValueError("电话号码格式不正确")
+        return value
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        if value and ("@" not in value or "." not in value.rsplit("@", 1)[-1]):
+            raise ValueError("邮箱格式不正确")
+        return value
+
+
+class AvatarUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    image: FilePayload
 
 
 class FeedbackRequest(BaseModel):
@@ -230,6 +340,75 @@ class ShareResultRequest(BaseModel):
     @classmethod
     def _strip_text(cls, value: str) -> str:
         return value.strip()
+
+
+class TeamChatMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    room_type: Literal["team", "dm", "bot"] = "team"
+    recipient_user_id: int | None = Field(default=None, ge=1)
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def _strip_content(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("消息不能为空")
+        return stripped
+
+
+class TeamChatReadRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    room_type: Literal["team", "dm", "bot"] = "team"
+    recipient_user_id: int | None = Field(default=None, ge=1)
+    message_id: int = Field(default=0, ge=0)
+
+
+class GroupAnnouncementRequest(OrganizationUnitRequest):
+    content: str = Field(default="", max_length=2000)
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def _strip_content(cls, value: str) -> str:
+        return value.strip()
+
+
+class GroupSavedItemRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    generated_image_id: int = Field(ge=1)
+    title: str = Field(default="", max_length=160)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("title", "note", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class GalleryUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    is_favorite: bool = False
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("tags", mode="after")
+    @classmethod
+    def _normalize_tags(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_tag in value:
+            tag = str(raw_tag).strip()[:40]
+            if not tag:
+                continue
+            folded = tag.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            cleaned.append(tag)
+        return cleaned
 
 
 class FinalImageRequest(BaseModel):
@@ -297,6 +476,7 @@ class ConfigResponse(BaseModel):
     auth_enabled: bool
     bug_report_notifications_enabled: bool
     error_alert_notifications_enabled: bool
+    password_reset_email_enabled: bool
 
 
 class HealthResponse(BaseModel):

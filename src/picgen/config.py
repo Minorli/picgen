@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = ""
 
+    public_base_url: str = ""
+    smtp_host: str = ""
+    smtp_port: int = Field(default=465, ge=1, le=65535)
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "PicGen"
+    smtp_use_tls: bool = True
+    smtp_starttls: bool = False
+    smtp_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    password_reset_token_minutes: int = Field(default=30, ge=5, le=1440)
+
     bug_report_webhook_url: str = ""
     bug_report_webhook_kind: str = "wecom"
     bug_report_webhook_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
@@ -106,6 +118,12 @@ class Settings(BaseSettings):
         "bug_report_webhook_url",
         "error_alert_telegram_bot_token",
         "error_alert_telegram_chat_id",
+        "public_base_url",
+        "smtp_host",
+        "smtp_username",
+        "smtp_password",
+        "smtp_from_email",
+        "smtp_from_name",
         mode="after",
     )
     @classmethod

@@ -10,7 +10,9 @@ from picgen.notifications import (
     build_password_reset_request_notification_text,
     build_password_reset_request_telegram_text,
     send_bug_report_notification,
+    send_password_reset_email,
     send_password_reset_request_notification,
+    smtp_notifications_enabled,
 )
 
 
@@ -103,6 +105,60 @@ def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
     assert "sk-secret123456" not in content
     assert "api_key=***" in content
     assert len(content) <= 3900
+
+
+def test_password_reset_email_uses_smtp_without_leaking_secret(settings_factory, monkeypatch) -> None:
+    sent_messages = []
+    logins = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, *, timeout, context):
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+            self.context = context
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def login(self, username, password):
+            logins.append((username, password))
+
+        def send_message(self, message):
+            sent_messages.append(message)
+
+    monkeypatch.setattr("picgen.notifications.smtplib.SMTP_SSL", FakeSMTP)
+    settings = settings_factory(
+        smtp_host="smtpdm.aliyun.com",
+        smtp_port=465,
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+        smtp_from_name="PicGen 测试",
+    )
+
+    assert smtp_notifications_enabled(settings) is True
+    result = send_password_reset_email(
+        settings=settings,
+        to_email="alice@example.com",
+        username="alice",
+        reset_url="https://picgen.example.com/?reset_token=token-123",
+        expires_minutes=30,
+    )
+
+    assert result.sent is True
+    assert logins == [("noreply@example.com", "mail-secret")]
+    assert len(sent_messages) == 1
+    message = sent_messages[0]
+    assert message["To"] == "alice@example.com"
+    assert message["Subject"] == "PicGen 密码重置"
+    body = message.get_content()
+    assert "https://picgen.example.com/?reset_token=token-123" in body
+    assert "30 分钟内有效" in body
+    assert "mail-secret" not in body
 
 
 def test_password_reset_request_notification_text_is_admin_friendly_and_escaped() -> None:

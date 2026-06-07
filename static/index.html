@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=prompt-tags-20260606a">
+    <link rel="stylesheet" href="styles.css?v=0.1.26">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -22,6 +22,20 @@
             <span>密码</span>
             <input id="authPasswordInput" type="password" autocomplete="current-password" minlength="8" maxlength="256" required placeholder="至少 8 位">
           </label>
+          <div id="authOrgFields" class="auth-org-fields hidden">
+            <label>
+              <span>公司</span>
+              <select id="authCompanyInput">
+                <option value="6renyou">6renyou</option>
+              </select>
+            </label>
+            <label>
+              <span>部门</span>
+              <select id="authDepartmentInput">
+                <option value="PD &amp; OPS">PD &amp; OPS</option>
+              </select>
+            </label>
+          </div>
           <p id="authError" class="auth-error" role="alert"></p>
           <div class="auth-actions">
             <button id="loginAuthButton" class="primary-button" type="submit">登录</button>
@@ -34,11 +48,27 @@
             <span>用户名</span>
             <input id="passwordResetUsernameInput" type="text" autocomplete="username" minlength="2" maxlength="64" required placeholder="输入需要找回的账号">
           </label>
-          <p class="auth-reset-hint">提交后管理员会在后台看到申请。管理员重置后，请使用新密码登录。</p>
+          <p class="auth-reset-hint">如果账号资料里有邮箱，系统会发送重置链接；否则管理员会在后台看到申请。</p>
           <p id="passwordResetRequestStatus" class="auth-reset-status" role="status"></p>
           <div class="auth-actions">
-            <button id="submitPasswordResetRequestButton" class="primary-button" type="submit">提交申请</button>
+            <button id="submitPasswordResetRequestButton" class="primary-button" type="submit">发送重置邮件</button>
             <button id="cancelPasswordResetRequestButton" class="ghost-button" type="button">返回登录</button>
+          </div>
+        </form>
+        <form id="passwordResetConfirmForm" class="auth-form auth-reset-form hidden">
+          <label>
+            <span>新密码</span>
+            <input id="passwordResetNewPasswordInput" type="password" autocomplete="new-password" minlength="8" maxlength="256" required placeholder="至少 8 位">
+          </label>
+          <label>
+            <span>确认新密码</span>
+            <input id="passwordResetConfirmPasswordInput" type="password" autocomplete="new-password" minlength="8" maxlength="256" required placeholder="再输入一次">
+          </label>
+          <p class="auth-reset-hint">重置链接只能使用一次。保存后请用新密码登录。</p>
+          <p id="passwordResetConfirmStatus" class="auth-reset-status" role="status"></p>
+          <div class="auth-actions">
+            <button id="submitPasswordResetConfirmButton" class="primary-button" type="submit">保存新密码</button>
+            <button id="cancelPasswordResetConfirmButton" class="ghost-button" type="button">返回登录</button>
           </div>
         </form>
       </section>
@@ -54,10 +84,14 @@
           </div>
         </div>
         <div class="topbar-tools">
-          <div class="system-pill user-pill">
+          <button id="openProfileButton" class="system-pill user-pill user-profile-button" type="button">
             <span id="userAvatar" class="user-avatar" aria-hidden="true">?</span>
             <strong id="currentUsername">未登录</strong>
-          </div>
+          </button>
+          <button id="teamChatButton" class="ghost-button compact-top-button team-chat-button" type="button">
+            <span>Team Chat</span>
+            <span id="teamChatUnreadBadge" class="team-chat-unread-badge hidden" aria-live="polite">0</span>
+          </button>
           <button id="changePasswordButton" class="ghost-button compact-top-button" type="button">修改密码</button>
           <button id="bugReportButton" class="ghost-button compact-top-button" type="button">反馈 Bug</button>
           <button id="logoutButton" class="ghost-button compact-top-button" type="button">退出</button>
@@ -65,7 +99,6 @@
             <span class="live-dot"></span>
             <strong id="requestStatus">空闲</strong>
           </div>
-          <div class="system-pill api-pill">OpenAI Images API</div>
         </div>
       </header>
 
@@ -75,7 +108,6 @@
           <nav class="side-nav" aria-label="主导航">
             <button class="nav-link active" type="button" data-mode="generate">生成</button>
             <button class="nav-link" type="button" data-mode="edit">编辑</button>
-            <a href="#resultPanel">结果</a>
             <a href="#connectionSettings">设置</a>
           </nav>
 
@@ -97,6 +129,20 @@
             <p id="sharedResultsEmpty" class="empty-history">还没有收到分享。</p>
           </section>
 
+          <section class="rail-section gallery-rail">
+            <div class="rail-heading">
+              <h2>作品库</h2>
+              <button id="refreshGalleryButton" class="text-button" type="button">刷新</button>
+            </div>
+            <input id="gallerySearchInput" class="rail-search-input" type="search" placeholder="搜索提示词、标签、用户">
+            <div class="gallery-filter-row">
+              <label><input id="galleryFavoriteOnlyInput" type="checkbox"> 只看收藏</label>
+              <button id="clearGalleryFiltersButton" class="text-button" type="button">重置</button>
+            </div>
+            <div id="galleryList" class="gallery-list"></div>
+            <p id="galleryEmpty" class="empty-history">还没有作品。生成成功后会自动出现在这里。</p>
+          </section>
+
         </aside>
 
         <main class="workbench">
@@ -115,6 +161,41 @@
                 <textarea id="generatePromptInput" rows="6" placeholder="宁静的山间湖泊，清晨薄雾，湖边有一座木屋，周围是茂密的松树，远处是雪山，自然光，超写实，细节丰富"></textarea>
                 <strong id="generatePromptCount" class="field-meter">0 字</strong>
               </label>
+
+              <details id="creativeBriefPanel" class="creative-brief-panel">
+                <summary>创意辅助（可选）</summary>
+                <p class="helper-text">自由提示词仍是主路径；这里只把你已有文案补成更清晰的旅行创作上下文，不会替你重写整段提示词。</p>
+                <div class="creative-brief-grid">
+                  <label>
+                    <span>目的地 / 产品</span>
+                    <input id="creativeBriefDestinationInput" type="text" maxlength="160" placeholder="例如：京都红叶私家团">
+                  </label>
+                  <label>
+                    <span>目标人群</span>
+                    <input id="creativeBriefAudienceInput" type="text" maxlength="160" placeholder="例如：高净值家庭、蜜月客人">
+                  </label>
+                  <label>
+                    <span>投放渠道</span>
+                    <input id="creativeBriefChannelInput" type="text" maxlength="160" placeholder="例如：朋友圈海报、公众号头图">
+                  </label>
+                  <label>
+                    <span>气质方向</span>
+                    <input id="creativeBriefMoodInput" type="text" maxlength="200" placeholder="例如：酒店质感、色彩克制、电影光影">
+                  </label>
+                  <label>
+                    <span>必须保留</span>
+                    <input id="creativeBriefMustHaveInput" type="text" maxlength="300" placeholder="例如：真实目的地感、人物不过度摆拍">
+                  </label>
+                  <label>
+                    <span>避免出现</span>
+                    <input id="creativeBriefAvoidInput" type="text" maxlength="300" placeholder="例如：廉价旅行社风、夸张文字、过饱和">
+                  </label>
+                </div>
+                <div class="creative-brief-actions">
+                  <button id="applyCreativeBriefButton" class="ghost-button" type="button">补充到提示词</button>
+                  <button id="askBotCreativeBriefButton" class="text-button" type="button">@GPT-BOT 优化建议</button>
+                </div>
+              </details>
 
               <div class="tag-row" aria-label="生成提示词快捷片段">
                 <button class="prompt-chip" type="button" data-target="generate" data-snippet="高级旅行海报质感，商业摄影风格">高级旅行</button>
@@ -376,10 +457,25 @@
                   <div id="resultActions" class="result-actions hidden">
                     <a id="downloadButton" class="primary-button result-primary-action disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载图像</a>
                     <button id="continueEditButton" class="ghost-button emphasized-action" type="button" disabled>继续编辑</button>
-                    <button id="openResultPreviewButton" class="ghost-button" type="button" disabled>放大查看</button>
                     <button id="startVariantButton" class="ghost-button" type="button" disabled>基于结果再生成</button>
                     <button id="previewCompareButton" class="ghost-button" type="button" disabled>前后对比</button>
+                    <button id="saveGroupAssetButton" class="ghost-button" type="button" disabled>存入 Group</button>
                     <button id="copyPromptButton" class="ghost-button" type="button">复制提示词</button>
+                  </div>
+                  <div id="galleryEditorPanel" class="gallery-editor-panel hidden">
+                    <div class="gallery-editor-title">
+                      <span>作品整理</span>
+                      <strong id="galleryEditorStatus">未收藏</strong>
+                    </div>
+                    <label class="gallery-favorite-toggle">
+                      <input id="galleryFavoriteInput" type="checkbox">
+                      <span>收藏这张图</span>
+                    </label>
+                    <label class="gallery-tags-field">
+                      <span>标签</span>
+                      <input id="galleryTagsInput" type="text" maxlength="400" placeholder="用逗号分隔，例如 海岛, 高端旅行">
+                    </label>
+                    <button id="saveGalleryMetaButton" class="ghost-button" type="button">保存整理</button>
                   </div>
                   <div id="resultFeedbackPanel" class="result-feedback-panel hidden">
                     <div class="result-feedback-title">
@@ -486,6 +582,53 @@
                     </div>
                     <div id="passwordResetRequestsList" class="password-reset-list"></div>
                   </div>
+                  <div id="adminOrgPanel" class="feedback-summary-panel">
+                    <div class="admin-panel-title">
+                      <span>组织与部门</span>
+                      <button id="refreshAdminOrgButton" class="text-button" type="button">刷新</button>
+                    </div>
+                    <form id="adminOrgCreateForm" class="admin-create-form">
+                      <label>
+                        <span>公司</span>
+                        <input id="adminOrgCompanyInput" type="text" maxlength="120" value="6renyou">
+                      </label>
+                      <label>
+                        <span>部门</span>
+                        <input id="adminOrgDepartmentInput" type="text" maxlength="120" placeholder="例如 Bespoke Travel">
+                      </label>
+                      <button class="primary-button" type="submit">添加部门</button>
+                    </form>
+                    <form id="adminUserOrgForm" class="admin-create-form">
+                      <label>
+                        <span>用户 ID</span>
+                        <input id="adminOrgUserIdInput" type="number" min="1" step="1" placeholder="用户 ID">
+                      </label>
+                      <label>
+                        <span>组织</span>
+                        <select id="adminOrgUnitSelect"></select>
+                      </label>
+                      <label>
+                        <span>原因</span>
+                        <input id="adminOrgReasonInput" type="text" maxlength="1000" placeholder="可选">
+                      </label>
+                      <button class="ghost-button" type="submit">调整组织</button>
+                    </form>
+                    <form id="adminGroupAnnouncementForm" class="admin-create-form">
+                      <label>
+                        <span>公告组织</span>
+                        <select id="adminAnnouncementOrgSelect"></select>
+                      </label>
+                      <label>
+                        <span>群公告</span>
+                        <input id="adminAnnouncementContentInput" type="text" maxlength="2000" placeholder="显示在对应 Group Chat 顶部">
+                      </label>
+                      <button class="ghost-button" type="submit">保存公告</button>
+                    </form>
+                    <p id="adminOrgStatus" class="admin-user-error" role="status"></p>
+                    <div id="adminOrgStatsList" class="feedback-recent-list"></div>
+                    <div id="adminOrgUnitsList" class="feedback-recent-list"></div>
+                    <div id="adminOrgAuditList" class="feedback-recent-list"></div>
+                  </div>
                   <div class="admin-panel-title">
                     <span>用户管理</span>
                     <button id="refreshAdminUsersButton" class="text-button" type="button">刷新</button>
@@ -530,7 +673,7 @@
                   <span>Responses API<small>gpt-5.5 · 兼容兜底</small></span>
                 </label>
               </div>
-              <p id="imageTransportHint" class="helper-text">编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。</p>
+              <p id="imageTransportHint" class="helper-text">编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。</p>
               <div class="settings-grid">
                 <label>
                   <span>API Key</span>
@@ -580,7 +723,7 @@
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.20</span>
+        <span>PicGen Console　v0.1.26</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -607,6 +750,166 @@
           <p id="changePasswordStatus" class="bug-report-status" role="status"></p>
           <button id="submitChangePasswordButton" class="primary-button" type="submit">保存新密码</button>
         </form>
+      </section>
+    </div>
+
+    <div id="profileModal" class="profile-modal hidden" aria-hidden="true">
+      <div id="profileBackdrop" class="preview-modal-backdrop"></div>
+      <section class="profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+        <div class="bug-report-header">
+          <div>
+            <p class="eyebrow">Profile</p>
+            <h2 id="profileTitle">个人资料</h2>
+          </div>
+          <button id="closeProfileButton" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="profileForm" class="profile-form">
+          <div class="profile-avatar-row">
+            <span id="profileAvatarPreview" class="profile-avatar-preview" aria-hidden="true">?</span>
+            <div>
+              <label class="avatar-upload-button">
+                <span>上传头像</span>
+                <input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp">
+              </label>
+              <p class="helper-text">支持 PNG、JPG、WebP，最大 2 MB。</p>
+            </div>
+          </div>
+
+          <div class="profile-grid">
+            <label>
+              <span>登录用户名</span>
+              <input id="profileUsernameInput" type="text" autocomplete="username" minlength="2" maxlength="64" required>
+              <small>用于登录。修改后，下次登录请使用新用户名。</small>
+            </label>
+            <label>
+              <span>显示昵称</span>
+              <input id="profileDisplayNameInput" type="text" maxlength="80" placeholder="页面里显示的名字，不影响登录">
+              <small>仅用于页面显示，不改变登录用户名。</small>
+            </label>
+            <label>
+              <span>微信</span>
+              <input id="profileWechatInput" type="text" maxlength="120" autocomplete="off">
+            </label>
+            <label>
+              <span>邮箱</span>
+              <input id="profileEmailInput" type="email" maxlength="160" autocomplete="email">
+            </label>
+            <label>
+              <span>电话</span>
+              <div class="phone-input-row">
+                <select id="profilePhoneCountryCodeInput" aria-label="电话国家码">
+                  <option value="+86">+86 中国</option>
+                  <option value="+852">+852 香港</option>
+                  <option value="+853">+853 澳门</option>
+                  <option value="+886">+886 台湾</option>
+                  <option value="+1">+1 美国/加拿大</option>
+                  <option value="+44">+44 英国</option>
+                  <option value="+65">+65 新加坡</option>
+                  <option value="+81">+81 日本</option>
+                  <option value="+82">+82 韩国</option>
+                </select>
+                <input id="profilePhoneInput" type="tel" maxlength="40" autocomplete="tel-national">
+              </div>
+            </label>
+            <label>
+              <span>公司</span>
+              <select id="profileCompanyInput">
+                <option value="6renyou">6renyou</option>
+              </select>
+            </label>
+            <label>
+              <span>部门</span>
+              <select id="profileDepartmentInput">
+                <option value="PD &amp; OPS">PD &amp; OPS</option>
+              </select>
+            </label>
+            <label>
+              <span>部门 / 团队</span>
+              <input id="profileTeamInput" type="text" maxlength="120">
+            </label>
+            <label>
+              <span>职位 / 岗位</span>
+              <input id="profileJobTitleInput" type="text" maxlength="120">
+            </label>
+          </div>
+
+          <label>
+            <span>备注</span>
+            <textarea id="profileNoteInput" rows="3" maxlength="1000" placeholder="可选：偏好、职责或其它说明"></textarea>
+          </label>
+          <label id="profileCurrentPasswordLabel" class="hidden">
+            <span>当前密码</span>
+            <input id="profileCurrentPasswordInput" type="password" autocomplete="current-password" minlength="8" maxlength="256">
+            <small>只有修改登录用户名时需要填写。</small>
+          </label>
+          <p id="profileStatus" class="bug-report-status" role="status"></p>
+          <button id="submitProfileButton" class="primary-button" type="submit">保存资料</button>
+        </form>
+      </section>
+    </div>
+
+    <div id="teamChatModal" class="team-chat-modal hidden" aria-hidden="true">
+      <div id="teamChatBackdrop" class="preview-modal-backdrop"></div>
+      <section class="team-chat-dialog" role="dialog" aria-modal="true" aria-labelledby="teamChatTitle">
+        <header class="team-chat-header">
+          <div>
+            <p class="eyebrow">Workspace</p>
+            <h2 id="teamChatTitle">Team Chat</h2>
+          </div>
+          <button id="closeTeamChatButton" class="ghost-button" type="button">关闭</button>
+        </header>
+
+        <div class="team-chat-shell">
+          <aside class="team-chat-sidebar" aria-label="聊天对象">
+            <button id="teamChatTeamRoomButton" class="team-chat-member active" type="button" data-room-type="team">
+              <span class="team-chat-avatar">T</span>
+              <span>
+                <strong id="teamChatTeamRoomName">Group</strong>
+                <small id="teamChatTeamRoomMeta">同公司同部门</small>
+              </span>
+            </button>
+            <div id="teamChatMembers" class="team-chat-members"></div>
+          </aside>
+
+          <section class="team-chat-main">
+            <div class="team-chat-room-header">
+              <div>
+                <h3 id="teamChatRoomTitle">Group</h3>
+                <p id="teamChatRoomMeta">同公司同部门的群聊。</p>
+              </div>
+              <button id="refreshTeamChatButton" class="text-button" type="button">刷新</button>
+            </div>
+            <div id="teamChatGroupContext" class="team-chat-group-context">
+              <p id="teamChatAnnouncement" class="team-chat-announcement hidden"></p>
+              <div class="team-chat-insight-grid">
+                <section id="teamChatGroupStats" class="team-chat-insight-card"></section>
+                <section id="teamChatGroupSummary" class="team-chat-insight-card"></section>
+              </div>
+              <section id="teamChatGroupAssets" class="team-chat-assets"></section>
+            </div>
+            <div id="teamChatMessages" class="team-chat-messages" aria-live="polite"></div>
+            <form id="teamChatForm" class="team-chat-form">
+              <div id="teamChatQuotePreview" class="team-chat-quote-preview hidden">
+                <div>
+                  <strong id="teamChatQuoteAuthor"></strong>
+                  <p id="teamChatQuoteText"></p>
+                </div>
+                <button id="clearTeamChatQuoteButton" class="icon-button small" type="button" aria-label="取消引用">×</button>
+              </div>
+              <textarea
+                id="teamChatMessageInput"
+                rows="3"
+                maxlength="4000"
+                placeholder="输入消息，群聊里可以 @GPT-BOT"
+                required
+              ></textarea>
+              <div class="team-chat-compose-row">
+                <p id="teamChatStatus" class="team-chat-status" role="status"></p>
+                <button id="sendTeamChatButton" class="primary-button" type="submit">发送</button>
+              </div>
+            </form>
+          </section>
+        </div>
       </section>
     </div>
 
@@ -685,6 +988,6 @@
 
     <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
 
-    <script src="app.js?v=prompt-tags-20260606a" type="module"></script>
+    <script src="app.js?v=0.1.26" type="module"></script>
   </body>
 </html>

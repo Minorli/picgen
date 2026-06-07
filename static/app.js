@@ -15,6 +15,8 @@ const COMPANY_LOGO_LAYOUT_PROMPT = [
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
   "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
 ].join("\n")
+const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
+const TEAM_CHAT_FAST_POLL_LIMIT = 8
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
@@ -46,6 +48,7 @@ const state = {
   serverConfig: null,
   currentUser: null,
   authMode: "login",
+  passwordResetToken: "",
   appReady: false,
   editImage: null,
   editMaskImage: null,
@@ -102,7 +105,41 @@ const state = {
   shareRecipients: [],
   shareSelectedRecipientIds: new Set(),
   sharedResults: [],
+  galleryItems: [],
+  gallerySearch: "",
+  galleryFavoriteOnly: false,
+  gallerySearchTimer: null,
+  currentGalleryMeta: {
+    generatedImageId: null,
+    isFavorite: false,
+    tags: [],
+  },
   userPreferences: null,
+  teamChatMembers: [],
+  teamChatMessages: [],
+  teamChatRoom: {
+    type: "team",
+    recipientUserId: null,
+    title: "Group",
+    meta: "同公司同部门",
+  },
+  teamChatGroup: {
+    company: "6renyou",
+    department: "PD & OPS",
+    roomKey: "",
+    title: "6renyou · PD & OPS",
+  },
+  teamChatLastMessageId: 0,
+  teamChatLocalMessageSeq: 0,
+  teamChatUnreadTotal: 0,
+  teamChatPollTimer: null,
+  teamChatFastPollRemaining: 0,
+  teamChatUnreadTimer: null,
+  teamChatQuotedMessage: null,
+  teamChatOpenMenuId: null,
+  teamChatSending: false,
+  adminOrgUnits: [],
+  orgUnits: [],
 }
 
 const refs = {
@@ -112,6 +149,9 @@ const refs = {
   authSubtitle: document.querySelector("#authSubtitle"),
   authUsernameInput: document.querySelector("#authUsernameInput"),
   authPasswordInput: document.querySelector("#authPasswordInput"),
+  authOrgFields: document.querySelector("#authOrgFields"),
+  authCompanyInput: document.querySelector("#authCompanyInput"),
+  authDepartmentInput: document.querySelector("#authDepartmentInput"),
   authError: document.querySelector("#authError"),
   loginAuthButton: document.querySelector("#loginAuthButton"),
   registerAuthButton: document.querySelector("#registerAuthButton"),
@@ -121,9 +161,18 @@ const refs = {
   passwordResetRequestStatus: document.querySelector("#passwordResetRequestStatus"),
   submitPasswordResetRequestButton: document.querySelector("#submitPasswordResetRequestButton"),
   cancelPasswordResetRequestButton: document.querySelector("#cancelPasswordResetRequestButton"),
+  passwordResetConfirmForm: document.querySelector("#passwordResetConfirmForm"),
+  passwordResetNewPasswordInput: document.querySelector("#passwordResetNewPasswordInput"),
+  passwordResetConfirmPasswordInput: document.querySelector("#passwordResetConfirmPasswordInput"),
+  passwordResetConfirmStatus: document.querySelector("#passwordResetConfirmStatus"),
+  submitPasswordResetConfirmButton: document.querySelector("#submitPasswordResetConfirmButton"),
+  cancelPasswordResetConfirmButton: document.querySelector("#cancelPasswordResetConfirmButton"),
   bugReportButton: document.querySelector("#bugReportButton"),
   changePasswordButton: document.querySelector("#changePasswordButton"),
+  teamChatButton: document.querySelector("#teamChatButton"),
+  teamChatUnreadBadge: document.querySelector("#teamChatUnreadBadge"),
   logoutButton: document.querySelector("#logoutButton"),
+  openProfileButton: document.querySelector("#openProfileButton"),
   currentUsername: document.querySelector("#currentUsername"),
   userAvatar: document.querySelector("#userAvatar"),
   userUsageSummary: document.querySelector("#userUsageSummary"),
@@ -139,6 +188,22 @@ const refs = {
   adminUserError: document.querySelector("#adminUserError"),
   adminUsersList: document.querySelector("#adminUsersList"),
   refreshAdminUsersButton: document.querySelector("#refreshAdminUsersButton"),
+  adminOrgPanel: document.querySelector("#adminOrgPanel"),
+  adminOrgCreateForm: document.querySelector("#adminOrgCreateForm"),
+  adminOrgCompanyInput: document.querySelector("#adminOrgCompanyInput"),
+  adminOrgDepartmentInput: document.querySelector("#adminOrgDepartmentInput"),
+  adminUserOrgForm: document.querySelector("#adminUserOrgForm"),
+  adminOrgUserIdInput: document.querySelector("#adminOrgUserIdInput"),
+  adminOrgUnitSelect: document.querySelector("#adminOrgUnitSelect"),
+  adminOrgReasonInput: document.querySelector("#adminOrgReasonInput"),
+  adminGroupAnnouncementForm: document.querySelector("#adminGroupAnnouncementForm"),
+  adminAnnouncementOrgSelect: document.querySelector("#adminAnnouncementOrgSelect"),
+  adminAnnouncementContentInput: document.querySelector("#adminAnnouncementContentInput"),
+  adminOrgStatus: document.querySelector("#adminOrgStatus"),
+  adminOrgStatsList: document.querySelector("#adminOrgStatsList"),
+  adminOrgUnitsList: document.querySelector("#adminOrgUnitsList"),
+  adminOrgAuditList: document.querySelector("#adminOrgAuditList"),
+  refreshAdminOrgButton: document.querySelector("#refreshAdminOrgButton"),
   adminFeedbackSummary: document.querySelector("#adminFeedbackSummary"),
   adminBugReportsPanel: document.querySelector("#adminBugReportsPanel"),
   refreshFeedbackSummaryButton: document.querySelector("#refreshFeedbackSummaryButton"),
@@ -166,6 +231,12 @@ const refs = {
   sharedResultsList: document.querySelector("#sharedResultsList"),
   sharedResultsEmpty: document.querySelector("#sharedResultsEmpty"),
   refreshSharedResultsButton: document.querySelector("#refreshSharedResultsButton"),
+  galleryList: document.querySelector("#galleryList"),
+  galleryEmpty: document.querySelector("#galleryEmpty"),
+  refreshGalleryButton: document.querySelector("#refreshGalleryButton"),
+  gallerySearchInput: document.querySelector("#gallerySearchInput"),
+  galleryFavoriteOnlyInput: document.querySelector("#galleryFavoriteOnlyInput"),
+  clearGalleryFiltersButton: document.querySelector("#clearGalleryFiltersButton"),
   requestStatus: document.querySelector("#requestStatus"),
   requestBadge: document.querySelector("#requestBadge"),
   generateTab: document.querySelector("#generateTab"),
@@ -201,6 +272,15 @@ const refs = {
   outputCompressionInput: document.querySelector("#outputCompressionInput"),
   moderationSelect: document.querySelector("#moderationSelect"),
   generateSampleCountInput: document.querySelector("#generateSampleCountInput"),
+  creativeBriefPanel: document.querySelector("#creativeBriefPanel"),
+  creativeBriefDestinationInput: document.querySelector("#creativeBriefDestinationInput"),
+  creativeBriefAudienceInput: document.querySelector("#creativeBriefAudienceInput"),
+  creativeBriefChannelInput: document.querySelector("#creativeBriefChannelInput"),
+  creativeBriefMoodInput: document.querySelector("#creativeBriefMoodInput"),
+  creativeBriefMustHaveInput: document.querySelector("#creativeBriefMustHaveInput"),
+  creativeBriefAvoidInput: document.querySelector("#creativeBriefAvoidInput"),
+  applyCreativeBriefButton: document.querySelector("#applyCreativeBriefButton"),
+  askBotCreativeBriefButton: document.querySelector("#askBotCreativeBriefButton"),
   visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
@@ -254,10 +334,10 @@ const refs = {
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
   generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
-  openResultPreviewButton: document.querySelector("#openResultPreviewButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
+  saveGroupAssetButton: document.querySelector("#saveGroupAssetButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
   toastMessage: document.querySelector("#toastMessage"),
@@ -294,6 +374,11 @@ const refs = {
   shareRecipientSearchInput: document.querySelector("#shareRecipientSearchInput"),
   shareResultNoteInput: document.querySelector("#shareResultNoteInput"),
   submitShareResultButton: document.querySelector("#submitShareResultButton"),
+  galleryEditorPanel: document.querySelector("#galleryEditorPanel"),
+  galleryEditorStatus: document.querySelector("#galleryEditorStatus"),
+  galleryFavoriteInput: document.querySelector("#galleryFavoriteInput"),
+  galleryTagsInput: document.querySelector("#galleryTagsInput"),
+  saveGalleryMetaButton: document.querySelector("#saveGalleryMetaButton"),
   changePasswordModal: document.querySelector("#changePasswordModal"),
   changePasswordBackdrop: document.querySelector("#changePasswordBackdrop"),
   changePasswordForm: document.querySelector("#changePasswordForm"),
@@ -302,6 +387,51 @@ const refs = {
   changePasswordStatus: document.querySelector("#changePasswordStatus"),
   submitChangePasswordButton: document.querySelector("#submitChangePasswordButton"),
   closeChangePasswordButton: document.querySelector("#closeChangePasswordButton"),
+  profileModal: document.querySelector("#profileModal"),
+  profileBackdrop: document.querySelector("#profileBackdrop"),
+  profileForm: document.querySelector("#profileForm"),
+  closeProfileButton: document.querySelector("#closeProfileButton"),
+  profileAvatarPreview: document.querySelector("#profileAvatarPreview"),
+  profileAvatarInput: document.querySelector("#profileAvatarInput"),
+  profileUsernameInput: document.querySelector("#profileUsernameInput"),
+  profileDisplayNameInput: document.querySelector("#profileDisplayNameInput"),
+  profileWechatInput: document.querySelector("#profileWechatInput"),
+  profileEmailInput: document.querySelector("#profileEmailInput"),
+  profilePhoneCountryCodeInput: document.querySelector("#profilePhoneCountryCodeInput"),
+  profilePhoneInput: document.querySelector("#profilePhoneInput"),
+  profileCompanyInput: document.querySelector("#profileCompanyInput"),
+  profileDepartmentInput: document.querySelector("#profileDepartmentInput"),
+  profileTeamInput: document.querySelector("#profileTeamInput"),
+  profileJobTitleInput: document.querySelector("#profileJobTitleInput"),
+  profileNoteInput: document.querySelector("#profileNoteInput"),
+  profileCurrentPasswordLabel: document.querySelector("#profileCurrentPasswordLabel"),
+  profileCurrentPasswordInput: document.querySelector("#profileCurrentPasswordInput"),
+  profileStatus: document.querySelector("#profileStatus"),
+  submitProfileButton: document.querySelector("#submitProfileButton"),
+  teamChatModal: document.querySelector("#teamChatModal"),
+  teamChatBackdrop: document.querySelector("#teamChatBackdrop"),
+  closeTeamChatButton: document.querySelector("#closeTeamChatButton"),
+  teamChatMembers: document.querySelector("#teamChatMembers"),
+  teamChatTeamRoomButton: document.querySelector("#teamChatTeamRoomButton"),
+  teamChatTeamRoomName: document.querySelector("#teamChatTeamRoomName"),
+  teamChatTeamRoomMeta: document.querySelector("#teamChatTeamRoomMeta"),
+  teamChatRoomTitle: document.querySelector("#teamChatRoomTitle"),
+  teamChatRoomMeta: document.querySelector("#teamChatRoomMeta"),
+  teamChatGroupContext: document.querySelector("#teamChatGroupContext"),
+  teamChatAnnouncement: document.querySelector("#teamChatAnnouncement"),
+  teamChatGroupStats: document.querySelector("#teamChatGroupStats"),
+  teamChatGroupSummary: document.querySelector("#teamChatGroupSummary"),
+  teamChatGroupAssets: document.querySelector("#teamChatGroupAssets"),
+  teamChatMessages: document.querySelector("#teamChatMessages"),
+  teamChatForm: document.querySelector("#teamChatForm"),
+  teamChatMessageInput: document.querySelector("#teamChatMessageInput"),
+  teamChatQuotePreview: document.querySelector("#teamChatQuotePreview"),
+  teamChatQuoteAuthor: document.querySelector("#teamChatQuoteAuthor"),
+  teamChatQuoteText: document.querySelector("#teamChatQuoteText"),
+  clearTeamChatQuoteButton: document.querySelector("#clearTeamChatQuoteButton"),
+  teamChatStatus: document.querySelector("#teamChatStatus"),
+  refreshTeamChatButton: document.querySelector("#refreshTeamChatButton"),
+  sendTeamChatButton: document.querySelector("#sendTeamChatButton"),
   bugReportModal: document.querySelector("#bugReportModal"),
   bugReportBackdrop: document.querySelector("#bugReportBackdrop"),
   bugReportForm: document.querySelector("#bugReportForm"),
@@ -383,12 +513,13 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   refs.authOverlay?.setAttribute("aria-hidden", "false")
   refs.authForm?.classList.remove("hidden")
   refs.passwordResetRequestForm?.classList.add("hidden")
+  refs.passwordResetConfirmForm?.classList.add("hidden")
   if (refs.authTitle) {
     refs.authTitle.textContent = state.authMode === "register" ? "注册 PicGen" : "登录 PicGen"
   }
   if (refs.authSubtitle) {
     refs.authSubtitle.textContent = state.authMode === "register"
-      ? "填写用户名和密码即可创建账号。之后用同一账号登录。"
+      ? "填写用户名、密码、公司和部门即可创建账号。"
       : "已有账号可直接登录；新用户可以注册后进入图像工作台。"
   }
   if (refs.loginAuthButton) {
@@ -403,12 +534,17 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   if (refs.authPasswordInput) {
     refs.authPasswordInput.autocomplete = state.authMode === "register" ? "new-password" : "current-password"
   }
+  refs.authOrgFields?.classList.toggle("hidden", state.authMode !== "register")
   if (refs.authError) {
     refs.authError.textContent = message
   }
   if (refs.passwordResetRequestStatus) {
     refs.passwordResetRequestStatus.textContent = ""
     refs.passwordResetRequestStatus.classList.remove("is-error")
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
   }
   window.setTimeout(() => refs.authUsernameInput?.focus(), 0)
 }
@@ -423,13 +559,15 @@ function enterAppShell() {
 }
 
 function enterPasswordResetRequest() {
+  state.passwordResetToken = ""
   refs.authForm?.classList.add("hidden")
   refs.passwordResetRequestForm?.classList.remove("hidden")
+  refs.passwordResetConfirmForm?.classList.add("hidden")
   if (refs.authTitle) {
     refs.authTitle.textContent = "找回密码"
   }
   if (refs.authSubtitle) {
-    refs.authSubtitle.textContent = "提交申请后，请联系管理员为你重置密码。"
+    refs.authSubtitle.textContent = "优先发送邮箱重置链接；没有邮箱时管理员会看到申请。"
   }
   if (refs.passwordResetUsernameInput && refs.authUsernameInput) {
     refs.passwordResetUsernameInput.value = refs.authUsernameInput.value.trim()
@@ -448,17 +586,75 @@ function leavePasswordResetRequest() {
   enterAuthGate("login")
 }
 
+function getPasswordResetTokenFromUrl() {
+  try {
+    return new URL(window.location.href).searchParams.get("reset_token")?.trim() || ""
+  } catch {
+    return ""
+  }
+}
+
+function enterPasswordResetConfirm(token) {
+  state.passwordResetToken = token || ""
+  refs.authForm?.classList.add("hidden")
+  refs.passwordResetRequestForm?.classList.add("hidden")
+  refs.passwordResetConfirmForm?.classList.remove("hidden")
+  document.body.classList.add("auth-gate")
+  document.body.classList.remove("app-shell")
+  refs.authOverlay?.setAttribute("aria-hidden", "false")
+  if (refs.authTitle) {
+    refs.authTitle.textContent = "设置新密码"
+  }
+  if (refs.authSubtitle) {
+    refs.authSubtitle.textContent = "请输入新密码完成自助重置。"
+  }
+  if (refs.passwordResetNewPasswordInput) {
+    refs.passwordResetNewPasswordInput.value = ""
+  }
+  if (refs.passwordResetConfirmPasswordInput) {
+    refs.passwordResetConfirmPasswordInput.value = ""
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.passwordResetNewPasswordInput?.focus(), 0)
+}
+
 function setCurrentUser(user) {
   state.currentUser = user || null
+  if (!state.currentUser) {
+    resetTeamChatState()
+  }
   const username = state.currentUser?.username || "未登录"
+  const displayName = state.currentUser?.display_name || username
   const roleLabel = state.currentUser?.is_admin || state.currentUser?.role === "admin" ? "管理员" : "用户"
   if (refs.currentUsername) {
-    refs.currentUsername.textContent = state.currentUser ? `${username} · ${roleLabel}` : username
+    refs.currentUsername.textContent = state.currentUser ? `${displayName} · ${roleLabel}` : username
   }
   if (refs.userAvatar) {
-    refs.userAvatar.textContent = state.currentUser?.username?.slice(0, 1).toUpperCase() || "?"
+    renderAvatarElement(refs.userAvatar, state.currentUser, "user-avatar")
   }
   updateAdminPanelVisibility()
+}
+
+function renderAvatarElement(element, user, imageClassName = "") {
+  if (!element) {
+    return
+  }
+  element.replaceChildren()
+  if (user?.avatar_url) {
+    const image = document.createElement("img")
+    image.src = user.avatar_url
+    image.alt = ""
+    if (imageClassName) {
+      image.className = imageClassName
+    }
+    element.append(image)
+    return
+  }
+  const label = user?.display_name || user?.username || "?"
+  element.textContent = label.slice(0, 1).toUpperCase()
 }
 
 async function checkAuthSession({ showLogin = true } = {}) {
@@ -504,11 +700,13 @@ async function refreshUsageSummary() {
     refs.userUsageSummary.textContent = "用量统计暂时不可用。"
   }
   await refreshAdminUsers()
+  await refreshAdminOrgContext()
   await refreshFeedbackSummary()
   await refreshBugReports()
   await refreshPasswordResetRequests()
   await refreshSharedResults()
   await refreshShareRecipients()
+  await refreshGallery()
 }
 
 function updateAdminPanelVisibility() {
@@ -551,7 +749,8 @@ function renderAdminUsers(users) {
       <article class="admin-user-row">
         <div>
           <strong>${escapeHTML(user.username || "")}</strong>
-          <span>${roleLabel} · ${activeLabel}</span>
+          <span>ID ${Number(user.id || 0)} · ${roleLabel} · ${activeLabel}</span>
+          <span>${escapeHTML(user.company || "未分配")} · ${escapeHTML(user.department || "未分配")}</span>
         </div>
         <div class="admin-user-usage">
           <span>${Number(user.request_count || 0)} 次</span>
@@ -562,6 +761,257 @@ function renderAdminUsers(users) {
       </article>
     `
   }).join("")
+}
+
+function renderAdminOrgUnits(units) {
+  state.adminOrgUnits = Array.isArray(units) ? units : []
+  if (refs.adminOrgUnitSelect) {
+    refs.adminOrgUnitSelect.replaceChildren()
+    state.adminOrgUnits.forEach((unit) => {
+      const option = document.createElement("option")
+      option.value = `${unit.company}\n${unit.department}`
+      option.textContent = `${unit.company} · ${unit.department}`
+      refs.adminOrgUnitSelect.append(option)
+    })
+  }
+  if (refs.adminOrgUnitsList) {
+    if (!state.adminOrgUnits.length) {
+      refs.adminOrgUnitsList.innerHTML = '<p class="admin-empty">暂无组织。</p>'
+    } else {
+      refs.adminOrgUnitsList.innerHTML = state.adminOrgUnits.map((unit) => `
+        <article class="feedback-recent-row">
+          <div>
+            <strong>${escapeHTML(unit.company)} · ${escapeHTML(unit.department)}</strong>
+            <span>${unit.is_active ? "启用" : "停用"} · ${escapeHTML(unit.updated_at || "")}</span>
+          </div>
+        </article>
+      `).join("")
+    }
+  }
+}
+
+function renderOrgUnitSelect(select, units, { includeNewlineValue = false } = {}) {
+  if (!select) {
+    return
+  }
+  const currentValue = select.value
+  select.replaceChildren()
+  const source = Array.isArray(units) && units.length
+    ? units
+    : [{ company: "6renyou", department: "PD & OPS" }]
+  source.forEach((unit) => {
+    const option = document.createElement("option")
+    option.value = includeNewlineValue ? `${unit.company}\n${unit.department}` : unit.company
+    option.dataset.company = unit.company
+    option.dataset.department = unit.department
+    option.textContent = includeNewlineValue ? `${unit.company} · ${unit.department}` : unit.company
+    select.append(option)
+  })
+  if (currentValue && Array.from(select.options).some((option) => option.value === currentValue)) {
+    select.value = currentValue
+  }
+}
+
+function renderDepartmentSelect(select, units, selectedCompany) {
+  if (!select) {
+    return
+  }
+  const currentValue = select.value
+  const departments = (Array.isArray(units) ? units : [])
+    .filter((unit) => unit.company === selectedCompany)
+    .map((unit) => unit.department)
+  const source = departments.length ? departments : ["PD & OPS"]
+  select.replaceChildren()
+  Array.from(new Set(source)).forEach((department) => {
+    const option = document.createElement("option")
+    option.value = department
+    option.textContent = department
+    select.append(option)
+  })
+  if (currentValue && source.includes(currentValue)) {
+    select.value = currentValue
+  }
+}
+
+function renderOrgUnitControls() {
+  renderOrgUnitSelect(refs.authCompanyInput, state.orgUnits)
+  renderDepartmentSelect(refs.authDepartmentInput, state.orgUnits, refs.authCompanyInput?.value || "6renyou")
+  renderOrgUnitSelect(refs.profileCompanyInput, state.orgUnits)
+  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  renderOrgUnitSelect(refs.adminOrgUnitSelect, state.orgUnits, { includeNewlineValue: true })
+  renderOrgUnitSelect(refs.adminAnnouncementOrgSelect, state.orgUnits, { includeNewlineValue: true })
+}
+
+async function refreshOrgUnits() {
+  try {
+    const { response, data } = await fetchJSON("/api/org-units", { cache: "no-store" })
+    if (response.ok && Array.isArray(data.org_units)) {
+      state.orgUnits = data.org_units
+      renderOrgUnitControls()
+    }
+  } catch {
+    renderOrgUnitControls()
+  }
+}
+
+function renderAdminOrgAudit(events) {
+  if (!refs.adminOrgAuditList) {
+    return
+  }
+  const rows = Array.isArray(events) ? events : []
+  if (!rows.length) {
+    refs.adminOrgAuditList.innerHTML = '<p class="admin-empty">暂无组织调整记录。</p>'
+    return
+  }
+  refs.adminOrgAuditList.innerHTML = rows.slice(0, 8).map((event) => `
+    <article class="feedback-recent-row">
+      <div>
+        <strong>${escapeHTML(event.target_username || `用户 ${event.target_user_id}`)}</strong>
+        <span>${escapeHTML(event.actor_username || "系统")} · ${escapeHTML(event.created_at || "")}</span>
+      </div>
+      <p>${escapeHTML(event.old_company || "未分配")} · ${escapeHTML(event.old_department || "未分配")} → ${escapeHTML(event.new_company || "未分配")} · ${escapeHTML(event.new_department || "未分配")}</p>
+      <p>${escapeHTML(event.reason || "未填写原因")}</p>
+    </article>
+  `).join("")
+}
+
+function renderAdminOrgStats(items) {
+  if (!refs.adminOrgStatsList) {
+    return
+  }
+  const rows = Array.isArray(items) ? items : []
+  if (!rows.length) {
+    refs.adminOrgStatsList.innerHTML = '<p class="admin-empty">暂无组织统计。</p>'
+    return
+  }
+  refs.adminOrgStatsList.innerHTML = rows.map((item) => `
+    <article class="feedback-recent-row">
+      <div>
+        <strong>${escapeHTML(item.group?.title || "未命名组织")}</strong>
+        <span>${Number(item.users?.member_count || 0)} 人 · ${Number(item.usage?.generated_image_count || 0)} 张图 · ${Number(item.assets?.asset_count || 0)} 个资产</span>
+      </div>
+      <p>满意 ${Number(item.feedback?.totals?.good || 0)} · 一般 ${Number(item.feedback?.totals?.ok || 0)} · 不好 ${Number(item.feedback?.totals?.bad || 0)}</p>
+    </article>
+  `).join("")
+}
+
+async function refreshAdminOrgContext() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.adminOrgPanel) {
+    return
+  }
+  if (refs.adminOrgStatus) {
+    refs.adminOrgStatus.textContent = ""
+  }
+  try {
+    const [orgResponse, auditResponse, statsResponse] = await Promise.all([
+      fetchJSON("/api/admin/org-units", { cache: "no-store" }),
+      fetchJSON("/api/admin/org-audit", { cache: "no-store" }),
+      fetchJSON("/api/admin/org-stats", { cache: "no-store" }),
+    ])
+    if (orgResponse.response.ok) {
+      renderAdminOrgUnits(orgResponse.data.org_units)
+      state.orgUnits = Array.isArray(orgResponse.data.org_units) ? orgResponse.data.org_units : state.orgUnits
+      renderOrgUnitControls()
+    }
+    if (auditResponse.response.ok) {
+      renderAdminOrgAudit(auditResponse.data.events)
+    }
+    if (statsResponse.response.ok) {
+      renderAdminOrgStats(statsResponse.data.org_stats)
+    }
+  } catch {
+    if (refs.adminOrgStatus) {
+      refs.adminOrgStatus.textContent = "组织信息暂时不可用。"
+    }
+  }
+}
+
+async function submitAdminOrgUnit(event) {
+  event.preventDefault()
+  if (!refs.adminOrgCompanyInput || !refs.adminOrgDepartmentInput) {
+    return
+  }
+  const company = refs.adminOrgCompanyInput.value.trim()
+  const department = refs.adminOrgDepartmentInput.value.trim()
+  if (!company || !department) {
+    refs.adminOrgStatus.textContent = "请填写公司和部门。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/admin/org-units", {
+      method: "POST",
+      body: JSON.stringify({ company, department }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "组织创建失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = "组织已更新。"
+    refs.adminOrgDepartmentInput.value = ""
+    await refreshAdminOrgContext()
+  } catch {
+    refs.adminOrgStatus.textContent = "组织创建失败。"
+  }
+}
+
+async function submitAdminUserOrg(event) {
+  event.preventDefault()
+  const userId = Number(refs.adminOrgUserIdInput?.value || 0)
+  const selected = refs.adminOrgUnitSelect?.value || ""
+  const [company = "", department = ""] = selected.split("\n")
+  if (!userId || !company || !department) {
+    refs.adminOrgStatus.textContent = "请选择用户和组织。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/admin/users/${userId}/org`, {
+      method: "PUT",
+      body: JSON.stringify({
+        company,
+        department,
+        reason: refs.adminOrgReasonInput?.value.trim() || "",
+      }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "组织调整失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = "用户组织已调整。"
+    if (refs.adminOrgReasonInput) {
+      refs.adminOrgReasonInput.value = ""
+    }
+    await Promise.all([refreshAdminOrgContext(), refreshAdminUsers()])
+  } catch {
+    refs.adminOrgStatus.textContent = "组织调整失败。"
+  }
+}
+
+async function submitAdminGroupAnnouncement(event) {
+  event.preventDefault()
+  const selected = refs.adminAnnouncementOrgSelect?.value || ""
+  const [company = "", department = ""] = selected.split("\n")
+  const content = refs.adminAnnouncementContentInput?.value.trim() || ""
+  if (!company || !department) {
+    refs.adminOrgStatus.textContent = "请选择公告组织。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/group-announcement", {
+      method: "PUT",
+      body: JSON.stringify({ company, department, content }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "群公告保存失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = content ? "群公告已保存。" : "群公告已清空。"
+    if (state.teamChatRoom.type === "team") {
+      await refreshTeamChatGroupContext()
+    }
+  } catch {
+    refs.adminOrgStatus.textContent = "群公告保存失败。"
+  }
 }
 
 async function refreshAdminUsers() {
@@ -693,8 +1143,11 @@ function createPasswordResetRequestRow(item) {
 
   const meta = document.createElement("span")
   const timeText = item.created_at ? ` · ${item.created_at}` : ""
+  const emailText = item.email_available
+    ? `邮箱 ${item.email_masked || "已填写"}${item.email_sent_at ? " · 已发邮件" : ""}`
+    : "无邮箱，需管理员兜底"
   meta.textContent = item.matched_user
-    ? `待管理员重置${timeText}`
+    ? `${emailText}${timeText}`
     : `请先核对用户名${timeText}`
 
   header.append(title, meta)
@@ -900,6 +1353,96 @@ function buildFeedbackPayload(rating, reason = "") {
   }
 }
 
+function selectedGeneratedImageId() {
+  const candidate = state.resultCandidates[state.selectedCandidateIndex] || {}
+  return candidate.generated_image_id || state.lastResultImage?.generatedImageId || null
+}
+
+function creativeBriefFields() {
+  return [
+    ["destination", refs.creativeBriefDestinationInput],
+    ["audience", refs.creativeBriefAudienceInput],
+    ["channel", refs.creativeBriefChannelInput],
+    ["mood", refs.creativeBriefMoodInput],
+    ["mustHave", refs.creativeBriefMustHaveInput],
+    ["avoid", refs.creativeBriefAvoidInput],
+  ]
+}
+
+function creativeBriefSnapshot() {
+  return Object.fromEntries(
+    creativeBriefFields().map(([key, input]) => [key, input?.value.trim() || ""])
+  )
+}
+
+function restoreCreativeBrief(snapshot = {}) {
+  creativeBriefFields().forEach(([key, input]) => {
+    if (input) {
+      input.value = snapshot?.[key] || ""
+    }
+  })
+}
+
+function buildCreativeBriefSnippet() {
+  const brief = creativeBriefSnapshot()
+  const lines = [
+    ["目的地/产品", brief.destination],
+    ["目标人群", brief.audience],
+    ["投放渠道", brief.channel],
+    ["气质方向", brief.mood],
+    ["必须保留", brief.mustHave],
+    ["避免出现", brief.avoid],
+  ].filter(([, value]) => value)
+
+  if (!lines.length) {
+    return ""
+  }
+
+  return [
+    "补充创作 brief（只作为辅助上下文，不要抹平原提示词的个性）：",
+    ...lines.map(([label, value]) => `${label}：${value}`),
+  ].join("\n")
+}
+
+function applyCreativeBriefToPrompt() {
+  const snippet = buildCreativeBriefSnippet()
+  if (!snippet) {
+    setStatusMessage("先填写至少一项创意辅助信息。")
+    return
+  }
+  const current = refs.generatePromptInput.value.trimEnd()
+  if (current.includes("补充创作 brief（只作为辅助上下文")) {
+    setStatusMessage("提示词里已经包含创意辅助 brief。")
+    return
+  }
+  refs.generatePromptInput.value = current ? `${current}\n\n${snippet}` : snippet
+  updatePromptCounters()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把创意辅助补充到提示词。")
+  refs.generatePromptInput.focus()
+}
+
+async function askBotWithCreativeBrief() {
+  const basePrompt = refs.generatePromptInput.value.trim()
+  const snippet = buildCreativeBriefSnippet()
+  if (!basePrompt && !snippet) {
+    setStatusMessage("先写提示词，或填写一点创意辅助信息。")
+    return
+  }
+  await openTeamChatModal()
+  const message = [
+    "@GPT-BOT 请从高端旅行视觉质量角度帮我审一下这次生图需求。",
+    "请给出：1）是否足够高级；2）构图/光影/质感建议；3）可直接追加到提示词的 3-5 条短句。",
+    "注意：不要把我的原提示词改成统一模板，只把可选 brief 作为补充上下文。",
+    basePrompt ? `\n原提示词：\n${basePrompt}` : "",
+    snippet ? `\n${snippet}` : "",
+  ].filter(Boolean).join("\n")
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.value = message.slice(0, TEAM_CHAT_MAX_MESSAGE_LENGTH)
+    refs.teamChatMessageInput.focus()
+  }
+}
+
 function serverShareableImageUrl(candidate = {}) {
   const candidates = [
     candidate.saved_image_url,
@@ -908,6 +1451,39 @@ function serverShareableImageUrl(candidate = {}) {
     state.resultPreview?.src,
   ]
   return candidates.find((value) => value && !String(value).startsWith("data:")) || ""
+}
+
+async function saveCurrentResultToGroupAssets() {
+  const generatedImageId = selectedGeneratedImageId()
+  if (!generatedImageId) {
+    setStatusMessage("这张图还没有服务端记录，暂时不能存入 Group。")
+    return
+  }
+  if (refs.saveGroupAssetButton) {
+    refs.saveGroupAssetButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/group-assets", {
+      method: "POST",
+      body: JSON.stringify({
+        generated_image_id: generatedImageId,
+        title: state.lastResultPrompt ? state.lastResultPrompt.slice(0, 80) : "优秀作品",
+        note: "用户手动存入 Group 优秀资产",
+      }),
+    })
+    if (!response.ok) {
+      setStatusMessage(data.error || "存入 Group 失败。")
+      return
+    }
+    setStatusMessage("已存入 Group 优秀资产。")
+    await Promise.all([refreshTeamChatGroupContext(), refreshAdminOrgContext()])
+  } catch {
+    setStatusMessage("存入 Group 失败。")
+  } finally {
+    if (refs.saveGroupAssetButton) {
+      refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
+    }
+  }
 }
 
 function setFeedbackStatus(text) {
@@ -1143,10 +1719,222 @@ function openSharedResult(shareId) {
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
   refs.shareResultPanel?.classList.add("hidden")
+  setGalleryEditorMeta(null)
   renderResultCandidates()
   updatePreviewAvailability()
   scheduleWorkspacePersist()
   document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function galleryItemToAsset(item) {
+  if (!item?.saved_image_url) {
+    return null
+  }
+  return {
+    dataUrl: "",
+    file: null,
+    name: item.saved_image_name || `gallery-${item.id || Date.now()}.png`,
+    type: item.saved_image_mime || "image/png",
+    size: Number(item.saved_image_bytes || 0),
+    width: item.saved_image_width || null,
+    height: item.saved_image_height || null,
+    savedUrl: item.saved_image_url || "",
+    savedPath: item.saved_image_path || "",
+    fileUrl: item.saved_image_url || "",
+    src: item.saved_image_url || "",
+    generatedImageId: item.generated_image_id || item.id || null,
+    origin: "gallery",
+    description: `作品库 · ${item.username || "我的作品"}`,
+    logoOverlayApplied: Boolean(item.logo_overlay_applied),
+  }
+}
+
+function galleryTagsText(tags) {
+  return Array.isArray(tags) ? tags.filter(Boolean).join(", ") : ""
+}
+
+function setGalleryEditorMeta(item) {
+  const generatedImageId = item?.generated_image_id || item?.id || null
+  const isFavorite = Boolean(item?.is_favorite)
+  const tags = Array.isArray(item?.tags) ? item.tags : []
+  state.currentGalleryMeta = { generatedImageId, isFavorite, tags }
+  refs.galleryEditorPanel?.classList.toggle("hidden", !generatedImageId)
+  if (refs.galleryFavoriteInput) {
+    refs.galleryFavoriteInput.checked = isFavorite
+  }
+  if (refs.galleryTagsInput) {
+    refs.galleryTagsInput.value = galleryTagsText(tags)
+  }
+  if (refs.galleryEditorStatus) {
+    refs.galleryEditorStatus.textContent = isFavorite ? "已收藏" : "未收藏"
+  }
+}
+
+function renderGalleryItems(items = state.galleryItems) {
+  state.galleryItems = Array.isArray(items) ? items : []
+  if (!refs.galleryList || !refs.galleryEmpty) {
+    return
+  }
+  refs.galleryList.replaceChildren()
+  refs.galleryEmpty.classList.toggle("hidden", state.galleryItems.length > 0)
+  state.galleryItems.slice(0, 30).forEach((item) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "gallery-item"
+    button.dataset.galleryId = String(item.id || item.generated_image_id || "")
+
+    const image = document.createElement("img")
+    image.alt = ""
+    image.src = item.saved_image_url || ""
+
+    const copy = document.createElement("span")
+    copy.className = "gallery-item-copy"
+
+    const top = document.createElement("span")
+    top.className = "gallery-item-top"
+    const title = document.createElement("strong")
+    title.textContent = item.is_favorite ? "★ 收藏作品" : "作品"
+    const time = document.createElement("time")
+    time.textContent = formatTimestamp(item.created_at)
+    top.append(title, time)
+
+    const prompt = document.createElement("span")
+    prompt.className = "gallery-item-prompt"
+    prompt.textContent = item.prompt || "未记录提示词"
+
+    const meta = document.createElement("span")
+    meta.className = "gallery-item-meta"
+    const metaParts = [item.mode || "生成", item.model || "", item.logo_overlay_applied ? "LOGO" : ""]
+    meta.textContent = metaParts.filter(Boolean).join(" · ")
+
+    const tags = document.createElement("span")
+    tags.className = "gallery-item-tags"
+    tags.textContent = galleryTagsText(item.tags)
+
+    copy.append(top, prompt, meta)
+    if (tags.textContent) {
+      copy.append(tags)
+    }
+    button.append(image, copy)
+    button.addEventListener("click", () => openGalleryItem(item.id || item.generated_image_id))
+    refs.galleryList.appendChild(button)
+  })
+}
+
+async function refreshGallery() {
+  if (!state.currentUser || !refs.galleryList) {
+    return
+  }
+  const params = new URLSearchParams()
+  const query = refs.gallerySearchInput?.value.trim() || state.gallerySearch || ""
+  const favoriteOnly = Boolean(refs.galleryFavoriteOnlyInput?.checked || state.galleryFavoriteOnly)
+  state.gallerySearch = query
+  state.galleryFavoriteOnly = favoriteOnly
+  if (query) {
+    params.set("q", query)
+  }
+  if (favoriteOnly) {
+    params.set("favorite", "1")
+  }
+  const url = params.toString() ? `/api/gallery?${params}` : "/api/gallery"
+  try {
+    const { response, data } = await fetchJSON(url, { cache: "no-store" })
+    if (response.ok) {
+      renderGalleryItems(data.items)
+      return
+    }
+  } catch {
+    // handled below
+  }
+  refs.galleryList.innerHTML = '<p class="empty-history">作品库暂时不可用。</p>'
+  refs.galleryEmpty?.classList.add("hidden")
+}
+
+function openGalleryItem(galleryId) {
+  const item = state.galleryItems.find((entry) => Number(entry.id || entry.generated_image_id) === Number(galleryId))
+  const asset = galleryItemToAsset(item)
+  if (!item || !asset) {
+    setError("这条作品没有可打开的图片。")
+    return
+  }
+  state.resultCandidates = [{
+    saved_image_url: item.saved_image_url || "",
+    saved_image_path: item.saved_image_path || "",
+    saved_image_name: item.saved_image_name || asset.name,
+    generated_image_id: item.generated_image_id || item.id || null,
+    image_url: item.saved_image_url || "",
+    logo_overlay_applied: Boolean(item.logo_overlay_applied),
+    asset,
+  }]
+  state.selectedCandidateIndex = 0
+  state.lastResultPrompt = item.prompt || ""
+  state.lastResultModel = item.model || ""
+  state.lastResultMode = item.mode || "gallery"
+  state.lastResultImage = cloneImageAsset(asset)
+  state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
+  refs.resultPreviewLabel.textContent = "作品库"
+  refs.resultImage.src = state.resultPreview.src
+  refs.resultImage.classList.add("visible")
+  refs.resultPreviewEmpty.classList.add("hidden")
+  refs.resultPrompt.textContent = state.lastResultPrompt || "未记录提示词"
+  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", item.username || ""].filter(Boolean).join(" · ")
+  refs.resultTiming.textContent = ""
+  refs.resultStorage.textContent = item.saved_image_path ? `已落盘到 ${item.saved_image_path}` : ""
+  setDownloadAvailable(state.resultPreview.src, asset.name)
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
+  refs.shareResultPanel?.classList.add("hidden")
+  setGalleryEditorMeta(item)
+  renderResultCandidates()
+  updateFeedbackPanelVisibility()
+  updatePreviewAvailability()
+  scheduleWorkspacePersist()
+  document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function parseGalleryTagsInput() {
+  const raw = refs.galleryTagsInput?.value || ""
+  return raw
+    .split(/[,，]/)
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+async function saveGalleryMeta() {
+  const generatedImageId = state.currentGalleryMeta.generatedImageId
+  if (!generatedImageId) {
+    setStatusMessage("请先打开一张自己的作品。")
+    return
+  }
+  const payload = {
+    is_favorite: Boolean(refs.galleryFavoriteInput?.checked),
+    tags: parseGalleryTagsInput(),
+  }
+  if (refs.saveGalleryMetaButton) {
+    refs.saveGalleryMetaButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/gallery/${generatedImageId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      setError(data.error || "作品整理保存失败")
+      return
+    }
+    setGalleryEditorMeta(data.item)
+    state.galleryItems = state.galleryItems.map((item) => (
+      Number(item.id || item.generated_image_id) === Number(generatedImageId) ? data.item : item
+    ))
+    renderGalleryItems()
+    setStatusMessage("作品整理已保存。")
+  } catch {
+    setError("作品整理保存时网络连接错误")
+  } finally {
+    if (refs.saveGalleryMetaButton) {
+      refs.saveGalleryMetaButton.disabled = false
+    }
+  }
 }
 
 function openBugReportModal() {
@@ -1181,6 +1969,961 @@ function closeChangePasswordModal() {
   refs.changePasswordModal?.classList.add("hidden")
   refs.changePasswordModal?.setAttribute("aria-hidden", "true")
   document.body.classList.remove("modal-open")
+}
+
+function fillProfileForm() {
+  const user = state.currentUser || {}
+  renderOrgUnitControls()
+  if (refs.profileUsernameInput) {
+    refs.profileUsernameInput.value = user.username || ""
+  }
+  if (refs.profileDisplayNameInput) {
+    refs.profileDisplayNameInput.value = user.display_name || ""
+  }
+  if (refs.profileWechatInput) {
+    refs.profileWechatInput.value = user.wechat || ""
+  }
+  if (refs.profileEmailInput) {
+    refs.profileEmailInput.value = user.email || ""
+  }
+  if (refs.profilePhoneCountryCodeInput) {
+    refs.profilePhoneCountryCodeInput.value = user.phone_country_code || "+86"
+  }
+  if (refs.profilePhoneInput) {
+    refs.profilePhoneInput.value = user.phone || ""
+  }
+  if (refs.profileCompanyInput) {
+    refs.profileCompanyInput.value = user.company || "6renyou"
+  }
+  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  if (refs.profileDepartmentInput) {
+    refs.profileDepartmentInput.value = user.department || "PD & OPS"
+  }
+  if (refs.profileTeamInput) {
+    refs.profileTeamInput.value = user.team || ""
+  }
+  if (refs.profileJobTitleInput) {
+    refs.profileJobTitleInput.value = user.job_title || ""
+  }
+  if (refs.profileNoteInput) {
+    refs.profileNoteInput.value = user.note || ""
+  }
+  if (refs.profileCurrentPasswordInput) {
+    refs.profileCurrentPasswordInput.value = ""
+  }
+  renderAvatarElement(refs.profileAvatarPreview, user, "profile-avatar-image")
+  updateProfileUsernamePasswordHint()
+}
+
+function updateProfileUsernamePasswordHint() {
+  const currentUsername = state.currentUser?.username || ""
+  const nextUsername = refs.profileUsernameInput?.value.trim() || ""
+  const changed = Boolean(nextUsername && currentUsername && nextUsername !== currentUsername)
+  refs.profileCurrentPasswordLabel?.classList.toggle("hidden", !changed)
+  if (!changed && refs.profileCurrentPasswordInput) {
+    refs.profileCurrentPasswordInput.value = ""
+  }
+}
+
+function openProfileModal() {
+  if (!state.currentUser) {
+    return
+  }
+  refs.profileModal?.classList.remove("hidden")
+  refs.profileModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  fillProfileForm()
+  if (refs.profileStatus) {
+    refs.profileStatus.textContent = ""
+    refs.profileStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.profileDisplayNameInput?.focus(), 0)
+}
+
+function closeProfileModal() {
+  refs.profileModal?.classList.add("hidden")
+  refs.profileModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open")
+}
+
+async function submitProfile(event) {
+  event.preventDefault()
+  const username = refs.profileUsernameInput?.value.trim() || ""
+  const currentPassword = refs.profileCurrentPasswordInput?.value || ""
+  if (!username) {
+    refs.profileStatus.textContent = "请填写登录用户名。"
+    refs.profileStatus.classList.add("is-error")
+    return
+  }
+  if ((state.currentUser?.username || "") !== username && !currentPassword) {
+    refs.profileStatus.textContent = "修改登录用户名需要填写当前密码。"
+    refs.profileStatus.classList.add("is-error")
+    return
+  }
+  if (refs.submitProfileButton) {
+    refs.submitProfileButton.disabled = true
+  }
+  refs.profileStatus.textContent = "保存中"
+  refs.profileStatus.classList.remove("is-error")
+  try {
+    const { response, data } = await fetchJSON("/api/me/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        username,
+        current_password: currentPassword,
+        display_name: refs.profileDisplayNameInput?.value.trim() || "",
+        wechat: refs.profileWechatInput?.value.trim() || "",
+        email: refs.profileEmailInput?.value.trim() || "",
+        phone_country_code: refs.profilePhoneCountryCodeInput?.value || "+86",
+        phone: refs.profilePhoneInput?.value.trim() || "",
+        company: refs.profileCompanyInput?.value || "6renyou",
+        department: refs.profileDepartmentInput?.value || "PD & OPS",
+        team: refs.profileTeamInput?.value.trim() || "",
+        job_title: refs.profileJobTitleInput?.value.trim() || "",
+        note: refs.profileNoteInput?.value.trim() || "",
+      }),
+    })
+    if (!response.ok) {
+      refs.profileStatus.textContent = data.error || "资料保存失败"
+      refs.profileStatus.classList.add("is-error")
+      return
+    }
+    setCurrentUser(data.user || state.currentUser)
+    fillProfileForm()
+    refs.profileStatus.textContent = "资料已保存。"
+    refs.profileStatus.classList.remove("is-error")
+    setStatusMessage("个人资料已保存。")
+  } catch {
+    refs.profileStatus.textContent = "网络连接错误"
+    refs.profileStatus.classList.add("is-error")
+  } finally {
+    if (refs.submitProfileButton) {
+      refs.submitProfileButton.disabled = false
+    }
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ""))
+    reader.onerror = () => reject(reader.error || new Error("读取文件失败"))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function uploadProfileAvatar() {
+  const file = refs.profileAvatarInput?.files?.[0]
+  if (!file) {
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    refs.profileStatus.textContent = "头像文件不能超过 2 MB。"
+    refs.profileStatus.classList.add("is-error")
+    refs.profileAvatarInput.value = ""
+    return
+  }
+  refs.profileStatus.textContent = "上传头像中"
+  refs.profileStatus.classList.remove("is-error")
+  try {
+    const dataUrl = await readFileAsDataUrl(file)
+    const { response, data } = await fetchJSON("/api/me/avatar", {
+      method: "POST",
+      body: JSON.stringify({
+        image: {
+          name: file.name,
+          type: file.type,
+          data_url: dataUrl,
+        },
+      }),
+    })
+    if (!response.ok) {
+      refs.profileStatus.textContent = data.error || "头像上传失败"
+      refs.profileStatus.classList.add("is-error")
+      return
+    }
+    setCurrentUser(data.user || state.currentUser)
+    renderAvatarElement(refs.profileAvatarPreview, state.currentUser, "profile-avatar-image")
+    refs.profileStatus.textContent = "头像已更新。"
+    refs.profileStatus.classList.remove("is-error")
+  } catch {
+    refs.profileStatus.textContent = "头像上传失败"
+    refs.profileStatus.classList.add("is-error")
+  } finally {
+    refs.profileAvatarInput.value = ""
+  }
+}
+
+function teamChatRoomParams(room = state.teamChatRoom) {
+  const params = new URLSearchParams({ room_type: room.type || "team" })
+  if (room.recipientUserId) {
+    params.set("recipient_user_id", String(room.recipientUserId))
+  }
+  return params
+}
+
+function teamChatReadPayload(room = state.teamChatRoom, messageId = state.teamChatLastMessageId) {
+  return {
+    room_type: room.type || "team",
+    recipient_user_id: room.recipientUserId || null,
+    message_id: Number(messageId || 0),
+  }
+}
+
+function teamChatSendPayload(content) {
+  return {
+    room_type: state.teamChatRoom.type || "team",
+    recipient_user_id: state.teamChatRoom.recipientUserId || null,
+    content,
+  }
+}
+
+function teamChatDisplayName(member) {
+  return member?.display_name || member?.username || "用户"
+}
+
+function teamChatAvatarLabel(member) {
+  return teamChatDisplayName(member).slice(0, 1).toUpperCase() || "?"
+}
+
+function normalizeTeamChatGroup(group = {}) {
+  const company = group.company || "6renyou"
+  const department = group.department || "PD & OPS"
+  return {
+    company,
+    department,
+    roomKey: group.room_key || "",
+    title: group.title || `${company} · ${department}`,
+  }
+}
+
+function updateTeamChatUnreadBadge(total = state.teamChatUnreadTotal) {
+  state.teamChatUnreadTotal = Number(total || 0)
+  const hasUnread = state.teamChatUnreadTotal > 0
+  refs.teamChatButton?.classList.toggle("has-unread", hasUnread)
+  refs.teamChatUnreadBadge?.classList.toggle("hidden", !hasUnread)
+  if (refs.teamChatUnreadBadge) {
+    refs.teamChatUnreadBadge.textContent = String(Math.min(state.teamChatUnreadTotal, 99))
+  }
+}
+
+function resetTeamChatState() {
+  stopTeamChatPolling()
+  state.teamChatMembers = []
+  state.teamChatMessages = []
+  state.teamChatRoom = {
+    type: "team",
+    recipientUserId: null,
+    title: "Group",
+    meta: "同公司同部门",
+  }
+  state.teamChatLastMessageId = 0
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  updateTeamChatUnreadBadge(0)
+  refs.teamChatModal?.classList.add("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("chat-open")
+}
+
+function renderTeamChatMemberAvatar(container, member) {
+  container.replaceChildren()
+  if (member?.avatar_url) {
+    const image = document.createElement("img")
+    image.src = member.avatar_url
+    image.alt = ""
+    container.append(image)
+    return
+  }
+  container.textContent = teamChatAvatarLabel(member)
+}
+
+function renderTeamChatMembers() {
+  if (!refs.teamChatMembers) {
+    return
+  }
+  if (refs.teamChatTeamRoomName) {
+    refs.teamChatTeamRoomName.textContent = "Group"
+  }
+  if (refs.teamChatTeamRoomMeta) {
+    refs.teamChatTeamRoomMeta.textContent = state.teamChatGroup.title || "同公司同部门"
+  }
+  refs.teamChatTeamRoomButton?.classList.toggle("active", state.teamChatRoom.type === "team")
+  refs.teamChatMembers.replaceChildren()
+  state.teamChatMembers.forEach((member) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "team-chat-member"
+    const isBot = member.type === "bot"
+    const memberId = isBot ? "gpt-bot" : Number(member.id || 0)
+    const active = isBot
+      ? state.teamChatRoom.type === "bot"
+      : state.teamChatRoom.type === "dm" && Number(state.teamChatRoom.recipientUserId) === memberId
+    button.classList.toggle("active", active)
+    button.dataset.memberType = member.type || "user"
+    button.dataset.memberId = String(memberId)
+    const avatar = document.createElement("span")
+    avatar.className = isBot ? "team-chat-avatar bot" : "team-chat-avatar"
+    renderTeamChatMemberAvatar(avatar, member)
+    const copy = document.createElement("span")
+    const name = document.createElement("strong")
+    name.textContent = teamChatDisplayName(member)
+    const subtitle = document.createElement("small")
+    subtitle.textContent = isBot ? "AI Chat" : `@${member.username || ""}`
+    copy.append(name, subtitle)
+    button.append(avatar, copy)
+    button.addEventListener("click", () => {
+      if (isBot) {
+        void switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "和 AI 单独聊。" })
+        return
+      }
+      void switchTeamChatRoom({
+        type: "dm",
+        recipientUserId: memberId,
+        title: teamChatDisplayName(member),
+        meta: `私聊 @${member.username || teamChatDisplayName(member)}`,
+      })
+    })
+    refs.teamChatMembers.append(button)
+  })
+}
+
+function renderTeamChatAnnouncement(announcement) {
+  if (!refs.teamChatAnnouncement) {
+    return
+  }
+  const content = announcement?.content || ""
+  refs.teamChatAnnouncement.classList.toggle("hidden", !content)
+  refs.teamChatAnnouncement.textContent = content ? `公告：${content}` : ""
+}
+
+function renderTeamChatGroupStats(stats) {
+  if (!refs.teamChatGroupStats) {
+    return
+  }
+  if (!stats) {
+    refs.teamChatGroupStats.innerHTML = '<p>统计暂时不可用。</p>'
+    return
+  }
+  refs.teamChatGroupStats.innerHTML = `
+    <h4>Group 统计</h4>
+    <p>${Number(stats.users?.member_count || 0)} 位成员 · ${Number(stats.usage?.generated_image_count || 0)} 张图 · ${Number(stats.assets?.asset_count || 0)} 个优秀资产</p>
+    <p>满意 ${Number(stats.feedback?.totals?.good || 0)} · 一般 ${Number(stats.feedback?.totals?.ok || 0)} · 不好 ${Number(stats.feedback?.totals?.bad || 0)}</p>
+  `
+}
+
+function renderTeamChatGroupSummary(summary) {
+  if (!refs.teamChatGroupSummary) {
+    return
+  }
+  const text = summary?.text || "暂无周报。"
+  refs.teamChatGroupSummary.innerHTML = `
+    <h4>Group 周报</h4>
+    <p>${escapeHTML(text)}</p>
+  `
+}
+
+function renderTeamChatGroupAssets(assets) {
+  if (!refs.teamChatGroupAssets) {
+    return
+  }
+  const rows = Array.isArray(assets) ? assets.slice(0, 4) : []
+  if (!rows.length) {
+    refs.teamChatGroupAssets.innerHTML = '<h4>优秀资产</h4><p>满意作品会自动沉淀到这里，仅作可选参考，不会强制融入新提示词。</p>'
+    return
+  }
+  refs.teamChatGroupAssets.innerHTML = `
+    <h4>优秀资产</h4>
+    <div class="team-chat-asset-list">
+      ${rows.map((asset, index) => `
+        <article class="team-chat-asset-card" data-asset-index="${index}">
+          ${asset.saved_image_url ? `<img src="${escapeHTML(asset.saved_image_url)}" alt="">` : ""}
+          <div>
+            <strong>${escapeHTML(asset.title || "满意作品")}</strong>
+            <p>${escapeHTML(asset.prompt || "未记录提示词")}</p>
+            <span>${escapeHTML(asset.username || "")}</span>
+            <button class="text-button team-chat-use-asset-button" type="button" data-asset-index="${index}">作为参考</button>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `
+  refs.teamChatGroupAssets.querySelectorAll(".team-chat-use-asset-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const asset = rows[Number(button.dataset.assetIndex || 0)]
+      useGroupAssetAsReference(asset)
+    })
+  })
+}
+
+function useGroupAssetAsReference(asset) {
+  if (!asset) {
+    return
+  }
+  setMode("generate", { autoLoadLatest: false })
+  setGenerateIntent("fresh")
+  if (asset.prompt && !refs.generatePromptInput.value.trim()) {
+    refs.generatePromptInput.value = asset.prompt
+  }
+  if (asset.saved_image_url) {
+    const description = `Group 优秀资产 · 仅作可选参考 · ${asset.title || "满意作品"}`
+    state.generateReferenceImage = null
+    state.materialReferenceImage = null
+    state.styleReferenceImage = {
+      dataUrl: asset.saved_image_url,
+      file: null,
+      name: asset.title || "group-asset.png",
+      type: "image/png",
+      size: 0,
+      description,
+      savedUrl: asset.saved_image_url,
+      savedPath: asset.saved_image_path || "",
+      origin: "group-asset",
+    }
+    updateGenerateReferenceUI()
+  }
+  updatePromptCounters()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把 Group 优秀资产作为可选参考。")
+  closeTeamChatModal()
+  refs.generatePromptInput.focus()
+}
+
+async function refreshTeamChatGroupContext() {
+  refs.teamChatGroupContext?.classList.toggle("hidden", state.teamChatRoom.type !== "team")
+  if (!state.currentUser || !refs.teamChatGroupContext || state.teamChatRoom.type !== "team") {
+    renderTeamChatAnnouncement(null)
+    return
+  }
+  try {
+    const [announcementResponse, statsResponse, summaryResponse, assetsResponse] = await Promise.all([
+      fetchJSON("/api/team-chat/group-announcement", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-stats", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-summary?days=7", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-assets", { cache: "no-store" }),
+    ])
+    renderTeamChatAnnouncement(
+      announcementResponse.response.ok ? announcementResponse.data.announcement : null
+    )
+    renderTeamChatGroupStats(statsResponse.response.ok ? statsResponse.data.stats : null)
+    renderTeamChatGroupSummary(summaryResponse.response.ok ? summaryResponse.data.summary : null)
+    renderTeamChatGroupAssets(assetsResponse.response.ok ? assetsResponse.data.assets : [])
+  } catch {
+    renderTeamChatAnnouncement(null)
+    renderTeamChatGroupStats(null)
+    renderTeamChatGroupSummary(null)
+    renderTeamChatGroupAssets([])
+  }
+}
+
+function updateTeamChatLastMessageId() {
+  state.teamChatLastMessageId = state.teamChatMessages.reduce((latest, message) => {
+    return Math.max(latest, Number(message.id || 0))
+  }, 0)
+}
+
+function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) {
+  const source = replace ? [] : state.teamChatMessages
+  const byId = new Map()
+  const byClientId = new Map()
+  source.forEach((message) => {
+    const messageId = Number(message.id || 0)
+    if (messageId > 0) {
+      byId.set(messageId, message)
+    } else if (message.client_id) {
+      byClientId.set(message.client_id, message)
+    }
+  })
+  incomingMessages.forEach((message) => {
+    const messageId = Number(message.id || 0)
+    if (messageId > 0) {
+      if (message.client_id) {
+        byClientId.delete(message.client_id)
+      }
+      byId.set(messageId, message)
+    } else if (message.client_id) {
+      byClientId.set(message.client_id, message)
+    }
+  })
+  state.teamChatMessages = [...Array.from(byId.values()), ...Array.from(byClientId.values())].sort((left, right) => {
+    const leftId = Number(left.id || 0)
+    const rightId = Number(right.id || 0)
+    if (leftId > 0 && rightId > 0) {
+      return leftId - rightId
+    }
+    return String(left.created_at || "").localeCompare(String(right.created_at || ""))
+  })
+  updateTeamChatLastMessageId()
+}
+
+function renderTeamChatMessages({ scrollToBottom = true } = {}) {
+  if (!refs.teamChatMessages) {
+    return
+  }
+  refs.teamChatMessages.replaceChildren()
+  if (!state.teamChatMessages.length) {
+    const empty = document.createElement("p")
+    empty.className = "team-chat-empty"
+    empty.textContent = "还没有消息。"
+    refs.teamChatMessages.append(empty)
+    return
+  }
+  state.teamChatMessages.forEach((message) => {
+    const item = document.createElement("article")
+    item.className = "team-chat-message"
+    item.classList.toggle("mine", Number(message.sender_user_id || 0) === Number(state.currentUser?.id || 0))
+    item.classList.toggle("bot", message.sender_type === "bot")
+    item.classList.toggle("pending", Boolean(message.pending))
+    const meta = document.createElement("div")
+    meta.className = "team-chat-message-meta"
+    const sender = document.createElement("strong")
+    sender.textContent = message.sender_name || (message.sender_type === "bot" ? "GPT-BOT" : "用户")
+    const time = document.createElement("span")
+    time.textContent = formatTeamChatTime(message.created_at)
+    meta.append(sender, time)
+    const body = document.createElement("div")
+    body.className = "team-chat-message-body"
+    const bubble = document.createElement("p")
+    bubble.textContent = message.content || ""
+    const actions = document.createElement("div")
+    actions.className = "team-chat-message-actions"
+    const moreButton = document.createElement("button")
+    moreButton.className = "team-chat-message-more"
+    moreButton.type = "button"
+    moreButton.setAttribute("aria-haspopup", "menu")
+    moreButton.setAttribute("aria-expanded", String(String(state.teamChatOpenMenuId) === String(message.id)))
+    moreButton.setAttribute("aria-label", "更多操作")
+    moreButton.textContent = "⋯"
+    moreButton.addEventListener("click", (event) => {
+      event.stopPropagation()
+      openTeamChatMessageMenu(message.id)
+    })
+    actions.append(moreButton)
+    if (String(state.teamChatOpenMenuId) === String(message.id)) {
+      actions.append(createTeamChatMessageMenu(message))
+    }
+    body.append(bubble, actions)
+    item.append(meta, body)
+    refs.teamChatMessages.append(item)
+  })
+  if (scrollToBottom) {
+    refs.teamChatMessages.scrollTop = refs.teamChatMessages.scrollHeight
+  }
+}
+
+function createOptimisticTeamChatMessage(content) {
+  const displayName = state.currentUser?.display_name || state.currentUser?.username || "我"
+  state.teamChatLocalMessageSeq += 1
+  return {
+    id: -state.teamChatLocalMessageSeq,
+    client_id: `local-${Date.now()}-${state.teamChatLocalMessageSeq}`,
+    room_key: currentTeamChatRoomKey(),
+    room_type: state.teamChatRoom.type,
+    sender_user_id: state.currentUser?.id || 0,
+    sender_type: "user",
+    sender_name: displayName,
+    content,
+    mentions: [],
+    created_at: new Date().toISOString(),
+    pending: true,
+  }
+}
+
+function replaceOptimisticTeamChatMessage(clientId, serverMessages = []) {
+  if (!clientId) {
+    mergeTeamChatMessages(serverMessages)
+    return
+  }
+  const withoutPending = state.teamChatMessages.filter((message) => message.client_id !== clientId)
+  state.teamChatMessages = withoutPending
+  mergeTeamChatMessages(serverMessages.map((message) => ({ ...message, client_id: clientId })))
+}
+
+function currentTeamChatRoomKey() {
+  if (state.teamChatRoom.type === "team") {
+    return state.teamChatGroup.roomKey || ""
+  }
+  if (state.teamChatRoom.type === "bot") {
+    return `bot:${state.currentUser?.id || 0}`
+  }
+  const currentUserId = Number(state.currentUser?.id || 0)
+  const recipientId = Number(state.teamChatRoom.recipientUserId || 0)
+  const [low, high] = [currentUserId, recipientId].sort((left, right) => left - right)
+  return low && high ? `dm:${low}:${high}` : ""
+}
+
+function scheduleTeamChatFastPolling() {
+  state.teamChatFastPollRemaining = TEAM_CHAT_FAST_POLL_LIMIT
+}
+
+function getTeamChatMessageById(messageId) {
+  return state.teamChatMessages.find((message) => String(message.id) === String(messageId)) || null
+}
+
+function createTeamChatMessageMenu(message) {
+  const menu = document.createElement("div")
+  menu.className = "team-chat-message-menu"
+  menu.setAttribute("role", "menu")
+  const actions = [
+    ["copy", "复制", () => copyTeamChatMessage(message)],
+    ["quote", "引用", () => quoteTeamChatMessage(message)],
+    ["recall", "撤回", jokeRecallTeamChatMessage],
+  ]
+  actions.forEach(([action, label, handler]) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.setAttribute("role", "menuitem")
+    button.dataset.action = action
+    button.textContent = label
+    button.addEventListener("click", (event) => {
+      event.stopPropagation()
+      closeTeamChatMessageMenu()
+      handler()
+    })
+    menu.append(button)
+  })
+  return menu
+}
+
+function openTeamChatMessageMenu(messageId) {
+  if (!getTeamChatMessageById(messageId)) {
+    return
+  }
+  state.teamChatOpenMenuId = String(state.teamChatOpenMenuId) === String(messageId) ? null : messageId
+  renderTeamChatMessages({ scrollToBottom: false })
+}
+
+function closeTeamChatMessageMenu() {
+  if (!state.teamChatOpenMenuId) {
+    return
+  }
+  state.teamChatOpenMenuId = null
+  renderTeamChatMessages({ scrollToBottom: false })
+}
+
+async function copyTeamChatMessage(message) {
+  const content = message?.content || ""
+  if (!content) {
+    setStatusMessage("这条消息没有可复制的内容。")
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(content)
+    setStatusMessage("消息已复制。")
+  } catch {
+    setTeamChatStatus("浏览器不允许复制到剪贴板。", true)
+  }
+}
+
+function summarizeTeamChatQuote(message) {
+  const text = String(message?.content || "").replace(/\s+/g, " ").trim()
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text
+}
+
+function quoteTeamChatMessage(message) {
+  if (!message) {
+    return
+  }
+  state.teamChatQuotedMessage = {
+    id: message.id,
+    senderName: message.sender_name || (message.sender_type === "bot" ? "GPT-BOT" : "用户"),
+    content: summarizeTeamChatQuote(message),
+  }
+  renderTeamChatQuotePreview()
+  setStatusMessage("已引用这条消息。")
+  refs.teamChatMessageInput?.focus()
+}
+
+function clearTeamChatQuote() {
+  state.teamChatQuotedMessage = null
+  renderTeamChatQuotePreview()
+}
+
+function renderTeamChatQuotePreview() {
+  const quoted = state.teamChatQuotedMessage
+  refs.teamChatQuotePreview?.classList.toggle("hidden", !quoted)
+  if (refs.teamChatQuoteAuthor) {
+    refs.teamChatQuoteAuthor.textContent = quoted ? `引用 ${quoted.senderName}` : ""
+  }
+  if (refs.teamChatQuoteText) {
+    refs.teamChatQuoteText.textContent = quoted?.content || ""
+  }
+}
+
+function formatTeamChatOutgoingContent(content) {
+  const quoted = state.teamChatQuotedMessage
+  if (!quoted) {
+    return content
+  }
+  return `引用 ${quoted.senderName}：${quoted.content}\n\n${content}`.slice(0, TEAM_CHAT_MAX_MESSAGE_LENGTH)
+}
+
+function jokeRecallTeamChatMessage() {
+  setStatusMessage("逗你的，撤回不了。")
+}
+
+function formatTeamChatTime(value) {
+  if (!value) {
+    return ""
+  }
+  const normalized = String(value).endsWith("Z") ? value : `${value}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) {
+    return ""
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+function updateTeamChatRoomHeader() {
+  if (refs.teamChatRoomTitle) {
+    refs.teamChatRoomTitle.textContent = state.teamChatRoom.title || "Group"
+  }
+  if (refs.teamChatRoomMeta) {
+    refs.teamChatRoomMeta.textContent = state.teamChatRoom.meta || state.teamChatGroup.title || "同公司同部门"
+  }
+  renderTeamChatMembers()
+}
+
+function setTeamChatStatus(message = "", isError = false) {
+  if (!refs.teamChatStatus) {
+    return
+  }
+  refs.teamChatStatus.textContent = message
+  refs.teamChatStatus.classList.toggle("is-error", Boolean(isError))
+}
+
+function setTeamChatSending(isSending) {
+  state.teamChatSending = Boolean(isSending)
+  if (refs.sendTeamChatButton) {
+    refs.sendTeamChatButton.disabled = isSending
+    refs.sendTeamChatButton.textContent = isSending ? "发送中" : "发送"
+  }
+}
+
+function restoreTeamChatDraft(draftContent, draftQuote) {
+  if (refs.teamChatMessageInput && !refs.teamChatMessageInput.value.trim()) {
+    refs.teamChatMessageInput.value = draftContent
+  }
+  if (!state.teamChatQuotedMessage && draftQuote) {
+    state.teamChatQuotedMessage = draftQuote
+    renderTeamChatQuotePreview()
+  }
+}
+
+async function refreshTeamChatMembers() {
+  if (!state.currentUser || !refs.teamChatMembers) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/members", { cache: "no-store" })
+    if (!response.ok) {
+      setTeamChatStatus(data.error || "成员列表读取失败", true)
+      return
+    }
+    state.teamChatGroup = normalizeTeamChatGroup(data.group || state.teamChatGroup)
+    if (state.teamChatRoom.type === "team") {
+      state.teamChatRoom = {
+        ...state.teamChatRoom,
+        title: "Group",
+        meta: state.teamChatGroup.title,
+      }
+    }
+    state.teamChatMembers = Array.isArray(data.members) ? data.members : []
+    renderTeamChatMembers()
+  } catch {
+    setTeamChatStatus("成员列表暂时不可用", true)
+  }
+}
+
+async function refreshTeamChatMessages({ append = false } = {}) {
+  if (!state.currentUser || !refs.teamChatMessages) {
+    return
+  }
+  const params = teamChatRoomParams()
+  if (append && state.teamChatLastMessageId) {
+    params.set("after_id", String(state.teamChatLastMessageId))
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/team-chat/messages?${params.toString()}`, { cache: "no-store" })
+    if (!response.ok) {
+      setTeamChatStatus(data.error || "消息读取失败", true)
+      return
+    }
+    const messages = Array.isArray(data.messages) ? data.messages : []
+    mergeTeamChatMessages(messages, { replace: !append })
+    renderTeamChatMessages({ scrollToBottom: messages.length > 0 || !append })
+    if (!refs.teamChatModal?.classList.contains("hidden")) {
+      await markCurrentTeamChatRead()
+    }
+  } catch {
+    setTeamChatStatus("消息读取失败", true)
+  }
+}
+
+async function markCurrentTeamChatRead() {
+  if (!state.currentUser || !state.teamChatLastMessageId) {
+    return
+  }
+  try {
+    await fetchJSON("/api/team-chat/read", {
+      method: "POST",
+      body: JSON.stringify(teamChatReadPayload()),
+    })
+    await refreshTeamChatUnread()
+  } catch {
+    // Best effort only; unread can recover on next poll.
+  }
+}
+
+async function refreshTeamChatUnread() {
+  if (!state.currentUser || !refs.teamChatButton) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/unread", { cache: "no-store" })
+    if (response.ok) {
+      updateTeamChatUnreadBadge(data.unread?.total || 0)
+    }
+  } catch {
+    // Keep the previous badge state.
+  }
+}
+
+function startTeamChatPolling() {
+  stopTeamChatPolling()
+  state.teamChatUnreadTimer = window.setInterval(refreshTeamChatUnread, 15000)
+  let regularPollTicks = 0
+  state.teamChatPollTimer = window.setInterval(() => {
+    if (!refs.teamChatModal?.classList.contains("hidden")) {
+      if (state.teamChatFastPollRemaining > 0) {
+        state.teamChatFastPollRemaining -= 1
+        void refreshTeamChatMessages({ append: true })
+        return
+      }
+      regularPollTicks += 1
+      if (regularPollTicks >= 5) {
+        regularPollTicks = 0
+        void refreshTeamChatMessages({ append: true })
+      }
+    }
+  }, 1500)
+}
+
+function stopTeamChatPolling() {
+  if (state.teamChatUnreadTimer) {
+    window.clearInterval(state.teamChatUnreadTimer)
+    state.teamChatUnreadTimer = null
+  }
+  if (state.teamChatPollTimer) {
+    window.clearInterval(state.teamChatPollTimer)
+    state.teamChatPollTimer = null
+  }
+}
+
+async function switchTeamChatRoom(nextRoom) {
+  state.teamChatRoom = {
+    type: nextRoom.type || "team",
+    recipientUserId: nextRoom.recipientUserId || null,
+    title: nextRoom.title || "Group",
+    meta: nextRoom.meta || state.teamChatGroup.title || "同公司同部门",
+  }
+  state.teamChatMessages = []
+  state.teamChatLastMessageId = 0
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  updateTeamChatRoomHeader()
+  renderTeamChatMessages()
+  await refreshTeamChatGroupContext()
+  setTeamChatStatus("读取消息中")
+  await refreshTeamChatMessages()
+  setTeamChatStatus("")
+  refs.teamChatMessageInput?.focus()
+}
+
+async function openTeamChatModal() {
+  if (!state.currentUser) {
+    return
+  }
+  refs.teamChatModal?.classList.remove("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open", "chat-open")
+  setTeamChatStatus("读取中")
+  await refreshTeamChatMembers()
+  updateTeamChatRoomHeader()
+  await refreshTeamChatGroupContext()
+  await refreshTeamChatMessages()
+  setTeamChatStatus("")
+  refs.teamChatMessageInput?.focus()
+}
+
+function closeTeamChatModal() {
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  refs.teamChatModal?.classList.add("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open", "chat-open")
+  void refreshTeamChatUnread()
+}
+
+async function submitTeamChatMessage(event) {
+  event.preventDefault()
+  if (state.teamChatSending) {
+    return
+  }
+  const content = refs.teamChatMessageInput?.value.trim() || ""
+  if (!content) {
+    setTeamChatStatus("请输入消息", true)
+    return
+  }
+  const outgoingContent = formatTeamChatOutgoingContent(content)
+  const draftContent = refs.teamChatMessageInput?.value || ""
+  const draftQuote = state.teamChatQuotedMessage
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.value = ""
+  }
+  clearTeamChatQuote()
+  const optimistic = createOptimisticTeamChatMessage(outgoingContent)
+  mergeTeamChatMessages([optimistic])
+  renderTeamChatMessages()
+  setTeamChatSending(true)
+  setTeamChatStatus("发送中")
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/messages", {
+      method: "POST",
+      body: JSON.stringify(teamChatSendPayload(outgoingContent)),
+    })
+    if (!response.ok) {
+      state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
+      renderTeamChatMessages()
+      restoreTeamChatDraft(draftContent, draftQuote)
+      setTeamChatStatus(data.error || "发送失败", true)
+      return
+    }
+    const messages = Array.isArray(data.messages) ? data.messages : []
+    replaceOptimisticTeamChatMessage(optimistic.client_id, messages)
+    renderTeamChatMessages()
+    await markCurrentTeamChatRead()
+    if (data.bot_reply_pending) {
+      scheduleTeamChatFastPolling()
+      void refreshTeamChatMessages({ append: true })
+      setTeamChatStatus("已发送，GPT-BOT 正在思考")
+    } else {
+      setTeamChatStatus("已发送")
+    }
+  } catch {
+    state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
+    renderTeamChatMessages()
+    restoreTeamChatDraft(draftContent, draftQuote)
+    setTeamChatStatus("网络连接错误", true)
+  } finally {
+    setTeamChatSending(false)
+    refs.teamChatMessageInput?.focus()
+  }
 }
 
 async function submitChangePassword(event) {
@@ -1336,6 +3079,11 @@ async function submitAuthForm(event) {
   const username = refs.authUsernameInput.value.trim()
   const password = refs.authPasswordInput.value
   const endpoint = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login"
+  const authPayload = { username, password }
+  if (state.authMode === "register") {
+    authPayload.company = refs.authCompanyInput?.value || "6renyou"
+    authPayload.department = refs.authDepartmentInput?.value || "PD & OPS"
+  }
   refs.authError.textContent = ""
   refs.loginAuthButton.disabled = true
   if (refs.registerAuthButton) {
@@ -1344,7 +3092,7 @@ async function submitAuthForm(event) {
   try {
     const { response, data } = await fetchJSON(endpoint, {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(authPayload),
     })
     if (!response.ok) {
       refs.authError.textContent = data.error || "认证失败"
@@ -1394,7 +3142,7 @@ async function submitPasswordResetRequest(event) {
       return
     }
     if (refs.passwordResetRequestStatus) {
-      refs.passwordResetRequestStatus.textContent = data.message || "申请已提交，请联系管理员。"
+      refs.passwordResetRequestStatus.textContent = data.message || "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到申请。"
       refs.passwordResetRequestStatus.classList.remove("is-error")
     }
   } catch {
@@ -1405,6 +3153,71 @@ async function submitPasswordResetRequest(event) {
   } finally {
     if (refs.submitPasswordResetRequestButton) {
       refs.submitPasswordResetRequestButton.disabled = false
+    }
+  }
+}
+
+async function submitPasswordResetConfirm(event) {
+  event.preventDefault()
+  const password = refs.passwordResetNewPasswordInput?.value || ""
+  const confirmed = refs.passwordResetConfirmPasswordInput?.value || ""
+  if (!state.passwordResetToken) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "重置链接无效，请重新申请。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (!password || password.length < 8) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "新密码至少需要 8 位。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (password !== confirmed) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "两次输入的新密码不一致。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
+  }
+  if (refs.submitPasswordResetConfirmButton) {
+    refs.submitPasswordResetConfirmButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token: state.passwordResetToken, password }),
+    })
+    if (!response.ok) {
+      if (refs.passwordResetConfirmStatus) {
+        refs.passwordResetConfirmStatus.textContent = data.error || "重置链接无效或已过期，请重新申请。"
+        refs.passwordResetConfirmStatus.classList.add("is-error")
+      }
+      return
+    }
+    state.passwordResetToken = ""
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = data.message || "密码已重置，请使用新密码登录。"
+      refs.passwordResetConfirmStatus.classList.remove("is-error")
+    }
+    const cleanUrl = new URL(window.location.href)
+    cleanUrl.searchParams.delete("reset_token")
+    window.history.replaceState(null, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`)
+    window.setTimeout(() => enterAuthGate("login", "密码已重置，请使用新密码登录。"), 900)
+  } catch {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "网络连接错误"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+  } finally {
+    if (refs.submitPasswordResetConfirmButton) {
+      refs.submitPasswordResetConfirmButton.disabled = false
     }
   }
 }
@@ -1574,6 +3387,7 @@ function createWorkspaceSnapshot() {
       outputCompression: refs.outputCompressionInput.value,
       moderation: refs.moderationSelect.value,
       generateSampleCount: refs.generateSampleCountInput.value,
+      creativeBrief: creativeBriefSnapshot(),
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
@@ -1649,6 +3463,7 @@ async function restoreWorkspaceState() {
   refs.outputCompressionInput.value = forms.outputCompression || "100"
   refs.moderationSelect.value = forms.moderation || "auto"
   refs.generateSampleCountInput.value = forms.generateSampleCount || ""
+  restoreCreativeBrief(forms.creativeBrief || {})
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
@@ -2064,7 +3879,7 @@ function updateImageTransportUI() {
   if (refs.imageTransportHint) {
     refs.imageTransportHint.textContent = isResponses
       ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.5），用于对接不支持 Images Edit 的兼容代理。"
-      : "编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。"
+      : "编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。"
   }
   const editFieldset = refs.responsesUrlInput?.closest("label")
   const modelFieldset = refs.responsesModelInput?.closest("label")
@@ -2316,6 +4131,7 @@ function currentFormSnapshot() {
     outputCompression: refs.outputCompressionInput.value,
     moderation: refs.moderationSelect.value,
     generateSampleCount: refs.generateSampleCountInput.value,
+    creativeBrief: creativeBriefSnapshot(),
     logoOverlayEnabled: refs.logoOverlayEnabled.checked,
     editPrompt: refs.editPromptInput.value,
     editModel: refs.editModelInput.value,
@@ -2346,6 +4162,7 @@ function applyFormSnapshot(snapshot) {
   refs.outputCompressionInput.value = snapshot.outputCompression || "100"
   refs.moderationSelect.value = snapshot.moderation || "auto"
   refs.generateSampleCountInput.value = snapshot.generateSampleCount || ""
+  restoreCreativeBrief(snapshot.creativeBrief || {})
   refs.logoOverlayEnabled.checked = snapshot.logoOverlayEnabled !== false
   refs.editPromptInput.value = snapshot.editPrompt || ""
   refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
@@ -2901,9 +4718,9 @@ function updatePreviewAvailability() {
   refs.resultPreviewTrigger.classList.toggle("preview-frame-clickable", hasResult)
   refs.previewCompareButton.disabled = !canComparePreviews()
   refs.previewCompareModeButton.disabled = !canComparePreviews()
-  refs.openResultPreviewButton.disabled = !hasResult
   refs.continueEditButton.disabled = !state.lastResultImage
   refs.startVariantButton.disabled = !state.lastResultImage
+  refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
   updateFeedbackPanelVisibility()
   updateWorkflowStatus()
 }
@@ -3068,7 +4885,6 @@ function clearResult() {
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
   setDownloadDisabled()
-  refs.openResultPreviewButton.disabled = true
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
     refs.feedbackReasonInput.value = ""
@@ -3093,6 +4909,7 @@ function clearResult() {
   state.lastFeedbackRating = null
   state.debugLines = []
   state.generateIntent = "fresh"
+  setGalleryEditorMeta(null)
 
   closePreview()
   renderRawResponsePreview()
@@ -3212,6 +5029,7 @@ function selectResultCandidate(index, { persist = true } = {}) {
   }
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
+  setGalleryEditorMeta(candidate)
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   updatePreviewAvailability()
@@ -3417,6 +5235,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   }
   void checkCopyrightRisk(payload)
   void refreshUsageSummary()
+  void refreshGallery()
 
   updateEditSourceUI()
   updateGenerateIntentUI()
@@ -4646,6 +6465,7 @@ async function submitEdit() {
 function clearGenerateForm() {
   refs.generatePromptInput.value = ""
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
+  restoreCreativeBrief({})
   clearGenerateReferenceImage()
   setGenerateSize(state.serverConfig.default_size || "auto")
   refs.qualitySelect.value = "auto"
@@ -4794,12 +6614,21 @@ function bindEvents() {
   refs.registerAuthButton?.addEventListener("click", () => {
     enterAuthGate(state.authMode === "register" ? "login" : "register")
   })
+  refs.authCompanyInput?.addEventListener("change", () => {
+    renderDepartmentSelect(refs.authDepartmentInput, state.orgUnits, refs.authCompanyInput?.value || "6renyou")
+  })
   refs.forgotPasswordButton?.addEventListener("click", enterPasswordResetRequest)
   refs.passwordResetRequestForm?.addEventListener("submit", submitPasswordResetRequest)
   refs.cancelPasswordResetRequestButton?.addEventListener("click", leavePasswordResetRequest)
+  refs.passwordResetConfirmForm?.addEventListener("submit", submitPasswordResetConfirm)
+  refs.cancelPasswordResetConfirmButton?.addEventListener("click", () => enterAuthGate("login"))
   refs.logoutButton?.addEventListener("click", logout)
   refs.adminCreateUserForm?.addEventListener("submit", submitAdminCreateUser)
   refs.refreshAdminUsersButton?.addEventListener("click", refreshAdminUsers)
+  refs.adminOrgCreateForm?.addEventListener("submit", submitAdminOrgUnit)
+  refs.adminUserOrgForm?.addEventListener("submit", submitAdminUserOrg)
+  refs.adminGroupAnnouncementForm?.addEventListener("submit", submitAdminGroupAnnouncement)
+  refs.refreshAdminOrgButton?.addEventListener("click", refreshAdminOrgContext)
   refs.refreshFeedbackSummaryButton?.addEventListener("click", refreshFeedbackSummary)
   refs.refreshPasswordResetRequestsButton?.addEventListener("click", refreshPasswordResetRequests)
   refs.adminUsersList?.addEventListener("click", (event) => {
@@ -4866,8 +6695,8 @@ function bindEvents() {
   refs.clearEditButton.addEventListener("click", clearEditForm)
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
-  refs.openResultPreviewButton.addEventListener("click", () => openPreview("result", "single"))
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
+  refs.saveGroupAssetButton?.addEventListener("click", saveCurrentResultToGroupAssets)
   refs.feedbackRatingButtons.forEach((button) => {
     button.addEventListener("click", () => {
       void submitResultFeedback(button.dataset.rating)
@@ -4885,10 +6714,65 @@ function bindEvents() {
     }
     openSharedResult(button.dataset.shareId)
   })
+  refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
+  refs.gallerySearchInput?.addEventListener("input", () => {
+    window.clearTimeout(state.gallerySearchTimer)
+    state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
+  })
+  refs.galleryFavoriteOnlyInput?.addEventListener("change", refreshGallery)
+  refs.clearGalleryFiltersButton?.addEventListener("click", () => {
+    if (refs.gallerySearchInput) {
+      refs.gallerySearchInput.value = ""
+    }
+    if (refs.galleryFavoriteOnlyInput) {
+      refs.galleryFavoriteOnlyInput.checked = false
+    }
+    state.gallerySearch = ""
+    state.galleryFavoriteOnly = false
+    void refreshGallery()
+  })
+  refs.saveGalleryMetaButton?.addEventListener("click", saveGalleryMeta)
   refs.changePasswordButton?.addEventListener("click", openChangePasswordModal)
   refs.closeChangePasswordButton?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordBackdrop?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordForm?.addEventListener("submit", submitChangePassword)
+  refs.openProfileButton?.addEventListener("click", openProfileModal)
+  refs.closeProfileButton?.addEventListener("click", closeProfileModal)
+  refs.profileBackdrop?.addEventListener("click", closeProfileModal)
+  refs.profileForm?.addEventListener("submit", submitProfile)
+  refs.profileUsernameInput?.addEventListener("input", updateProfileUsernamePasswordHint)
+  refs.profileCompanyInput?.addEventListener("change", () => {
+    renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  })
+  refs.profileAvatarInput?.addEventListener("change", uploadProfileAvatar)
+  refs.teamChatButton?.addEventListener("click", openTeamChatModal)
+  refs.closeTeamChatButton?.addEventListener("click", closeTeamChatModal)
+  refs.teamChatBackdrop?.addEventListener("click", closeTeamChatModal)
+  refs.teamChatTeamRoomButton?.addEventListener("click", () => {
+    void switchTeamChatRoom({
+      type: "team",
+      recipientUserId: null,
+      title: "Group",
+      meta: state.teamChatGroup.title || "同公司同部门",
+    })
+  })
+  refs.refreshTeamChatButton?.addEventListener("click", () => {
+    void refreshTeamChatGroupContext()
+    void refreshTeamChatMessages()
+  })
+  refs.teamChatForm?.addEventListener("submit", submitTeamChatMessage)
+  refs.clearTeamChatQuoteButton?.addEventListener("click", clearTeamChatQuote)
+  refs.teamChatMessageInput?.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault()
+      refs.teamChatForm?.requestSubmit()
+    }
+  })
+  refs.teamChatMessages?.addEventListener("click", (event) => {
+    if (!event.target.closest(".team-chat-message-actions")) {
+      closeTeamChatMessageMenu()
+    }
+  })
   refs.bugReportButton?.addEventListener("click", openBugReportModal)
   refs.closeBugReportButton?.addEventListener("click", closeBugReportModal)
   refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
@@ -4992,6 +6876,14 @@ function bindEvents() {
     chip.addEventListener("click", () => {
       appendPromptSnippet(chip.dataset.target || state.activeMode, chip.dataset.snippet || "")
     })
+  })
+
+  refs.applyCreativeBriefButton?.addEventListener("click", applyCreativeBriefToPrompt)
+  refs.askBotCreativeBriefButton?.addEventListener("click", () => {
+    void askBotWithCreativeBrief()
+  })
+  creativeBriefFields().forEach(([, input]) => {
+    input?.addEventListener("input", scheduleWorkspacePersist)
   })
 
   refs.generatePromptInput.addEventListener("keydown", (event) => {
@@ -5164,6 +7056,25 @@ function bindEvents() {
   })
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && refs.profileModal && !refs.profileModal.classList.contains("hidden")) {
+      closeProfileModal()
+      return
+    }
+
+    if (event.key === "Escape" && refs.teamChatModal && !refs.teamChatModal.classList.contains("hidden")) {
+      if (state.teamChatOpenMenuId) {
+        closeTeamChatMessageMenu()
+        return
+      }
+      closeTeamChatModal()
+      return
+    }
+
+    if (event.key === "Escape" && refs.changePasswordModal && !refs.changePasswordModal.classList.contains("hidden")) {
+      closeChangePasswordModal()
+      return
+    }
+
     if (event.key === "Escape" && refs.bugReportModal && !refs.bugReportModal.classList.contains("hidden")) {
       closeBugReportModal()
       return
@@ -5236,6 +7147,12 @@ async function init() {
   }
 
   bindEvents()
+  await refreshOrgUnits()
+  const resetToken = getPasswordResetTokenFromUrl()
+  if (resetToken) {
+    enterPasswordResetConfirm(resetToken)
+    return
+  }
   const authenticated = await checkAuthSession()
   if (!authenticated) {
     return
@@ -5247,6 +7164,8 @@ async function init() {
 async function startAuthenticatedApp() {
   if (state.appReady) {
     await refreshUsageSummary()
+    startTeamChatPolling()
+    await refreshTeamChatUnread()
     return
   }
 
@@ -5271,6 +7190,8 @@ async function startAuthenticatedApp() {
   state.persistenceReady = true
   state.appReady = true
   updateWorkflowStatus()
+  startTeamChatPolling()
+  await refreshTeamChatUnread()
   await refreshUsageSummary()
   scheduleWorkspacePersist()
 }

@@ -40,6 +40,10 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
         default_api_key="sk-secret",
         error_alert_telegram_bot_token="123:abc",
         error_alert_telegram_chat_id="-100123456",
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
     )
     client, _, _ = make_client(settings=settings)
     response = client.get("/api/config")
@@ -56,6 +60,8 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["upstream_timeout_seconds"] > 0
     assert payload["error_alert_notifications_enabled"] is True
     assert payload["bug_report_notifications_enabled"] is True
+    assert payload["password_reset_email_enabled"] is True
+    assert "mail-secret" not in response.text
 
 
 def test_config_reports_custom_responses_url(make_client, settings_factory):

@@ -64,6 +64,10 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert 'class="auth-page"' in index_html
     assert 'id="loginAuthButton"' in index_html
     assert 'id="registerAuthButton"' in index_html
+    assert 'id="authCompanyInput"' in index_html
+    assert 'id="authDepartmentInput"' in index_html
+    assert '<option value="6renyou">6renyou</option>' in index_html
+    assert '<option value="PD &amp; OPS">PD &amp; OPS</option>' in index_html
     assert "注册" in index_html
     assert 'id="logoutButton"' in index_html
     assert 'id="changePasswordButton"' in index_html
@@ -78,6 +82,8 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "/api/auth/login" in app_js
     assert "/api/auth/register" in app_js
     assert "/api/auth/logout" in app_js
+    assert "authCompanyInput" in app_js
+    assert "authDepartmentInput" in app_js
     assert "/api/me/password" in app_js
     assert "/api/admin/users" in app_js
     assert "/api/me" in app_js
@@ -103,7 +109,8 @@ def test_result_preview_zoom_and_feedback_controls_are_present() -> None:
     assert 'id="previewZoomInButton"' in index_html
     assert 'id="previewZoomOutButton"' in index_html
     assert 'id="previewZoomResetButton"' in index_html
-    assert 'id="openResultPreviewButton"' in index_html
+    assert 'id="openResultPreviewButton"' not in index_html
+    assert "openResultPreviewButton" not in app_js
     assert "applyPreviewZoom" in app_js
     assert "previewZoom" in app_js
     assert 'draggable="false"' in index_html
@@ -163,6 +170,30 @@ def test_bug_reports_and_result_sharing_controls_are_present() -> None:
     assert ".shared-result-item" in styles_css
 
 
+def test_gallery_library_controls_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="galleryList"' in index_html
+    assert 'id="gallerySearchInput"' in index_html
+    assert 'id="galleryFavoriteOnlyInput"' in index_html
+    assert 'id="galleryEditorPanel"' in index_html
+    assert 'id="galleryFavoriteInput"' in index_html
+    assert 'id="galleryTagsInput"' in index_html
+    assert 'id="saveGalleryMetaButton"' in index_html
+    assert "/api/gallery" in app_js
+    assert "/api/gallery/${generatedImageId}" in app_js
+    assert "refreshGallery" in app_js
+    assert "renderGalleryItems" in app_js
+    assert "openGalleryItem" in app_js
+    assert "saveGalleryMeta" in app_js
+    assert "setGalleryEditorMeta" in app_js
+    assert "galleryItemToAsset" in app_js
+    assert ".gallery-item" in styles_css
+    assert ".gallery-editor-panel" in styles_css
+
+
 def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -174,6 +205,7 @@ def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     assert '<summary>高级参数</summary>' in index_html
     assert 'id="generateSizePreset" hidden' in index_html
     assert 'id="logoOverlayEnabled"' in index_html
+    assert 'href="#resultPanel"' not in index_html
     assert 'id="resultActions" class="result-actions hidden"' in index_html
     assert 'id="sourcePreviewCard" class="preview-card source-card hidden"' in index_html
     assert "setStatusMessage(\"已复制本次提示词。\")" in app_js
@@ -188,20 +220,144 @@ def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     assert ".comparison-grid.single-result" in styles_css
 
 
-def test_password_reset_ui_is_admin_assisted() -> None:
+def test_password_reset_ui_supports_email_self_service_and_admin_fallback() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
     styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
 
     assert 'id="forgotPasswordButton"' in index_html
     assert 'id="passwordResetRequestForm"' in index_html
+    assert 'id="passwordResetConfirmForm"' in index_html
+    assert 'id="passwordResetNewPasswordInput"' in index_html
+    assert "/api/password-reset/confirm" in app_js
+    assert "reset_token" in app_js
     assert 'id="adminPasswordResetPanel"' in index_html
     assert 'id="passwordResetRequestsList"' in index_html
     assert "/api/password-reset-requests" in app_js
     assert "/api/admin/password-reset-requests" in app_js
     assert "submitPasswordResetAdminForm" in app_js
     assert ".password-reset-admin-form" in styles_css
-    assert "申请已提交，请联系管理员" in app_js
+    assert "如果账号存在且已填写邮箱，会收到重置邮件" in app_js
+
+
+def test_user_profile_ui_supports_avatar_and_editable_login_username() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="openProfileButton"' in index_html
+    assert 'id="profileModal"' in index_html
+    assert 'id="profileAvatarInput"' in index_html
+    assert 'accept="image/png,image/jpeg,image/webp"' in index_html
+    assert 'id="profileUsernameInput"' in index_html
+    assert "用于登录。修改后，下次登录请使用新用户名。" in index_html
+    assert 'id="profileDisplayNameInput"' in index_html
+    assert "仅用于页面显示，不改变登录用户名。" in index_html
+    assert 'id="profilePhoneCountryCodeInput"' in index_html
+    assert '<option value="+86">+86 中国</option>' in index_html
+    assert 'id="profileCompanyInput"' in index_html
+    assert 'id="profileDepartmentInput"' in index_html
+    assert 'id="profileJobTitleInput"' in index_html
+    assert "真实姓名" not in index_html
+    assert "/api/me/profile" in app_js
+    assert "/api/me/avatar" in app_js
+    assert "profileCompanyInput" in app_js
+    assert "profileDepartmentInput" in app_js
+    assert "修改登录用户名需要填写当前密码" in app_js
+    assert "updateProfileUsernamePasswordHint" in app_js
+    assert ".profile-dialog" in styles_css
+    assert ".profile-avatar-preview" in styles_css
+    assert ".phone-input-row" in styles_css
+
+
+def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="teamChatButton"' in index_html
+    assert "Team Chat" in index_html
+    assert 'id="teamChatModal"' in index_html
+    assert 'id="teamChatMembers"' in index_html
+    assert 'id="teamChatMessageInput"' in index_html
+    assert 'id="teamChatQuotePreview"' in index_html
+    assert 'id="clearTeamChatQuoteButton"' in index_html
+    assert 'id="teamChatTeamRoomName"' in index_html
+    assert 'id="teamChatTeamRoomMeta"' in index_html
+    assert 'id="teamChatAnnouncement"' in index_html
+    assert 'id="teamChatGroupAssets"' in index_html
+    assert 'id="teamChatGroupStats"' in index_html
+    assert 'id="teamChatGroupSummary"' in index_html
+    assert 'id="saveGroupAssetButton"' in index_html
+    assert "同公司同部门" in index_html
+    assert "OpenAI Images API" not in index_html
+    assert "/api/team-chat/members" in app_js
+    assert "/api/team-chat/messages" in app_js
+    assert "/api/team-chat/unread" in app_js
+    assert "/api/org-units" in app_js
+    assert "/api/team-chat/group-announcement" in app_js
+    assert "/api/team-chat/group-assets" in app_js
+    assert "/api/team-chat/group-stats" in app_js
+    assert "/api/team-chat/group-summary" in app_js
+    assert "openTeamChatModal" in app_js
+    assert "GPT-BOT" in app_js
+    assert "normalizeTeamChatGroup" in app_js
+    assert "state.teamChatGroup" in app_js
+    assert "teamChatSending: false" in app_js
+    assert "setTeamChatSending" in app_js
+    assert "mergeTeamChatMessages" in app_js
+    assert "updateTeamChatLastMessageId" in app_js
+    assert "refs.teamChatMessageInput.value = \"\"" in app_js
+    assert "refs.sendTeamChatButton.disabled = isSending" in app_js
+    assert "restoreTeamChatDraft" in app_js
+    assert "createOptimisticTeamChatMessage" in app_js
+    assert "replaceOptimisticTeamChatMessage" in app_js
+    assert "bot_reply_pending" in app_js
+    assert "TEAM_CHAT_FAST_POLL_LIMIT" in app_js
+    assert "saveCurrentResultToGroupAssets" in app_js
+    assert "openTeamChatMessageMenu" in app_js
+    assert "copyTeamChatMessage" in app_js
+    assert "quoteTeamChatMessage" in app_js
+    assert 'button.dataset.action = action' in app_js
+    assert '"copy", "复制"' in app_js
+    assert '"quote", "引用"' in app_js
+    assert '"recall", "撤回"' in app_js
+    assert "已引用这条消息。" in app_js
+    assert "逗你的，撤回不了" in app_js
+    assert ".team-chat-dialog" in styles_css
+    assert ".team-chat-button.has-unread" in styles_css
+    assert "grid-template-rows: auto minmax(0, 1fr)" in styles_css
+    assert ".team-chat-members" in styles_css
+    assert "overscroll-behavior: contain" in styles_css
+    assert "grid-template-columns: minmax(0, 1fr) 26px" in styles_css
+    assert ".team-chat-message.mine .team-chat-message-actions" not in styles_css
+    assert ".team-chat-message-menu" in styles_css
+    assert ".team-chat-message.pending" in styles_css
+    assert ".team-chat-quote-preview" in styles_css
+    assert ".team-chat-group-context" in styles_css
+    assert ".team-chat-asset-card" in styles_css
+    assert "body.chat-open .desktop-shell" in styles_css
+
+
+def test_admin_org_management_ui_is_available() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="adminOrgPanel"' in index_html
+    assert 'id="adminOrgCreateForm"' in index_html
+    assert 'id="adminUserOrgForm"' in index_html
+    assert 'id="adminGroupAnnouncementForm"' in index_html
+    assert 'id="adminAnnouncementOrgSelect"' in index_html
+    assert 'id="adminOrgUnitSelect"' in index_html
+    assert 'id="adminOrgStatsList"' in index_html
+    assert "renderOrgUnitControls" in app_js
+    assert "submitAdminGroupAnnouncement" in app_js
+    assert "renderAdminOrgStats" in app_js
+    assert "/api/admin/org-units" in app_js
+    assert "/api/admin/org-audit" in app_js
+    assert "/api/admin/org-stats" in app_js
+    assert "/api/admin/users/${userId}/org" in app_js
+    assert "refreshAdminOrgContext" in app_js
 
 
 def test_generation_can_be_interrupted_from_ui() -> None:
@@ -230,6 +386,42 @@ def test_generate_prompt_chips_match_travel_brand_keywords() -> None:
     assert 'data-snippet="色彩克制，统一色调，画面高级">色彩克制</button>' in index_html
     assert ">山间湖泊</button>" not in index_html
     assert ">木屋</button>" not in index_html
+
+
+def test_optional_creative_brief_keeps_free_prompt_as_primary_path() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="creativeBriefPanel"' in index_html
+    assert "<summary>创意辅助（可选）</summary>" in index_html
+    assert "自由提示词仍是主路径" in index_html
+    assert 'id="creativeBriefDestinationInput"' in index_html
+    assert 'id="creativeBriefAudienceInput"' in index_html
+    assert 'id="creativeBriefChannelInput"' in index_html
+    assert 'id="creativeBriefMoodInput"' in index_html
+    assert 'id="creativeBriefMustHaveInput"' in index_html
+    assert 'id="creativeBriefAvoidInput"' in index_html
+    assert 'id="applyCreativeBriefButton"' in index_html
+    assert 'id="askBotCreativeBriefButton"' in index_html
+    assert "buildCreativeBriefSnippet" in app_js
+    assert "applyCreativeBriefToPrompt" in app_js
+    assert "askBotWithCreativeBrief" in app_js
+    assert "不会替你重写整段提示词" in index_html
+    assert "只把可选 brief 作为补充上下文" in app_js
+    assert ".creative-brief-panel" in styles_css
+
+
+def test_aesthetic_memory_is_optional_and_never_forced_into_prompts() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "优秀资产" in app_js
+    assert "满意作品会自动沉淀到这里" in app_js
+    assert "renderTeamChatGroupAssets" in app_js
+    assert "useGroupAssetAsReference" in app_js
+    assert "仅作可选参考" in app_js
+    assert "强制套用历史风格" not in app_js
+    assert "autoApplyAestheticMemory" not in app_js
 
 
 def test_docker_packaging_excludes_local_env_and_persists_container_data() -> None:
@@ -272,4 +464,6 @@ def test_static_footer_version_matches_release() -> None:
     version = version_line.split('"', 2)[1]
 
     assert f"PicGen Console　v{version}" in index_html
+    assert f'href="styles.css?v={version}"' in index_html
+    assert f'src="app.js?v={version}"' in index_html
     assert "PicGen Console　v0.1.2</span>" not in index_html

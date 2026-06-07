@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -27,6 +28,36 @@ def test_auth_required_blocks_generation(make_client, settings_factory):
     fake.run_json.assert_not_awaited()
 
 
+def test_ensure_columns_tolerates_duplicate_column_race():
+    import sqlite3
+
+    from picgen.auth import _ensure_columns
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConnection:
+        def __init__(self):
+            self.columns = {"id"}
+
+        def execute(self, sql):
+            if sql == "PRAGMA table_info(password_reset_requests)":
+                return FakeResult([{"name": name} for name in sorted(self.columns)])
+            if sql.startswith("ALTER TABLE password_reset_requests ADD COLUMN token_hash"):
+                self.columns.add("token_hash")
+                raise sqlite3.OperationalError("duplicate column name: token_hash")
+            raise AssertionError(sql)
+
+    conn = FakeConnection()
+    _ensure_columns(conn, "password_reset_requests", {"token_hash": "TEXT"})
+
+    assert "token_hash" in conn.columns
+
+
 def test_bootstrap_admin_login_and_open_registration(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True, admin_password=ADMIN_PASSWORD)
     client, _, _ = make_client(settings=settings)
@@ -41,6 +72,8 @@ def test_bootstrap_admin_login_and_open_registration(make_client, settings_facto
     assert registered["username"] == "alice"
     assert registered["role"] == "user"
     assert registered["is_admin"] is False
+    assert registered["company"] == "6renyou"
+    assert registered["department"] == "PD & OPS"
 
     duplicate = client.post(
         "/api/auth/register",
@@ -139,9 +172,9 @@ def test_password_reset_request_is_admin_assisted_and_non_enumerating(make_clien
     admin_list = admin_client.get("/api/admin/password-reset-requests")
     assert admin_list.status_code == 200
     requests = admin_list.json()["requests"]
-    assert [(item["username_normalized"], item["status"]) for item in requests] == [
-        ("missing-user", "pending"),
+    assert sorted((item["username_normalized"], item["status"]) for item in requests) == [
         ("alice", "pending"),
+        ("missing-user", "pending"),
     ]
     alice_request = next(item for item in requests if item["username_normalized"] == "alice")
     missing_request = next(item for item in requests if item["username_normalized"] == "missing-user")
@@ -239,7 +272,7 @@ def test_password_reset_request_notifies_admin_without_enumerating(
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "message": "如果账号存在，管理员会看到找回申请。请联系管理员获取新密码。",
+        "message": "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。",
     }
     assert len(notifications) == 1
     request_info = notifications[0]
@@ -279,6 +312,141 @@ def test_password_reset_request_notifies_admin_via_telegram_when_webhook_missing
     assert len(notifications) == 1
     assert notifications[0]["settings"].error_alert_telegram_chat_id == "-100123456"
     assert notifications[0]["request_info"]["username_normalized"] == "alice"
+
+
+def test_password_reset_email_token_allows_self_service_reset(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    sent_emails = []
+    admin_notifications = []
+
+    def _fake_send_password_reset_email(**kwargs):
+        sent_emails.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        admin_notifications.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr("picgen.routes.send_password_reset_email", _fake_send_password_reset_email)
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        public_base_url="https://picgen.example.com",
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+        password_reset_token_minutes=45,
+    )
+    client, _, _ = make_client(settings=settings)
+
+    register = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert register.status_code == 200
+    update_profile = client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice",
+            "display_name": "Alice",
+            "email": "alice@example.com",
+            "company": "6renyou",
+            "department": "PD & OPS",
+        },
+    )
+    assert update_profile.status_code == 200
+    client.post("/api/auth/logout")
+
+    request = client.post("/api/password-reset-requests", json={"username": "Alice"})
+    assert request.status_code == 200
+    assert request.json() == {
+        "status": "ok",
+        "message": "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。",
+    }
+    assert len(sent_emails) == 1
+    assert admin_notifications == []
+    email = sent_emails[0]
+    assert email["to_email"] == "alice@example.com"
+    assert email["username"] == "alice"
+    assert email["expires_minutes"] == 45
+    assert email["reset_url"].startswith("https://picgen.example.com/?reset_token=")
+    token = email["reset_url"].split("reset_token=", 1)[1]
+
+    reset = client.post(
+        "/api/password-reset/confirm",
+        json={"token": token, "password": "fresh correct horse battery"},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["message"] == "密码已重置，请使用新密码登录。"
+
+    reused = client.post(
+        "/api/password-reset/confirm",
+        json={"token": token, "password": "another correct horse battery"},
+    )
+    assert reused.status_code == 400
+    assert reused.json()["code"] == "invalid_reset_token"
+
+    old_login = client.post("/api/auth/login", json={"username": "alice", "password": USER_PASSWORD})
+    assert old_login.status_code == 400
+    new_login = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "fresh correct horse battery"},
+    )
+    assert new_login.status_code == 200
+
+
+def test_password_reset_without_email_keeps_admin_fallback(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    sent_emails = []
+    admin_notifications = []
+
+    def _fake_send_password_reset_email(**kwargs):
+        sent_emails.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        admin_notifications.append(kwargs["request_info"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr("picgen.routes.send_password_reset_email", _fake_send_password_reset_email)
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+    )
+    client, _, _ = make_client(settings=settings)
+    register = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert register.status_code == 200
+    client.post("/api/auth/logout")
+
+    response = client.post("/api/password-reset-requests", json={"username": "alice"})
+
+    assert response.status_code == 200
+    assert sent_emails == []
+    assert len(admin_notifications) == 1
+    assert admin_notifications[0]["email_available"] is False
+    assert admin_notifications[0]["reset_token"] == ""
 
 
 def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client, settings_factory):
@@ -334,6 +502,111 @@ def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client
     assert new_password.status_code == 200
 
 
+def test_user_profile_can_update_username_and_optional_fields(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, _ = make_client(settings=settings)
+
+    register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert register.status_code == 200
+
+    missing_password = client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice-new",
+            "display_name": "Alice 昵称",
+        },
+    )
+    assert missing_password.status_code == 400
+    assert missing_password.json()["code"] == "current_password_required"
+
+    updated = client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice-new",
+            "current_password": USER_PASSWORD,
+            "display_name": "Alice 昵称",
+            "wechat": "alice-wx",
+            "phone_country_code": "+86",
+            "phone": "13800138000",
+            "email": "alice@example.com",
+            "company": "6renyou",
+            "department": "PD & OPS",
+            "team": "市场部",
+            "job_title": "设计运营",
+            "note": "偏好旅行海报和酒店质感。",
+        },
+    )
+    assert updated.status_code == 200
+    profile = updated.json()["user"]
+    assert profile["username"] == "alice-new"
+    assert profile["display_name"] == "Alice 昵称"
+    assert profile["wechat"] == "alice-wx"
+    assert profile["phone_country_code"] == "+86"
+    assert profile["phone"] == "13800138000"
+    assert profile["email"] == "alice@example.com"
+    assert profile["company"] == "6renyou"
+    assert profile["department"] == "PD & OPS"
+    assert profile["team"] == "市场部"
+    assert profile["job_title"] == "设计运营"
+    assert profile["note"] == "偏好旅行海报和酒店质感。"
+
+    old_username_login = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert old_username_login.status_code == 400
+
+    new_username_login = client.post(
+        "/api/auth/login",
+        json={"username": "alice-new", "password": USER_PASSWORD},
+    )
+    assert new_username_login.status_code == 200
+
+
+def test_user_profile_rejects_duplicate_username_and_saves_avatar(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, resolved_settings = make_client(settings=settings)
+
+    alice = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert alice.status_code == 200
+    client.post("/api/auth/logout")
+    bob = client.post("/api/auth/register", json={"username": "bob", "password": USER_PASSWORD})
+    assert bob.status_code == 200
+
+    duplicate = client.put(
+        "/api/me/profile",
+        json={"username": "alice", "current_password": USER_PASSWORD},
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["code"] == "user_exists"
+
+    avatar = client.post(
+        "/api/me/avatar",
+        json={
+            "image": {
+                "name": "avatar.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            }
+        },
+    )
+    assert avatar.status_code == 200
+    payload = avatar.json()
+    assert payload["user"]["avatar_url"].startswith("files/avatars/")
+    assert "avatar_path" not in payload["user"]
+    assert (resolved_settings.data_dir / "avatars").is_dir()
+
+    avatar_file = client.get(f"/{payload['user']['avatar_url']}")
+    assert avatar_file.status_code == 200
+    assert avatar_file.headers["content-type"].startswith("image/png")
+
+    blocked_json = client.get("/files/avatars/profile.json")
+    assert blocked_json.status_code == 403
+
+
 def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, settings_factory):
     settings = settings_factory(
         auth_enabled=True,
@@ -358,6 +631,8 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     assert created["username"] == "alice"
     assert created["role"] == "user"
     assert created["is_active"] is True
+    assert created["company"] == "6renyou"
+    assert created["department"] == "PD & OPS"
 
     admin_users = client.get("/api/admin/users")
     assert admin_users.status_code == 200
@@ -530,6 +805,18 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
                 saved_bytes INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE password_reset_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT NOT NULL,
+                username_normalized TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolved_by_user_id INTEGER
+            );
             """
         )
 
@@ -573,13 +860,42 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert "schema_migrations" in tables
+        assert "password_reset_requests" in tables
         assert "user_preferences" in tables
         assert "generation_jobs" in tables
         assert "generated_images" in tables
+        assert "gallery_image_metadata" in tables
+        assert "gallery_image_tags" in tables
         assert "image_delivery_events" in tables
-        user = conn.execute("SELECT role, is_active, last_seen_at FROM users WHERE id = ?", (user_id,)).fetchone()
+        password_reset_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(password_reset_requests)")
+        }
+        assert {"token_hash", "email", "email_sent_at", "expires_at"}.issubset(password_reset_columns)
+        password_reset_indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(password_reset_requests)")
+        }
+        assert "idx_password_reset_token_hash" in password_reset_indexes
+        gallery_metadata_indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(gallery_image_metadata)")
+        }
+        gallery_tag_indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(gallery_image_tags)")
+        }
+        assert "idx_gallery_metadata_user_favorite" in gallery_metadata_indexes
+        assert "idx_gallery_tags_user_tag" in gallery_tag_indexes
+        assert "idx_gallery_tags_image" in gallery_tag_indexes
+        user = conn.execute(
+            "SELECT role, is_active, company, department, last_seen_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
         assert user["role"] == "user"
         assert bool(user["is_active"])
+        assert user["company"] == "6renyou"
+        assert user["department"] == "PD & OPS"
         assert user["last_seen_at"]
         job = conn.execute("SELECT * FROM generation_jobs").fetchone()
         assert job["user_id"] == user_id
@@ -839,7 +1155,8 @@ def test_result_share_flow_between_users(make_client, settings_factory):
     share_users = users_response.json()["users"]
     assert {user["username"] for user in share_users} == {"admin", "bob"}
     assert alice_id not in {user["id"] for user in share_users}
-    assert all(set(user) == {"id", "username"} for user in share_users)
+    assert all(set(user) == {"id", "username", "display_name", "avatar_url"} for user in share_users)
+    assert all("phone" not in user and "email" not in user and "wechat" not in user for user in share_users)
 
     generate_response = client.post(
         "/api/generate",
@@ -898,6 +1215,92 @@ def test_result_share_flow_between_users(make_client, settings_factory):
     assert inbox[0]["model"] == "gpt-image-2"
     assert inbox[0]["saved_image_url"] == generated["saved_image_url"]
     assert inbox[0]["generated_image_id"] == generated["generated_image_id"]
+
+
+def test_gallery_lists_searches_favorites_and_tags_own_images_only(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert alice.status_code == 200
+    alice_id = alice.json()["user"]["id"]
+    alice_generate = alice_client.post(
+        "/api/generate",
+        json={"prompt": "高端旅行海报，隐秘海岛度假", "model": "gpt-image-2", "logo_requested": True},
+    )
+    assert alice_generate.status_code == 200
+    alice_image_id = alice_generate.json()["generated_image_id"]
+
+    bob_client = TestClient(client.app)
+    bob = bob_client.post("/api/auth/register", json={"username": "bob", "password": USER_PASSWORD})
+    assert bob.status_code == 200
+    bob_generate = bob_client.post(
+        "/api/generate",
+        json={"prompt": "城市商务会议海报", "model": "gpt-image-2"},
+    )
+    assert bob_generate.status_code == 200
+    bob_image_id = bob_generate.json()["generated_image_id"]
+
+    initial_gallery = alice_client.get("/api/gallery")
+    assert initial_gallery.status_code == 200
+    payload = initial_gallery.json()
+    assert payload["scope"] == "self"
+    assert payload["count"] == 1
+    assert payload["items"][0]["id"] == alice_image_id
+    assert payload["items"][0]["user_id"] == alice_id
+    assert payload["items"][0]["username"] == "alice"
+    assert payload["items"][0]["is_favorite"] is False
+    assert payload["items"][0]["tags"] == []
+    assert payload["items"][0]["saved_image_url"] == alice_generate.json()["saved_image_url"]
+
+    update_gallery_item = alice_client.put(
+        f"/api/gallery/{alice_image_id}",
+        json={"is_favorite": True, "tags": ["海岛", " 高端旅行 ", "海岛", ""]},
+    )
+    assert update_gallery_item.status_code == 200
+    updated_item = update_gallery_item.json()["item"]
+    assert updated_item["is_favorite"] is True
+    assert updated_item["tags"] == ["海岛", "高端旅行"]
+
+    search_by_prompt = alice_client.get("/api/gallery?q=海岛")
+    assert search_by_prompt.status_code == 200
+    assert [item["id"] for item in search_by_prompt.json()["items"]] == [alice_image_id]
+
+    search_by_tag = alice_client.get("/api/gallery?tag=高端旅行")
+    assert search_by_tag.status_code == 200
+    assert [item["id"] for item in search_by_tag.json()["items"]] == [alice_image_id]
+
+    favorites_only = alice_client.get("/api/gallery?favorite=1")
+    assert favorites_only.status_code == 200
+    assert [item["id"] for item in favorites_only.json()["items"]] == [alice_image_id]
+
+    bob_cannot_update_alice = bob_client.put(
+        f"/api/gallery/{alice_image_id}",
+        json={"is_favorite": True, "tags": ["偷看"]},
+    )
+    assert bob_cannot_update_alice.status_code == 403
+    assert bob_cannot_update_alice.json()["code"] == "forbidden"
+
+    bob_gallery = bob_client.get("/api/gallery")
+    assert bob_gallery.status_code == 200
+    assert [item["id"] for item in bob_gallery.json()["items"]] == [bob_image_id]
+
+    admin_client = TestClient(client.app)
+    admin_login = admin_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert admin_login.status_code == 200
+    admin_all = admin_client.get("/api/gallery?scope=all")
+    assert admin_all.status_code == 200
+    assert admin_all.json()["scope"] == "all"
+    assert {item["id"] for item in admin_all.json()["items"]} == {alice_image_id, bob_image_id}
 
 
 def test_user_cannot_share_or_finalize_another_users_generated_image(make_client, settings_factory):
@@ -1043,3 +1446,394 @@ def test_files_endpoint_only_serves_saved_outputs(make_client, settings_factory)
     saved_output = client.get("/files/outputs/20260604/safe.png")
     assert saved_output.status_code == 200
     assert saved_output.content == b"png-bytes"
+
+
+def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        default_api_key="sk-test",
+        default_responses_model="gpt-5.5",
+    )
+    client, fake, _ = make_client(settings=settings)
+
+    admin_login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert admin_login.status_code == 200
+    client.post("/api/auth/logout")
+
+    minorli_client = TestClient(client.app)
+    minorli = minorli_client.post(
+        "/api/auth/register",
+        json={"username": "minorli", "password": USER_PASSWORD},
+    )
+    assert minorli.status_code == 200
+    assert minorli.json()["user"]["company"] == ""
+    assert minorli.json()["user"]["department"] == ""
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert alice.status_code == 200
+
+    bob_client = TestClient(client.app)
+    bob = bob_client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": USER_PASSWORD},
+    )
+    assert bob.status_code == 200
+
+    members = alice_client.get("/api/team-chat/members")
+    assert members.status_code == 200
+    member_names = [item["username"] for item in members.json()["members"]]
+    assert "GPT-BOT" in member_names
+    assert "bob" in member_names
+    assert "admin" not in member_names
+    assert "minorli" not in member_names
+    group = members.json()["group"]
+    assert group["company"] == "6renyou"
+    assert group["department"] == "PD & OPS"
+    assert group["room_key"].startswith("team:")
+
+    fake.run_responses.return_value = {"output_text": "可以，建议把标题压低一点，画面会更高级。"}
+    send = alice_client.post(
+        "/api/team-chat/messages",
+        json={"room_type": "team", "content": "@GPT-BOT 这张旅行海报怎么优化？"},
+    )
+    assert send.status_code == 200
+    created = send.json()["messages"]
+    assert [item["sender_type"] for item in created] == ["user"]
+    assert send.json()["bot_reply_pending"] is True
+
+    team_messages = []
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        messages = bob_client.get("/api/team-chat/messages?room_type=team")
+        assert messages.status_code == 200
+        team_messages = messages.json()["messages"]
+        if len(team_messages) >= 2:
+            break
+        time.sleep(0.05)
+    assert [item["sender_name"] for item in team_messages] == ["alice", "GPT-BOT"]
+    assert team_messages[1]["content"].startswith("@alice ")
+    fake.run_responses.assert_awaited_once()
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "gpt-5.5"
+    assert upstream_payload["reasoning"]["effort"] == "high"
+    prompt_text = upstream_payload["input"][0]["content"][0]["text"]
+    assert "高端定制旅行" in prompt_text
+    assert "全局图片质量助手" in prompt_text
+    assert "尊重用户自由提示词" in prompt_text
+    assert "不要把所有用户的提示词改成统一模板" in prompt_text
+    assert "不要强制套用历史风格" in prompt_text
+    assert "冷门小众但高质量" in prompt_text
+    assert "目的地" in prompt_text
+
+    bob_unread = bob_client.get("/api/team-chat/unread")
+    assert bob_unread.status_code == 200
+    assert bob_unread.json()["unread"]["total"] >= 2
+    assert bob_unread.json()["unread"]["rooms"][group["room_key"]] >= 2
+
+    minorli_messages = minorli_client.get("/api/team-chat/messages?room_type=team")
+    assert minorli_messages.status_code == 200
+    assert minorli_messages.json()["messages"] == []
+
+    read = bob_client.post(
+        "/api/team-chat/read",
+        json={"room_type": "team", "message_id": team_messages[-1]["id"]},
+    )
+    assert read.status_code == 200
+    bob_unread_after_read = bob_client.get("/api/team-chat/unread")
+    assert bob_unread_after_read.status_code == 200
+    assert bob_unread_after_read.json()["unread"]["rooms"].get(group["room_key"], 0) == 0
+
+
+def test_team_chat_group_is_scoped_by_company_and_department(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, _, _ = make_client(settings=settings)
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert alice.status_code == 200
+
+    bob_client = TestClient(client.app)
+    bob = bob_client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": USER_PASSWORD},
+    )
+    assert bob.status_code == 200
+
+    invalid_register = client.post(
+        "/api/auth/register",
+        json={
+            "username": "eve",
+            "password": USER_PASSWORD,
+            "company": "Other Co",
+            "department": "PD & OPS",
+        },
+    )
+    assert invalid_register.status_code == 400
+    assert invalid_register.json()["code"] == "validation_error"
+
+    invalid_profile = alice_client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice",
+            "company": "6renyou",
+            "department": "Marketing",
+        },
+    )
+    assert invalid_profile.status_code == 400
+    assert invalid_profile.json()["code"] == "validation_error"
+
+    carol_client = TestClient(client.app)
+    carol = carol_client.post(
+        "/api/auth/register",
+        json={"username": "carol", "password": USER_PASSWORD},
+    )
+    assert carol.status_code == 200
+
+    alice_members = alice_client.get("/api/team-chat/members")
+    assert alice_members.status_code == 200
+    alice_payload = alice_members.json()
+    alice_member_names = [item["username"] for item in alice_payload["members"]]
+    assert "bob" in alice_member_names
+    assert "carol" in alice_member_names
+    assert alice_payload["group"]["room_key"].startswith("team:")
+
+    send = alice_client.post(
+        "/api/team-chat/messages",
+        json={"room_type": "team", "content": "PD OPS 小组消息"},
+    )
+    assert send.status_code == 200
+
+    bob_messages = bob_client.get("/api/team-chat/messages?room_type=team")
+    assert bob_messages.status_code == 200
+    assert [item["content"] for item in bob_messages.json()["messages"]] == ["PD OPS 小组消息"]
+
+    carol_messages = carol_client.get("/api/team-chat/messages?room_type=team")
+    assert carol_messages.status_code == 200
+    assert [item["content"] for item in carol_messages.json()["messages"]] == ["PD OPS 小组消息"]
+
+
+def test_admin_org_dictionary_group_assets_stats_and_summary(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert alice.status_code == 200
+
+    bob_client = TestClient(client.app)
+    bob = bob_client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": USER_PASSWORD},
+    )
+    assert bob.status_code == 200
+    bob_id = bob.json()["user"]["id"]
+
+    admin_client = TestClient(client.app)
+    admin_login = admin_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert admin_login.status_code == 200
+
+    public_orgs = client.get("/api/org-units")
+    assert public_orgs.status_code == 200
+    assert ("6renyou", "PD & OPS") in {
+        (item["company"], item["department"]) for item in public_orgs.json()["org_units"]
+    }
+
+    orgs = admin_client.get("/api/admin/org-units")
+    assert orgs.status_code == 200
+    assert ("6renyou", "PD & OPS") in {
+        (item["company"], item["department"]) for item in orgs.json()["org_units"]
+    }
+
+    create_org = admin_client.post(
+        "/api/admin/org-units",
+        json={"company": "6renyou", "department": "Bespoke Travel"},
+    )
+    assert create_org.status_code == 200
+    assert create_org.json()["org_unit"]["is_active"] is True
+
+    move_bob = admin_client.put(
+        f"/api/admin/users/{bob_id}/org",
+        json={
+            "company": "6renyou",
+            "department": "Bespoke Travel",
+            "reason": "加入高端定制旅行组",
+        },
+    )
+    assert move_bob.status_code == 200
+    assert move_bob.json()["user"]["department"] == "Bespoke Travel"
+
+    admin_users = admin_client.get("/api/admin/users")
+    assert admin_users.status_code == 200
+    bob_admin_row = next(item for item in admin_users.json()["users"] if item["id"] == bob_id)
+    assert bob_admin_row["company"] == "6renyou"
+    assert bob_admin_row["department"] == "Bespoke Travel"
+
+    audit = admin_client.get("/api/admin/org-audit")
+    assert audit.status_code == 200
+    audit_events = audit.json()["events"]
+    assert audit_events[0]["target_user_id"] == bob_id
+    assert audit_events[0]["old_department"] == "PD & OPS"
+    assert audit_events[0]["new_department"] == "Bespoke Travel"
+    assert audit_events[0]["reason"] == "加入高端定制旅行组"
+
+    bob_members = bob_client.get("/api/team-chat/members")
+    assert bob_members.status_code == 200
+    assert bob_members.json()["group"]["department"] == "Bespoke Travel"
+    assert "alice" not in [item["username"] for item in bob_members.json()["members"]]
+
+    set_announcement = admin_client.put(
+        "/api/team-chat/group-announcement",
+        json={
+            "company": "6renyou",
+            "department": "Bespoke Travel",
+            "content": "本周优先沉淀高端定制旅行素材。",
+        },
+    )
+    assert set_announcement.status_code == 200
+
+    bob_announcement = bob_client.get("/api/team-chat/group-announcement")
+    assert bob_announcement.status_code == 200
+    assert bob_announcement.json()["announcement"]["content"] == "本周优先沉淀高端定制旅行素材。"
+
+    alice_announcement = alice_client.get("/api/team-chat/group-announcement")
+    assert alice_announcement.status_code == 200
+    assert alice_announcement.json()["announcement"] is None
+
+    generate = alice_client.post(
+        "/api/generate",
+        json={"prompt": "高端旅行海报，隐秘海岛度假", "model": "gpt-image-2"},
+    )
+    assert generate.status_code == 200
+    generated = generate.json()
+
+    feedback = alice_client.post(
+        "/api/feedback",
+        json={
+            "rating": "good",
+            "reason": "适合沉淀为参考",
+            "generated_image_id": generated["generated_image_id"],
+        },
+    )
+    assert feedback.status_code == 200
+
+    assets = alice_client.get("/api/team-chat/group-assets")
+    assert assets.status_code == 200
+    group_assets = assets.json()["assets"]
+    assert len(group_assets) == 1
+    assert group_assets[0]["generated_image_id"] == generated["generated_image_id"]
+    assert group_assets[0]["prompt"] == "高端旅行海报，隐秘海岛度假"
+
+    manual_asset = alice_client.post(
+        "/api/team-chat/group-assets",
+        json={
+            "generated_image_id": generated["generated_image_id"],
+            "title": "隐秘海岛主视觉",
+            "note": "适合作为高端海岛产品参考",
+        },
+    )
+    assert manual_asset.status_code == 200
+    assert manual_asset.json()["asset"]["title"] == "隐秘海岛主视觉"
+
+    duplicate_manual_asset = alice_client.post(
+        "/api/team-chat/group-assets",
+        json={
+            "generated_image_id": generated["generated_image_id"],
+            "title": "隐秘海岛主视觉二次保存",
+        },
+    )
+    assert duplicate_manual_asset.status_code == 200
+
+    assets_after_manual_save = alice_client.get("/api/team-chat/group-assets")
+    assert assets_after_manual_save.status_code == 200
+    assert len(assets_after_manual_save.json()["assets"]) == 1
+    assert assets_after_manual_save.json()["assets"][0]["title"] == "隐秘海岛主视觉二次保存"
+
+    stats = alice_client.get("/api/team-chat/group-stats")
+    assert stats.status_code == 200
+    stats_payload = stats.json()["stats"]
+    assert stats_payload["group"]["department"] == "PD & OPS"
+    assert stats_payload["users"]["member_count"] >= 1
+    assert stats_payload["usage"]["generated_image_count"] >= 1
+    assert stats_payload["feedback"]["totals"]["good"] == 1
+    assert stats_payload["assets"]["asset_count"] == 1
+
+    admin_org_stats = admin_client.get("/api/admin/org-stats")
+    assert admin_org_stats.status_code == 200
+    org_stats = admin_org_stats.json()["org_stats"]
+    pd_ops_stats = next(item for item in org_stats if item["group"]["department"] == "PD & OPS")
+    bespoke_stats = next(item for item in org_stats if item["group"]["department"] == "Bespoke Travel")
+    assert pd_ops_stats["usage"]["generated_image_count"] >= 1
+    assert pd_ops_stats["assets"]["asset_count"] == 1
+    assert bespoke_stats["users"]["member_count"] == 1
+
+    summary = alice_client.get("/api/team-chat/group-summary?days=7")
+    assert summary.status_code == 200
+    summary_text = summary.json()["summary"]["text"]
+    assert "6renyou · PD & OPS" in summary_text
+    assert "高端旅行海报" in summary_text
+    assert "满意 1" in summary_text
+
+
+def test_team_chat_private_rooms_are_limited_to_participants(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, _, _ = make_client(settings=settings)
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert alice.status_code == 200
+    bob_client = TestClient(client.app)
+    bob = bob_client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": USER_PASSWORD},
+    )
+    assert bob.status_code == 200
+    bob_id = bob.json()["user"]["id"]
+    carol_client = TestClient(client.app)
+    carol = carol_client.post(
+        "/api/auth/register",
+        json={"username": "carol", "password": USER_PASSWORD},
+    )
+    assert carol.status_code == 200
+
+    send = alice_client.post(
+        "/api/team-chat/messages",
+        json={"room_type": "dm", "recipient_user_id": bob_id, "content": "这个版式我觉得可以。"},
+    )
+    assert send.status_code == 200
+    assert send.json()["messages"][0]["room_type"] == "dm"
+
+    alice_id = alice.json()["user"]["id"]
+    bob_messages = bob_client.get(
+        f"/api/team-chat/messages?room_type=dm&recipient_user_id={alice_id}"
+    )
+    assert bob_messages.status_code == 200
+    assert bob_messages.json()["messages"][0]["content"] == "这个版式我觉得可以。"
+
+    carol_room = carol_client.get(f"/api/team-chat/messages?room_type=dm&recipient_user_id={bob_id}")
+    assert carol_room.status_code == 200
+    assert carol_room.json()["messages"] == []
