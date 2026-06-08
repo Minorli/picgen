@@ -34,29 +34,22 @@ const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时 502/503/504 会自动重试；第几次重试以最终错误详情或服务端日志为准。"
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
-const XINJIANG_ITINERARY_EXAMPLE_TITLE = "新疆深度定制旅行"
-const XINJIANG_ITINERARY_EXAMPLE_SUBTITLE = "5/12 - 5/24"
+const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
+const SANITIZED_ITINERARY_EXAMPLE_SUBTITLE = "示例日期范围"
 const AI_ITINERARY_EXAMPLE = [
-  "5/12：抵达乌鲁木齐，入住Super8国际酒店（乌鲁木齐高铁站北广场经开万达店）",
-  "5/13：伊宁（抵达） → 租车前往赛里木湖（赛里木湖AC万豪）",
-  "5/14：赛里木湖 → 晃晃村 霍城见树民宿（晃晃村店）",
-  "5/15：晃晃村 → 霍尔果斯 → 阿帕民宿（喀赞其店）",
-  "5/16：伊宁市休整 → 森林活动 (16:00-21:00) → （伊宁自治州博物馆文化路轻居酒店）",
-  "5/17：伊宁市 → 喀拉峻 → 特克斯（琼库什台暮云春树）",
-  "5/18：特克斯 → 阔克苏大峡谷-特克斯（慢慢民宿）",
-  "5/19：特克斯 → 库尔德宁 → 伊宁（伊宁自治州博物馆文化路轻居酒店）",
-  "5/20：伊宁经乌鲁木齐飞喀什（喀什古城万斐国际酒店）",
-  "5/21：喀什（喀什古城万斐国际酒店）",
-  "5/22：小团",
-  "5/23：小团回喀什（喀什亚朵）",
-  "5/24：喀什牛羊大巴扎",
+  "D1：抵达城市 A；交通：飞机；入住：酒店 A；当天重点：抵达、休整、城市初印象。",
+  "D2：城市 A → 景区 B；交通：包车/自驾；入住：酒店 B；当天重点：自然风光、观景点、轻徒步。",
+  "D3：景区 B → 小镇 C；交通：地面转场；入住：精品民宿 C；当天重点：小镇街区、当地餐食、人文体验。",
+  "D4：小镇 C → 城市 D；交通：火车/包车；入住：酒店 D；当天重点：博物馆、历史街区、夜景。",
+  "D5：城市 D 周边活动；交通：步行/短途车；入住：酒店 D；当天重点：自由活动、亲子或小团体验。",
+  "D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程或下一段旅程。",
 ].join("\n")
 const DETAILED_ITINERARY_TEMPLATE = [
   "行程基础信息：",
   "- 目的地/主题：请替换为本次路线目的地（例如：伊比利亚半岛亲子游 / 北欧峡湾自驾 / 日本关西赏枫）",
   "- 出行日期：请替换为本次真实日期范围（例如：5/12 - 5/24）",
   "- 客户偏好：请替换为真实偏好（例如：高端定制、小众自然风光、亲子友好、酒店质感、人文街区）",
-  "- 地图标题建议：请替换为客户可见标题（例如：多彩新疆游 / 伊比利亚半岛旅行地图）",
+  "- 地图标题建议：请替换为客户可见标题（例如：伊比利亚半岛旅行地图 / 北欧峡湾自驾路线）",
   "",
   "逐日行程：",
   "- 日期：城市/地点 A → 城市/地点 B；交通：请写明包车/自驾/火车/飞机/步行；入住：酒店名；当天重点：请写明 1-3 个核心活动。",
@@ -74,7 +67,7 @@ const DETAILED_ITINERARY_TEMPLATE = [
   "- 水彩漫画路线图，不要像手机导航截图或低质 PPT。",
   "- 日期必须逐日出现，不能漏任何一天；地点、交通、酒店和核心活动必须按用户原文保留。",
   "- 左上角预留 6 人游 LOGO 安全区；不要让 AI 绘制 LOGO，程序会用官方透明 PNG 原样贴入。",
-  "- 风格：水彩漫画路线图，参考 template-route.jpg 的表达方式：柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
+  "- 风格：水彩漫画路线图，使用柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
   "- 漫画风格不能牺牲地理真实性；日期、距离、交通方式、酒店和核心景区不能省略，信息丰富但不拥挤。",
 ].join("\n")
 
@@ -1507,7 +1500,7 @@ async function askBotWithCreativeBrief() {
 }
 
 function parseItinerarySize() {
-  const [widthText, heightText] = (refs.itinerarySizeSelect?.value || "1088x2240").split("x")
+  const [widthText, heightText] = (refs.itinerarySizeSelect?.value || "1792x1792").split("x")
   const width = Number.parseInt(widthText, 10)
   const height = Number.parseInt(heightText, 10)
   if (!Number.isInteger(width) || !Number.isInteger(height)) {
@@ -1522,7 +1515,7 @@ function parseItinerarySize() {
 function itineraryThemePrompt() {
   const theme = refs.itineraryThemeSelect?.value || "comic"
   if (theme === "comic") {
-    return "水彩漫画路线图，参考 template-route.jpg：柔和浅蓝/浅黄水彩底、清晰地图轮廓、红色粗路线、白心红点或圆点站位、手写感中文标题、地标小插画、车辆/飞机/脚印小图标；画面亲切有旅行手帐感，但漫画风格不能牺牲地理真实性，地点相对位置、路线顺序、日期、距离、交通方式、酒店和核心景区不能省略。"
+    return "水彩漫画路线图：柔和浅蓝/浅黄水彩底、清晰地图轮廓、红色粗路线、白心红点或圆点站位、手写感中文标题、地标小插画、车辆/飞机/火车/脚印小图标；画面亲切有旅行手帐感，但漫画风格不能牺牲地理真实性，地点相对位置、路线顺序、日期、距离、交通方式、酒店和核心景区不能省略。"
   }
   if (theme === "dark") {
     return "深色高级手绘地形地图，午夜蓝与暖金路线，低饱和、高对比，适合高端旅行海报；保留真实山脉、湖泊、沙漠和城市层级，路线像精品旅行地图而不是导航截图。"
@@ -1530,21 +1523,7 @@ function itineraryThemePrompt() {
   if (theme === "classic") {
     return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线、指南针和图例，保持现代高级旅行质感，地点落位仍必须服从真实地理。"
   }
-  return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；视觉仍参考 template-route.jpg 的红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
-}
-
-function shouldUseXinjiangRouteGuard(description) {
-  const text = String(description || "")
-  return /新疆|乌鲁木齐|伊宁|伊犁|赛里木湖|喀拉峻|库尔德宁|琼库什台|特克斯|阔克苏|霍尔果斯|喀什|塔克拉玛干|那拉提/.test(text)
-}
-
-function xinjiangRouteGuardPrompt() {
-  return [
-    "- 仅当行程文本包含新疆、伊犁、赛里木湖、喀拉峻、库尔德宁、喀什等新疆地点时才追加以下校验。",
-    "- 新疆伊犁/南疆行程的重点校验：赛里木湖在伊犁河谷西北方向，伊宁是伊犁河谷重要中心城市，特克斯在伊宁东南方向，喀拉峻在特克斯县方向，琼库什台在特克斯南部山区方向，库尔德宁在巩留县方向，那拉提在新源县方向，喀什在南疆；严禁把库尔德宁和喀拉峻位置画反或互换。",
-    "- 不要把库尔德宁和喀拉峻位置互换；新疆路线应让赛里木湖、伊犁河谷、天山山脉、塔克拉玛干沙漠、喀什形成清楚地理层次。",
-    "- 如果是西班牙、欧洲或其他非新疆目的地，不要套用新疆地点和地貌校验。",
-  ]
+  return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；使用红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
 }
 
 function drawItineraryLogoSafeArea() {
@@ -1572,7 +1551,6 @@ function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
   if (isCompleteItineraryPrompt(normalizedDescription)) {
     return normalizedDescription
   }
-  const geographyGuards = shouldUseXinjiangRouteGuard(normalizedDescription) ? xinjiangRouteGuardPrompt() : []
   return [
     "请生成一张漫画风格的高级定制旅行行程路线图海报，不是普通导航截图，也不是纯信息表格。",
     `标题：${normalizedTitle}`,
@@ -1584,15 +1562,13 @@ function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
     "画面与信息要求：",
     "- 地理正确性硬性要求：所有地点落位、东西南北关系、前后路线顺序必须以真实地图为准；不能为了画面好看而调整地点相对位置，也不要把城市、景区顺序画反。",
     "- 对任何目的地都要先按真实世界地图理解相对位置：城市、国家/地区边界、山脉、湖泊、海岸线、岛屿、沙漠、峡谷和主要交通走廊不能乱画。",
-    ...geographyGuards,
     "- 必须展示行程原文里的每一个日期，不要漏掉中间日期；日期必须逐日出现，像 5/18 这样的中间日期也必须单独标出；日期标签用小金色日期牌或清晰日程标签呈现。",
     "- 地点层级要有主次；酒店可作为小字备注，不要把所有酒店全文挤满画面，但不能删掉用户明确给出的核心城市、景区、日期和活动。",
     "- 每两个连续地点之间必须有路线连接，并必须标注大致距离或飞行/转场说明；若无法确定精确距离，用“约 xx km”或“飞行转场”这类合理估算，不要空着。",
     "- 自驾/包车路线用实线或柔和路线带，飞机/长距离转场用虚线或飞行弧线，避免路线互相缠绕。",
     "- 在每段连接线中间放一个很小的交通工具图标：自驾/包车用小车图标，飞机转场用飞机图标，步行/活动可用小脚印或点线；图标要小而精致，不遮挡地点和日期。",
     "- 画面需要像高级旅行定制海报，适合发给客户预览；采用水彩漫画路线图表达，地图轮廓清晰、地貌层次准确、地标小插画精致；不要像低质 PPT、不要像手机地图截图。",
-    "- 漫画风格参考 template-route.jpg 的视觉语言：柔和水彩铺底、红色粗路线、圆点站位、手写感标题、地标小插画、海/湖/山地用轻松但清晰的插画表达；但信息密度和真实地理不能下降。",
-    "- 已验证满意样张的稳定风格（参考请求 22cee0390f9c）：上方日期区间，左上 LOGO 安全区，地点层级清楚，路线连接完整，信息丰富但不拥挤；本次保持这些信息组织方式，视觉切换为漫画路线图。",
+    "- 漫画路线图视觉语言：柔和水彩铺底、红色粗路线、圆点站位、手写感标题、地标小插画、海/湖/山地用轻松但清晰的插画表达；但信息密度和真实地理不能下降。",
     `- 视觉风格：${theme || itineraryThemePrompt()}`,
     `- ${drawItineraryLogoSafeArea()}`,
     "- 不要出现 OpenAI、API、debug、水印、二维码、虚构品牌 LOGO。",
@@ -1701,10 +1677,10 @@ async function submitAIItineraryMap() {
 
 function resetItineraryMapExample() {
   if (refs.itineraryTitleInput) {
-    refs.itineraryTitleInput.value = XINJIANG_ITINERARY_EXAMPLE_TITLE
+    refs.itineraryTitleInput.value = SANITIZED_ITINERARY_EXAMPLE_TITLE
   }
   if (refs.itinerarySubtitleInput) {
-    refs.itinerarySubtitleInput.value = XINJIANG_ITINERARY_EXAMPLE_SUBTITLE
+    refs.itinerarySubtitleInput.value = SANITIZED_ITINERARY_EXAMPLE_SUBTITLE
   }
   if (refs.itineraryDescriptionInput) {
     refs.itineraryDescriptionInput.value = AI_ITINERARY_EXAMPLE
@@ -3679,7 +3655,7 @@ function createWorkspaceSnapshot() {
       creativeBrief: creativeBriefSnapshot(),
       itineraryTitle: refs.itineraryTitleInput?.value || "",
       itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
-      itinerarySize: refs.itinerarySizeSelect?.value || "1088x2240",
+      itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
       itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
       itineraryDescription: refs.itineraryDescriptionInput?.value || "",
       itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
@@ -3766,7 +3742,7 @@ async function restoreWorkspaceState() {
     refs.itinerarySubtitleInput.value = forms.itinerarySubtitle || refs.itinerarySubtitleInput.value
   }
   if (refs.itinerarySizeSelect) {
-    refs.itinerarySizeSelect.value = forms.itinerarySize || "1088x2240"
+    refs.itinerarySizeSelect.value = forms.itinerarySize || "1792x1792"
   }
   if (refs.itineraryThemeSelect) {
     refs.itineraryThemeSelect.value = forms.itineraryTheme || "comic"
@@ -4453,7 +4429,7 @@ function currentFormSnapshot() {
     creativeBrief: creativeBriefSnapshot(),
     itineraryTitle: refs.itineraryTitleInput?.value || "",
     itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
-    itinerarySize: refs.itinerarySizeSelect?.value || "1088x2240",
+    itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
     itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
     itineraryDescription: refs.itineraryDescriptionInput?.value || "",
     itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
@@ -4495,7 +4471,7 @@ function applyFormSnapshot(snapshot) {
     refs.itinerarySubtitleInput.value = snapshot.itinerarySubtitle || refs.itinerarySubtitleInput.value
   }
   if (refs.itinerarySizeSelect) {
-    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "1088x2240"
+    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "1792x1792"
   }
   if (refs.itineraryThemeSelect) {
     refs.itineraryThemeSelect.value = snapshot.itineraryTheme || "comic"

@@ -247,9 +247,18 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert 'value="comic"' in index_html
     assert "漫画路线图" in index_html
     assert "默认按漫画风格路线图生成" in index_html
+    assert index_html.index('<option value="1792x1792">方图 1792 x 1792</option>') < index_html.index(
+        '<option value="1088x2240">6 人游竖版 1088 x 2240</option>'
+    )
     assert 'value="1088x2240"' in index_html
     assert 'value="1792x1792"' in index_html
     assert 'value="1920x1088"' in index_html
+    assert "抵达乌鲁木齐" not in index_html
+    assert "赛里木湖" not in index_html
+    assert "喀拉峻" not in index_html
+    assert "库尔德宁" not in index_html
+    assert "Super8" not in index_html
+    assert "喀什古城万斐国际酒店" not in index_html
     assert "1800x1800" not in index_html
     assert "1920x1080" not in index_html
 
@@ -264,7 +273,8 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "AI_ITINERARY_EXAMPLE" in app_js
     assert "DETAILED_ITINERARY_TEMPLATE" in app_js
     assert "DEFAULT_ITINERARY_TITLE" in app_js
-    assert "XINJIANG_ITINERARY_EXAMPLE_TITLE" in app_js
+    assert "SANITIZED_ITINERARY_EXAMPLE_TITLE" in app_js
+    assert "XINJIANG_ITINERARY_EXAMPLE_TITLE" not in app_js
     assert "目的地/主题：请替换为本次路线目的地" in detailed_template
     assert "出行日期：请替换为本次真实日期范围" in detailed_template
     assert "地图标题建议：请替换为客户可见标题" in detailed_template
@@ -274,44 +284,42 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert '"- 地图标题建议：新疆游"' not in detailed_template
     assert "赛里木湖 AC 万豪" not in detailed_template
     assert "喀什古城万斐国际酒店" not in detailed_template
+    assert "真实客户姓名" not in app_js
+    assert "真实订单" not in app_js
+    assert "真实酒店" not in app_js
     assert "行程基础信息" in app_js
     assert "逐日行程" in app_js
     assert "地点与地理校验" in app_js
-    assert "不要把库尔德宁和喀拉峻位置互换" in app_js
     assert "copyDetailedItineraryTemplate" in app_js
     assert "applyDetailedItineraryTemplate" in app_js
-    assert "shouldUseXinjiangRouteGuard" in app_js
-    assert "xinjiangRouteGuardPrompt" in app_js
+    assert "shouldUseXinjiangRouteGuard" not in app_js
+    assert "xinjiangRouteGuardPrompt" not in app_js
     assert "api/generate" in app_js
     assert "drawItineraryLogoSafeArea" in app_js
     assert "withLogoLayoutPrompt(aiPrompt, logoRequested)" in app_js
     assert "地理正确性硬性要求" in app_js
     assert "不能为了画面好看而调整地点相对位置" in app_js
-    assert "库尔德宁在巩留县方向" in app_js
-    assert "喀拉峻在特克斯县方向" in app_js
-    assert "严禁把库尔德宁和喀拉峻位置画反或互换" in app_js
-    assert "伊宁是伊犁河谷重要中心城市" in app_js
-    assert "琼库什台在特克斯南部山区方向" in app_js
-    assert "赛里木湖在伊犁河谷西北方向" in app_js
-    assert "喀什在南疆" in app_js
+    assert "库尔德宁" not in app_js
+    assert "喀拉峻" not in app_js
+    assert "伊宁" not in app_js
+    assert "琼库什台" not in app_js
+    assert "赛里木湖" not in app_js
+    assert "喀什" not in app_js
     assert "日期必须逐日出现" in app_js
     assert "5/18" in app_js
     assert "每两个连续地点之间必须有路线连接" in app_js
     assert "必须标注大致距离或飞行/转场说明" in app_js
     assert "交通工具图标" in app_js
-    assert "template-route.jpg" in app_js
     assert "水彩漫画路线图" in app_js
     assert "红色粗路线" in app_js
     assert "圆点站位" in app_js
     assert "地标小插画" in app_js
     assert "漫画风格不能牺牲地理真实性" in app_js
     assert "日期、距离、交通方式、酒店和核心景区不能省略" in app_js
-    assert "已验证满意样张的稳定风格" in app_js
-    assert "22cee0390f9c" in app_js
-    assert "新疆游" in app_js
-    assert "赛里木湖、伊犁河谷、天山山脉、塔克拉玛干沙漠、喀什" in app_js
-    assert "仅当行程文本包含新疆、伊犁、赛里木湖、喀拉峻、库尔德宁、喀什等新疆地点时才追加" in app_js
-    assert "如果是西班牙、欧洲或其他非新疆目的地，不要套用新疆地点和地貌校验" in app_js
+    assert "template-route.jpg" not in app_js
+    assert "已验证满意样张的稳定风格" not in app_js
+    assert "22cee0390f9c" not in app_js
+    assert "新疆游" not in app_js
     assert 'mode: "itinerary"' in app_js
     assert 'transport: "images-generate"' in app_js
     assert "行程描述不能为空" in app_js
