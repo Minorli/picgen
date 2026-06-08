@@ -6,6 +6,7 @@ import json
 import secrets
 import sqlite3
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,7 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 TEAM_CHAT_BOT_ID = "gpt-bot"
@@ -311,6 +312,15 @@ class AuthStore:
                     CREATE INDEX IF NOT EXISTS idx_generated_images_url ON generated_images(saved_image_url);
                     CREATE INDEX IF NOT EXISTS idx_generated_images_path ON generated_images(saved_image_path);
 
+                    CREATE TABLE IF NOT EXISTS generated_image_metadata (
+                        generated_image_id INTEGER PRIMARY KEY,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        migrated_from_path TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (generated_image_id) REFERENCES generated_images(id) ON DELETE CASCADE
+                    );
+
                     CREATE TABLE IF NOT EXISTS gallery_image_metadata (
                         generated_image_id INTEGER NOT NULL,
                         user_id INTEGER NOT NULL,
@@ -467,6 +477,7 @@ class AuthStore:
                     """
                 )
                 self._run_schema_migrations(conn)
+                _migrate_legacy_image_sidecars(conn)
             self._initialized = True
 
     def create_user(
@@ -1347,7 +1358,15 @@ class AuthStore:
                         now,
                     ),
                 )
-                created.append({"id": _require_lastrowid(cursor), "candidate_index": index})
+                generated_image_id = _require_lastrowid(cursor)
+                _upsert_generated_image_metadata(
+                    conn,
+                    generated_image_id=generated_image_id,
+                    metadata=image.get("metadata"),
+                    migrated_from_path="",
+                    now=now,
+                )
+                created.append({"id": generated_image_id, "candidate_index": index})
         return created
 
     def fail_generation_job(
@@ -1434,6 +1453,7 @@ class AuthStore:
                     saved_image_width = ?,
                     saved_image_height = ?,
                     saved_image_bytes = ?,
+                    logo_requested = CASE WHEN ? THEN 1 ELSE logo_requested END,
                     logo_overlay_applied = ?
                 WHERE id = ?
                 """,
@@ -1447,6 +1467,7 @@ class AuthStore:
                     _optional_int(image.get("saved_image_width")),
                     _optional_int(image.get("saved_image_height")),
                     max(0, int(image.get("saved_image_bytes") or 0)),
+                    1 if logo_overlay_applied else 0,
                     1 if logo_overlay_applied else 0,
                     generated_image_id,
                 ),
@@ -1485,6 +1506,13 @@ class AuthStore:
                 WHERE id = ?
                 """,
                 (now, int(updated["job_id"]) if updated is not None else 0),
+            )
+            _upsert_generated_image_metadata(
+                conn,
+                generated_image_id=generated_image_id,
+                metadata=image.get("metadata"),
+                migrated_from_path="",
+                now=now,
             )
         if updated is None:
             raise RuntimeError("更新后的图片记录不存在")
@@ -2580,17 +2608,33 @@ class AuthStore:
         bounded_limit = max(1, min(limit, 200))
         bounded_after_id = max(0, int(after_id or 0))
         with self._lock, self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM team_chat_messages
-                WHERE room_key = ?
-                  AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (room_key.strip()[:128], bounded_after_id, bounded_limit),
-            ).fetchall()
+            if bounded_after_id > 0:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM team_chat_messages
+                    WHERE room_key = ?
+                      AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (room_key.strip()[:128], bounded_after_id, bounded_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM (
+                        SELECT *
+                        FROM team_chat_messages
+                        WHERE room_key = ?
+                        ORDER BY id DESC
+                        LIMIT ?
+                    )
+                    ORDER BY id ASC
+                    """,
+                    (room_key.strip()[:128], bounded_limit),
+                ).fetchall()
         return [_team_chat_message_row_to_dict(row) for row in rows]
 
     def mark_team_chat_read(self, *, user_id: int, room_key: str, message_id: int) -> dict[str, Any]:
@@ -3085,6 +3129,8 @@ class AuthStore:
             ON gallery_image_tags(generated_image_id, user_id)
             """
         )
+        _ensure_generated_image_metadata_table(conn)
+        _migrate_legacy_image_sidecars(conn)
         conn.execute("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''")
         conn.execute("UPDATE users SET is_active = 1 WHERE is_active IS NULL")
         conn.execute(
@@ -3606,6 +3652,126 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str
                 existing = refreshed
             else:
                 existing.add(name)
+
+
+def _ensure_generated_image_metadata_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS generated_image_metadata (
+            generated_image_id INTEGER PRIMARY KEY,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            migrated_from_path TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (generated_image_id) REFERENCES generated_images(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _serialize_metadata_json(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return "{}"
+    try:
+        return json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _upsert_generated_image_metadata(
+    conn: sqlite3.Connection,
+    *,
+    generated_image_id: int,
+    metadata: Any,
+    migrated_from_path: str,
+    now: str,
+) -> None:
+    metadata_json = _serialize_metadata_json(metadata)
+    if metadata_json == "{}" and not migrated_from_path:
+        return
+    conn.execute(
+        """
+        INSERT INTO generated_image_metadata (
+            generated_image_id,
+            metadata_json,
+            migrated_from_path,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(generated_image_id) DO UPDATE SET
+            metadata_json = excluded.metadata_json,
+            migrated_from_path = CASE
+                WHEN excluded.migrated_from_path != '' THEN excluded.migrated_from_path
+                ELSE generated_image_metadata.migrated_from_path
+            END,
+            updated_at = excluded.updated_at
+        """,
+        (
+            generated_image_id,
+            metadata_json,
+            migrated_from_path.strip()[:1024],
+            now,
+            now,
+        ),
+    )
+
+
+def _is_registered_sidecar_for_image(*, metadata_path: Path, image_path: Path) -> bool:
+    try:
+        metadata_path = metadata_path.resolve(strict=False)
+        image_path = image_path.resolve(strict=False)
+    except OSError:
+        return False
+    return (
+        metadata_path.suffix.lower() == ".json"
+        and image_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        and metadata_path.parent == image_path.parent
+        and metadata_path.stem == image_path.stem
+    )
+
+
+def _migrate_legacy_image_sidecars(conn: sqlite3.Connection) -> int:
+    _ensure_generated_image_metadata_table(conn)
+    rows = conn.execute(
+        """
+        SELECT
+            gi.id,
+            gi.saved_image_path,
+            gi.saved_metadata_path
+        FROM generated_images gi
+        LEFT JOIN generated_image_metadata gim
+            ON gim.generated_image_id = gi.id
+        WHERE gi.saved_metadata_path != ''
+          AND gim.generated_image_id IS NULL
+        """
+    ).fetchall()
+    migrated = 0
+    now = _now_text()
+    for row in rows:
+        metadata_path = Path(str(row["saved_metadata_path"] or ""))
+        image_path = Path(str(row["saved_image_path"] or ""))
+        if not _is_registered_sidecar_for_image(metadata_path=metadata_path, image_path=image_path):
+            continue
+        if not metadata_path.is_file():
+            continue
+        try:
+            parsed = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        _upsert_generated_image_metadata(
+            conn,
+            generated_image_id=int(row["id"]),
+            metadata=parsed,
+            migrated_from_path=str(metadata_path),
+            now=now,
+        )
+        with suppress(OSError):
+            metadata_path.unlink()
+        migrated += 1
+    return migrated
 
 
 def _optional_int(value: Any) -> int | None:

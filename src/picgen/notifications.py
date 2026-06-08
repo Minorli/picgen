@@ -212,8 +212,9 @@ def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
     prompt = redact_sensitive_text(alert.prompt, limit=600)
     urls = [redact_sensitive_text(url, limit=300) for url in alert.saved_image_urls[:5] if url]
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
+    title = "LOGO 成品已保存" if alert.path == "/api/final-images" else "生图成功"
     lines = [
-        f"【PicGen｜生图成功】{alert.username or '-'} #{alert.job_id}",
+        f"【PicGen｜{title}】{alert.username or '-'} #{alert.job_id}",
         f"用户：{alert.username or '-'} (#{alert.user_id})",
         f"任务：#{alert.job_id} / {alert.request_id or '-'}",
         f"接口：{alert.method} {alert.path}",

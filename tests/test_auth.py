@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -613,7 +614,7 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
         admin_password=ADMIN_PASSWORD,
         default_api_key="sk-test",
     )
-    client, fake, _ = make_client(settings=settings)
+    client, fake, resolved_settings = make_client(settings=settings)
     fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
 
     admin_login = client.post(
@@ -661,12 +662,24 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     assert generate_response.status_code == 200
     payload = generate_response.json()
     assert payload["user"]["username"] == "alice"
-    metadata = json.loads(Path(payload["saved_metadata_path"]).read_text(encoding="utf-8"))
-    assert metadata["user_id"] == created["id"]
-    assert metadata["username"] == "alice"
+    assert payload["saved_metadata_path"] == ""
+    assert payload["saved_metadata_url"] == ""
     assert payload["generation_job_id"] > 0
     assert payload["generated_image_id"] > 0
     assert payload["saved_image_name"].startswith("alice-generate-")
+    assert not list(Path(payload["saved_image_path"]).parent.glob("*.json"))
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        metadata_row = conn.execute(
+            "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = ?",
+            (payload["generated_image_id"],),
+        ).fetchone()
+    assert metadata_row is not None
+    metadata = json.loads(metadata_row["metadata_json"])
+    assert metadata["user_id"] == created["id"]
+    assert metadata["username"] == "alice"
+    assert metadata["saved_image_width"] == 1
 
     fetched_image = client.get(f"/{payload['saved_image_url']}")
     assert fetched_image.status_code == 200
@@ -775,7 +788,25 @@ def test_result_feedback_is_recorded_and_admin_can_review_summary(make_client, s
 def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(make_client, settings_factory, tmp_path):
     db_path = tmp_path / "data" / "legacy.sqlite3"
     db_path.parent.mkdir(parents=True)
-    import sqlite3
+    legacy_output_dir = tmp_path / "data" / "outputs" / "20260608"
+    legacy_output_dir.mkdir(parents=True)
+    legacy_image_path = legacy_output_dir / "legacy-generate-120000-deadbeef.png"
+    legacy_metadata_path = legacy_output_dir / "legacy-generate-120000-deadbeef.json"
+    legacy_image_path.write_bytes(b"legacy-image")
+    legacy_metadata_path.write_text(
+        json.dumps(
+            {
+                "mode": "generate",
+                "prompt": "旧图提示词",
+                "model": "gpt-image-2",
+                "saved_image_width": 1024,
+                "saved_image_height": 1024,
+                "saved_image_bytes": len(b"legacy-image"),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
@@ -817,7 +848,84 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
                 resolved_at TEXT,
                 resolved_by_user_id INTEGER
             );
+            CREATE TABLE generation_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL DEFAULT '',
+                user_id INTEGER,
+                username TEXT NOT NULL DEFAULT '',
+                endpoint_path TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT '',
+                transport TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'succeeded',
+                prompt TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                size TEXT NOT NULL DEFAULT '',
+                sample_count INTEGER NOT NULL DEFAULT 1,
+                logo_requested INTEGER NOT NULL DEFAULT 0,
+                image_count INTEGER NOT NULL DEFAULT 1,
+                saved_bytes INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                elapsed_ms REAL
+            );
+            CREATE TABLE generated_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                user_id INTEGER,
+                candidate_index INTEGER NOT NULL DEFAULT 0,
+                mode TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                prompt TEXT NOT NULL DEFAULT '',
+                saved_image_path TEXT NOT NULL DEFAULT '',
+                saved_image_url TEXT NOT NULL DEFAULT '',
+                saved_image_name TEXT NOT NULL DEFAULT '',
+                saved_metadata_path TEXT NOT NULL DEFAULT '',
+                saved_metadata_url TEXT NOT NULL DEFAULT '',
+                saved_image_mime TEXT NOT NULL DEFAULT '',
+                saved_image_width INTEGER,
+                saved_image_height INTEGER,
+                saved_image_bytes INTEGER NOT NULL DEFAULT 0,
+                logo_requested INTEGER NOT NULL DEFAULT 0,
+                logo_overlay_applied INTEGER NOT NULL DEFAULT 0,
+                first_served_at TEXT,
+                last_served_at TEXT,
+                served_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
             """
+        )
+        conn.execute(
+            """
+            INSERT INTO generation_jobs (
+                id, request_id, endpoint_path, mode, transport, status, prompt, model, size,
+                sample_count, image_count, saved_bytes, started_at, completed_at
+            )
+            VALUES (99, 'legacy-request', '/api/generate', 'generate', 'images-generate', 'succeeded',
+                    '旧图提示词', 'gpt-image-2', '1024x1024', 1, 1, ?, '2026-06-08T12:00:00+00:00',
+                    '2026-06-08T12:00:10+00:00')
+            """,
+            (len(b"legacy-image"),),
+        )
+        conn.execute(
+            """
+            INSERT INTO generated_images (
+                id, job_id, candidate_index, mode, model, prompt, saved_image_path, saved_image_url,
+                saved_image_name, saved_metadata_path, saved_metadata_url, saved_image_mime,
+                saved_image_width, saved_image_height, saved_image_bytes, created_at
+            )
+            VALUES (101, 99, 0, 'generate', 'gpt-image-2', '旧图提示词', ?, ?,
+                    'legacy-generate-120000-deadbeef.png', ?, ?, 'image/png',
+                    1024, 1024, ?, '2026-06-08T12:00:10+00:00')
+            """,
+            (
+                str(legacy_image_path),
+                "files/outputs/20260608/legacy-generate-120000-deadbeef.png",
+                str(legacy_metadata_path),
+                "files/outputs/20260608/legacy-generate-120000-deadbeef.json",
+                len(b"legacy-image"),
+            ),
         )
 
     settings = settings_factory(
@@ -864,6 +972,7 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         assert "user_preferences" in tables
         assert "generation_jobs" in tables
         assert "generated_images" in tables
+        assert "generated_image_metadata" in tables
         assert "gallery_image_metadata" in tables
         assert "gallery_image_tags" in tables
         assert "image_delivery_events" in tables
@@ -897,62 +1006,96 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         assert user["company"] == "6renyou"
         assert user["department"] == "PD & OPS"
         assert user["last_seen_at"]
-        job = conn.execute("SELECT * FROM generation_jobs").fetchone()
+        job = conn.execute(
+            "SELECT * FROM generation_jobs WHERE id = ?",
+            (generated["generation_job_id"],),
+        ).fetchone()
         assert job["user_id"] == user_id
         assert job["status"] == "succeeded"
         assert job["mode"] == "generate"
         assert job["logo_requested"] == 1
-        image = conn.execute("SELECT * FROM generated_images").fetchone()
+        image = conn.execute(
+            "SELECT * FROM generated_images WHERE id = ?",
+            (generated["generated_image_id"],),
+        ).fetchone()
         assert image["job_id"] == job["id"]
         assert image["user_id"] == user_id
         assert image["saved_image_name"].startswith("wilsonwei-generate-")
         assert image["served_count"] == 1
         delivery = conn.execute("SELECT * FROM image_delivery_events").fetchone()
         assert delivery["generated_image_id"] == image["id"]
+        legacy_metadata = conn.execute(
+            "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = 101"
+        ).fetchone()
+        assert legacy_metadata is not None
+        assert json.loads(legacy_metadata["metadata_json"])["prompt"] == "旧图提示词"
+        new_metadata = conn.execute(
+            "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = ?",
+            (generated["generated_image_id"],),
+        ).fetchone()
+        assert new_metadata is not None
+    assert not legacy_metadata_path.exists()
 
 
 def test_final_logo_image_upload_replaces_canonical_generated_image(make_client, settings_factory):
+    alerts = []
+
+    async def _fake_send_generation_success_notification(**kwargs):
+        alerts.append(kwargs["alert"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
     settings = settings_factory(
         auth_enabled=True,
         default_api_key="sk-test",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
     )
     client, fake, resolved_settings = make_client(settings=settings)
     fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    import picgen.routes
 
-    register_response = client.post(
-        "/api/auth/register",
-        json={"username": "alice", "password": USER_PASSWORD},
-    )
-    assert register_response.status_code == 200
+    original_notifier = picgen.routes.send_generation_success_notification
+    picgen.routes.send_generation_success_notification = _fake_send_generation_success_notification
 
-    generate_response = client.post(
-        "/api/generate",
-        json={
-            "prompt": "生成一张旅行海报",
-            "model": "gpt-image-2",
-            "logo_requested": True,
-        },
-    )
-    assert generate_response.status_code == 200
-    generated = generate_response.json()
-    original_url = generated["saved_image_url"]
-    generated_image_id = generated["generated_image_id"]
+    try:
+        register_response = client.post(
+            "/api/auth/register",
+            json={"username": "alice", "password": USER_PASSWORD},
+        )
+        assert register_response.status_code == 200
 
-    final_response = client.post(
-        "/api/final-images",
-        json={
-            "generated_image_id": generated_image_id,
-            "source_saved_image_url": original_url,
-            "logo_overlay_applied": True,
-            "logo_overlay_source": "6renyou.png",
-            "logo_text_color": "black",
-            "image": {
-                "name": "result-logo.png",
-                "type": "image/png",
-                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+        generate_response = client.post(
+            "/api/generate",
+            json={
+                "prompt": "生成一张旅行海报",
+                "model": "gpt-image-2",
+                "logo_requested": True,
             },
-        },
-    )
+        )
+        assert generate_response.status_code == 200
+        generated = generate_response.json()
+        original_url = generated["saved_image_url"]
+        generated_image_id = generated["generated_image_id"]
+
+        final_response = client.post(
+            "/api/final-images",
+            json={
+                "generated_image_id": generated_image_id,
+                "source_saved_image_url": original_url,
+                "logo_overlay_applied": True,
+                "logo_overlay_source": "6renyou.png",
+                "logo_text_color": "black",
+                "image": {
+                    "name": "result-logo.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            },
+        )
+    finally:
+        picgen.routes.send_generation_success_notification = original_notifier
     assert final_response.status_code == 200
     final_payload = final_response.json()["image"]
     assert final_payload["generated_image_id"] == generated_image_id
@@ -960,7 +1103,10 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
     assert final_payload["saved_image_name"].startswith("alice-generate-")
     assert final_payload["saved_image_name"].endswith("-logo.png")
     assert final_payload["logo_overlay_applied"] is True
+    assert final_payload["saved_metadata_path"] == ""
+    assert final_payload["saved_metadata_url"] == ""
     assert Path(final_payload["saved_image_path"]).is_file()
+    assert not Path(final_payload["saved_image_path"]).with_suffix(".json").exists()
 
     fetched = client.get(f"/{final_payload['saved_image_url']}")
     assert fetched.status_code == 200
@@ -978,6 +1124,25 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
         assert image["saved_image_path"] == final_payload["saved_image_path"]
         assert image["saved_metadata_url"] == final_payload["saved_metadata_url"]
         assert image["logo_overlay_applied"] == 1
+        metadata_row = conn.execute(
+            "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = ?",
+            (generated_image_id,),
+        ).fetchone()
+        assert metadata_row is not None
+        metadata = json.loads(metadata_row["metadata_json"])
+        assert metadata["source_saved_image_url"] == original_url
+        assert metadata["logo_overlay_applied"] is True
+        assert metadata["logo_overlay_source"] == "6renyou.png"
+    assert len(alerts) == 2
+    generation_alert, final_alert = alerts
+    assert generation_alert.logo_requested is True
+    assert generation_alert.logo_overlay_applied is False
+    assert final_alert.path == "/api/final-images"
+    assert final_alert.mode == "generate"
+    assert final_alert.logo_requested is True
+    assert final_alert.logo_overlay_applied is True
+    assert final_alert.saved_image_urls == [final_payload["saved_image_url"]]
+    assert final_alert.generated_image_ids == [generated_image_id]
 
 
 def test_user_preferences_are_persisted_without_api_key(make_client, settings_factory):
@@ -1494,9 +1659,15 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     assert "bob" in member_names
     assert "admin" not in member_names
     assert "minorli" not in member_names
+    assert members.json()["bot"]["username"] == "GPT-BOT"
+    human_member_names = [item["username"] for item in members.json()["human_members"]]
+    assert human_member_names == ["bob"]
     group = members.json()["group"]
     assert group["company"] == "6renyou"
     assert group["department"] == "PD & OPS"
+    assert group["title"] == "PD & OPS"
+    assert group["subtitle"] == "6renyou · 部门群"
+    assert group["member_count"] == 1
     assert group["room_key"].startswith("team:")
 
     fake.run_responses.return_value = {"output_text": "可以，建议把标题压低一点，画面会更高级。"}
@@ -1550,6 +1721,41 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     bob_unread_after_read = bob_client.get("/api/team-chat/unread")
     assert bob_unread_after_read.status_code == 200
     assert bob_unread_after_read.json()["unread"]["rooms"].get(group["room_key"], 0) == 0
+
+
+def test_team_chat_messages_initial_load_returns_latest_window(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, _, _ = make_client(settings=settings)
+
+    alice_client = TestClient(client.app)
+    assert alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    ).status_code == 200
+
+    for index in range(205):
+        response = alice_client.post(
+            "/api/team-chat/messages",
+            json={"room_type": "team", "content": f"message-{index:03d}"},
+        )
+        assert response.status_code == 200
+
+    initial = alice_client.get("/api/team-chat/messages?room_type=team")
+    assert initial.status_code == 200
+    initial_messages = initial.json()["messages"]
+    assert len(initial_messages) == 100
+    assert initial_messages[0]["content"] == "message-105"
+    assert initial_messages[-1]["content"] == "message-204"
+
+    latest_id = initial_messages[-1]["id"]
+    next_response = alice_client.post(
+        "/api/team-chat/messages",
+        json={"room_type": "team", "content": "message-205"},
+    )
+    assert next_response.status_code == 200
+    incremental = alice_client.get(f"/api/team-chat/messages?room_type=team&after_id={latest_id}")
+    assert incremental.status_code == 200
+    assert [item["content"] for item in incremental.json()["messages"]] == ["message-205"]
 
 
 def test_team_chat_group_is_scoped_by_company_and_department(make_client, settings_factory):

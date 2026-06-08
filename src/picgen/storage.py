@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -158,6 +157,21 @@ def _atomic_write_text(target: Path, payload: str) -> None:
     _atomic_write_bytes(target, payload.encode("utf-8"))
 
 
+def _image_metadata_payload(
+    metadata: dict[str, object],
+    image_bytes: bytes,
+    image_dimensions: tuple[int, int] | None,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        **metadata,
+        **(extra or {}),
+        "saved_image_width": image_dimensions[0] if image_dimensions else None,
+        "saved_image_height": image_dimensions[1] if image_dimensions else None,
+        "saved_image_bytes": len(image_bytes),
+    }
+
+
 def save_output_image(
     *,
     data_dir: Path,
@@ -174,23 +188,10 @@ def save_output_image(
     base_stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
     stem = f"{safe_prefix}-{base_stem}" if safe_prefix else base_stem
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
-    metadata_path = day_dir / f"{stem}.json"
     image_dimensions = detect_image_dimensions(image_bytes)
+    metadata_payload = _image_metadata_payload(metadata, image_bytes, image_dimensions)
 
     _atomic_write_bytes(image_path, image_bytes)
-    _atomic_write_text(
-        metadata_path,
-        json.dumps(
-            {
-                **metadata,
-                "saved_image_width": image_dimensions[0] if image_dimensions else None,
-                "saved_image_height": image_dimensions[1] if image_dimensions else None,
-                "saved_image_bytes": len(image_bytes),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-    )
 
     log_event(
         logger,
@@ -211,8 +212,9 @@ def save_output_image(
         "saved_image_width": image_dimensions[0] if image_dimensions else None,
         "saved_image_height": image_dimensions[1] if image_dimensions else None,
         "saved_image_bytes": len(image_bytes),
-        "saved_metadata_path": str(metadata_path),
-        "saved_metadata_url": storage_url_for_path(data_dir, metadata_path),
+        "saved_metadata_path": "",
+        "saved_metadata_url": "",
+        "metadata": metadata_payload,
     }
 
 
@@ -239,24 +241,15 @@ def save_derived_output_image(
     safe_suffix = sanitize_filename_prefix(suffix) or "final"
     stem = f"{source_stem}-{safe_suffix}"
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
-    metadata_path = day_dir / f"{stem}.json"
     image_dimensions = detect_image_dimensions(image_bytes)
+    metadata_payload = _image_metadata_payload(
+        metadata,
+        image_bytes,
+        image_dimensions,
+        extra={"source_image_path": source_image_path},
+    )
 
     _atomic_write_bytes(image_path, image_bytes)
-    _atomic_write_text(
-        metadata_path,
-        json.dumps(
-            {
-                **metadata,
-                "source_image_path": source_image_path,
-                "saved_image_width": image_dimensions[0] if image_dimensions else None,
-                "saved_image_height": image_dimensions[1] if image_dimensions else None,
-                "saved_image_bytes": len(image_bytes),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-    )
 
     log_event(
         logger,
@@ -278,8 +271,9 @@ def save_derived_output_image(
         "saved_image_width": image_dimensions[0] if image_dimensions else None,
         "saved_image_height": image_dimensions[1] if image_dimensions else None,
         "saved_image_bytes": len(image_bytes),
-        "saved_metadata_path": str(metadata_path),
-        "saved_metadata_url": storage_url_for_path(data_dir, metadata_path),
+        "saved_metadata_path": "",
+        "saved_metadata_url": "",
+        "metadata": metadata_payload,
     }
 
 

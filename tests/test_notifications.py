@@ -107,6 +107,37 @@ def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
     assert len(content) <= 3900
 
 
+def test_final_image_success_alert_text_has_distinct_title() -> None:
+    alert = GenerationSuccessAlert(
+        request_id="req-final-123",
+        job_id=42,
+        user_id=7,
+        username="alice",
+        method="POST",
+        path="/api/final-images",
+        mode="itinerary",
+        model="gpt-image-2",
+        size="",
+        prompt="生成全球旅行路线图",
+        image_count=1,
+        candidate_count=1,
+        saved_bytes=4096,
+        elapsed_ms=456.7,
+        logo_requested=True,
+        logo_overlay_applied=True,
+        saved_image_urls=["files/outputs/20260608/alice-itinerary-logo.png"],
+        generated_image_ids=[101],
+    )
+
+    content = build_generation_success_alert_text(alert)
+
+    assert content.startswith("【PicGen｜LOGO 成品已保存】alice #42")
+    assert "接口：POST /api/final-images" in content
+    assert "模式：itinerary" in content
+    assert "LOGO：请求=是 / 成品=是" in content
+    assert "files/outputs/20260608/alice-itinerary-logo.png" in content
+
+
 def test_password_reset_email_uses_smtp_without_leaking_secret(settings_factory, monkeypatch) -> None:
     sent_messages = []
     logins = []

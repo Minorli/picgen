@@ -1,6 +1,7 @@
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
+const TEAM_CHAT_RECENT_DM_KEY = "picgen-team-chat-recent-dms-v1"
 const COMPANY_LOGO_URL = "6renyou.png"
 const COMPANY_LOGO_NAME = "6renyou.png"
 const COMPANY_LOGO_MIME = "image/png"
@@ -22,6 +23,7 @@ const EDIT_PRESERVE_PROMPT = [
 ].join("\n")
 const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
 const TEAM_CHAT_FAST_POLL_LIMIT = 8
+const TEAM_CHAT_MAX_RECENT_DMS = 8
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
@@ -160,19 +162,25 @@ const state = {
   },
   userPreferences: null,
   teamChatMembers: [],
+  teamChatHumanMembers: [],
+  teamChatBot: null,
+  teamChatRecentDms: [],
   teamChatMessages: [],
   teamChatRoom: {
     type: "team",
     recipientUserId: null,
-    title: "Group",
-    meta: "同公司同部门",
+    title: "部门群",
+    meta: "部门群",
   },
   teamChatGroup: {
     company: "6renyou",
     department: "PD & OPS",
     roomKey: "",
-    title: "6renyou · PD & OPS",
+    title: "PD & OPS",
+    subtitle: "6renyou · 部门群",
+    memberCount: 0,
   },
+  teamChatGroupContextExpanded: false,
   teamChatLastMessageId: 0,
   teamChatLocalMessageSeq: 0,
   teamChatUnreadTotal: 0,
@@ -471,10 +479,16 @@ const refs = {
   teamChatTeamRoomButton: document.querySelector("#teamChatTeamRoomButton"),
   teamChatTeamRoomName: document.querySelector("#teamChatTeamRoomName"),
   teamChatTeamRoomMeta: document.querySelector("#teamChatTeamRoomMeta"),
+  teamChatMain: document.querySelector("#teamChatMain"),
   teamChatRoomTitle: document.querySelector("#teamChatRoomTitle"),
   teamChatRoomMeta: document.querySelector("#teamChatRoomMeta"),
   teamChatGroupContext: document.querySelector("#teamChatGroupContext"),
+  teamChatGroupContextToggle: document.querySelector("#teamChatGroupContextToggle"),
+  teamChatGroupContextBody: document.querySelector("#teamChatGroupContextBody"),
   teamChatAnnouncement: document.querySelector("#teamChatAnnouncement"),
+  teamChatGroupMemberPanel: document.querySelector("#teamChatGroupMemberPanel"),
+  teamChatGroupMembers: document.querySelector("#teamChatGroupMembers"),
+  teamChatGroupMemberCount: document.querySelector("#teamChatGroupMemberCount"),
   teamChatGroupStats: document.querySelector("#teamChatGroupStats"),
   teamChatGroupSummary: document.querySelector("#teamChatGroupSummary"),
   teamChatGroupAssets: document.querySelector("#teamChatGroupAssets"),
@@ -538,6 +552,10 @@ function legacySettingsStorageKey() {
 
 function historyStorageKey() {
   return scopedStorageKey(HISTORY_KEY)
+}
+
+function teamChatRecentDmStorageKey() {
+  return scopedStorageKey(TEAM_CHAT_RECENT_DM_KEY)
 }
 
 function workspaceStorageKey() {
@@ -1641,6 +1659,7 @@ async function submitAIItineraryMap() {
       model,
       mode: "itinerary",
       sample_count: 1,
+      logo_requested: logoRequested,
       size,
       ...imageOptions,
     }, {
@@ -1721,7 +1740,7 @@ function serverShareableImageUrl(candidate = {}) {
 async function saveCurrentResultToGroupAssets() {
   const generatedImageId = selectedGeneratedImageId()
   if (!generatedImageId) {
-    setStatusMessage("这张图还没有服务端记录，暂时不能存入 Group。")
+    setStatusMessage("这张图还没有服务端记录，暂时不能存入部门群。")
     return
   }
   if (refs.saveGroupAssetButton) {
@@ -1733,17 +1752,17 @@ async function saveCurrentResultToGroupAssets() {
       body: JSON.stringify({
         generated_image_id: generatedImageId,
         title: state.lastResultPrompt ? state.lastResultPrompt.slice(0, 80) : "优秀作品",
-        note: "用户手动存入 Group 优秀资产",
+        note: "用户手动存入部门群优秀资产",
       }),
     })
     if (!response.ok) {
-      setStatusMessage(data.error || "存入 Group 失败。")
+      setStatusMessage(data.error || "存入部门群失败。")
       return
     }
-    setStatusMessage("已存入 Group 优秀资产。")
+    setStatusMessage("已存入部门群优秀资产。")
     await Promise.all([refreshTeamChatGroupContext(), refreshAdminOrgContext()])
   } catch {
-    setStatusMessage("存入 Group 失败。")
+    setStatusMessage("存入部门群失败。")
   } finally {
     if (refs.saveGroupAssetButton) {
       refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
@@ -2458,7 +2477,83 @@ function normalizeTeamChatGroup(group = {}) {
     company,
     department,
     roomKey: group.room_key || "",
-    title: group.title || `${company} · ${department}`,
+    title: group.title || department || "部门群",
+    subtitle: group.subtitle || `${company} · 部门群`,
+    memberCount: Number(group.member_count || 0),
+  }
+}
+
+function teamChatGroupDisplayTitle() {
+  return state.teamChatGroup.title || state.teamChatGroup.department || "部门群"
+}
+
+function teamChatGroupDisplayMeta() {
+  const count = Number(state.teamChatGroup.memberCount || state.teamChatHumanMembers.length || 0)
+  const base = state.teamChatGroup.subtitle || `${state.teamChatGroup.company || "6renyou"} · 部门群`
+  return count > 0 ? `${base} · ${count} 位成员` : base
+}
+
+function teamChatBotMember() {
+  return state.teamChatBot || state.teamChatMembers.find((member) => member.type === "bot") || {
+    id: "gpt-bot",
+    type: "bot",
+    username: "GPT-BOT",
+    display_name: "GPT-BOT",
+    avatar_url: "",
+  }
+}
+
+function findTeamChatHumanMember(userId) {
+  const targetId = Number(userId || 0)
+  return state.teamChatHumanMembers.find((member) => Number(member.id || 0) === targetId) || null
+}
+
+function hydrateTeamChatRecentDmsFromMembers() {
+  if (!state.teamChatRecentDms.length) {
+    return
+  }
+  state.teamChatRecentDms = state.teamChatRecentDms.map((item) => findTeamChatHumanMember(item.id) || item)
+}
+
+function normalizeTeamChatRecentDm(member) {
+  if (!member || member.type === "bot") {
+    return null
+  }
+  const id = Number(member.id || 0)
+  if (!id) {
+    return null
+  }
+  return {
+    id,
+    type: "user",
+    username: String(member.username || ""),
+    display_name: String(member.display_name || ""),
+    avatar_url: String(member.avatar_url || ""),
+  }
+}
+
+function loadTeamChatRecentDms() {
+  const rows = loadJSON(teamChatRecentDmStorageKey(), [])
+  state.teamChatRecentDms = Array.isArray(rows)
+    ? rows.map(normalizeTeamChatRecentDm).filter(Boolean).slice(0, TEAM_CHAT_MAX_RECENT_DMS)
+    : []
+}
+
+function saveTeamChatRecentDms() {
+  saveJSON(teamChatRecentDmStorageKey(), state.teamChatRecentDms.slice(0, TEAM_CHAT_MAX_RECENT_DMS))
+}
+
+function rememberTeamChatRecentDm(member, { persist = true } = {}) {
+  const normalized = normalizeTeamChatRecentDm(member)
+  if (!normalized) {
+    return
+  }
+  state.teamChatRecentDms = [
+    normalized,
+    ...state.teamChatRecentDms.filter((item) => Number(item.id || 0) !== normalized.id),
+  ].slice(0, TEAM_CHAT_MAX_RECENT_DMS)
+  if (persist) {
+    saveTeamChatRecentDms()
   }
 }
 
@@ -2475,12 +2570,14 @@ function updateTeamChatUnreadBadge(total = state.teamChatUnreadTotal) {
 function resetTeamChatState() {
   stopTeamChatPolling()
   state.teamChatMembers = []
+  state.teamChatHumanMembers = []
+  state.teamChatBot = null
   state.teamChatMessages = []
   state.teamChatRoom = {
     type: "team",
     recipientUserId: null,
-    title: "Group",
-    meta: "同公司同部门",
+    title: "部门群",
+    meta: "部门群",
   }
   state.teamChatLastMessageId = 0
   clearTeamChatQuote()
@@ -2508,23 +2605,40 @@ function renderTeamChatMembers() {
     return
   }
   if (refs.teamChatTeamRoomName) {
-    refs.teamChatTeamRoomName.textContent = "Group"
+    refs.teamChatTeamRoomName.textContent = teamChatGroupDisplayTitle()
   }
   if (refs.teamChatTeamRoomMeta) {
-    refs.teamChatTeamRoomMeta.textContent = state.teamChatGroup.title || "同公司同部门"
+    refs.teamChatTeamRoomMeta.textContent = teamChatGroupDisplayMeta()
   }
   refs.teamChatTeamRoomButton?.classList.toggle("active", state.teamChatRoom.type === "team")
   refs.teamChatMembers.replaceChildren()
-  state.teamChatMembers.forEach((member) => {
+  const bot = teamChatBotMember()
+  const directMember = state.teamChatRoom.type === "dm" ? findTeamChatHumanMember(state.teamChatRoom.recipientUserId) : null
+  const recentDms = [...state.teamChatRecentDms]
+  if (directMember && !recentDms.some((member) => Number(member.id || 0) === Number(directMember.id || 0))) {
+    recentDms.unshift(directMember)
+  }
+  const conversations = [bot, ...recentDms]
+  conversations.forEach((member, index) => {
     const button = document.createElement("button")
     button.type = "button"
     button.className = "team-chat-member"
     const isBot = member.type === "bot"
+    if (!isBot && index > 0) {
+      const hasRecentLabel = refs.teamChatMembers.querySelector(".team-chat-recent-dm-label")
+      if (!hasRecentLabel) {
+        const label = document.createElement("p")
+        label.className = "team-chat-conversation-label team-chat-current-dm-label team-chat-recent-dm-label"
+        label.textContent = "最近私聊"
+        refs.teamChatMembers.append(label)
+      }
+    }
     const memberId = isBot ? "gpt-bot" : Number(member.id || 0)
     const active = isBot
       ? state.teamChatRoom.type === "bot"
       : state.teamChatRoom.type === "dm" && Number(state.teamChatRoom.recipientUserId) === memberId
     button.classList.toggle("active", active)
+    button.classList.toggle("team-chat-current-dm", Boolean(!isBot && active))
     button.dataset.memberType = member.type || "user"
     button.dataset.memberId = String(memberId)
     const avatar = document.createElement("span")
@@ -2534,22 +2648,54 @@ function renderTeamChatMembers() {
     const name = document.createElement("strong")
     name.textContent = teamChatDisplayName(member)
     const subtitle = document.createElement("small")
-    subtitle.textContent = isBot ? "AI Chat" : `@${member.username || ""}`
+    subtitle.textContent = isBot ? "AI Chat" : `私聊 @${member.username || ""}`
     copy.append(name, subtitle)
     button.append(avatar, copy)
     button.addEventListener("click", () => {
       if (isBot) {
-        void switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "和 AI 单独聊。" })
+        void switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "AI 创意与图片质量助手。" })
         return
       }
-      void switchTeamChatRoom({
-        type: "dm",
-        recipientUserId: memberId,
-        title: teamChatDisplayName(member),
-        meta: `私聊 @${member.username || teamChatDisplayName(member)}`,
-      })
+      void switchTeamChatDirectMember(member)
     })
     refs.teamChatMembers.append(button)
+  })
+}
+
+function renderTeamChatGroupMembers() {
+  if (!refs.teamChatGroupMembers) {
+    return
+  }
+  const members = state.teamChatHumanMembers
+  refs.teamChatGroupMembers.replaceChildren()
+  if (refs.teamChatGroupMemberCount) {
+    refs.teamChatGroupMemberCount.textContent = members.length ? `${members.length} 位` : "暂无成员"
+  }
+  if (!members.length) {
+    const empty = document.createElement("p")
+    empty.className = "team-chat-empty"
+    empty.textContent = "当前部门暂时没有其他成员。"
+    refs.teamChatGroupMembers.append(empty)
+    return
+  }
+  members.forEach((member) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "team-chat-group-member"
+    const avatar = document.createElement("span")
+    avatar.className = "team-chat-avatar"
+    renderTeamChatMemberAvatar(avatar, member)
+    const copy = document.createElement("span")
+    const name = document.createElement("strong")
+    name.textContent = teamChatDisplayName(member)
+    const subtitle = document.createElement("small")
+    subtitle.textContent = `@${member.username || ""}`
+    copy.append(name, subtitle)
+    button.append(avatar, copy)
+    button.addEventListener("click", () => {
+      void switchTeamChatDirectMember(member)
+    })
+    refs.teamChatGroupMembers.append(button)
   })
 }
 
@@ -2562,6 +2708,13 @@ function renderTeamChatAnnouncement(announcement) {
   refs.teamChatAnnouncement.textContent = content ? `公告：${content}` : ""
 }
 
+function renderTeamChatGroupContextDisclosure() {
+  const expanded = state.teamChatRoom.type === "team" && state.teamChatGroupContextExpanded
+  refs.teamChatGroupContext?.classList.toggle("is-collapsed", !expanded)
+  refs.teamChatGroupContextToggle?.setAttribute("aria-expanded", String(expanded))
+  refs.teamChatGroupContextBody?.classList.toggle("hidden", !expanded)
+}
+
 function renderTeamChatGroupStats(stats) {
   if (!refs.teamChatGroupStats) {
     return
@@ -2571,7 +2724,7 @@ function renderTeamChatGroupStats(stats) {
     return
   }
   refs.teamChatGroupStats.innerHTML = `
-    <h4>Group 统计</h4>
+    <h4>部门群统计</h4>
     <p>${Number(stats.users?.member_count || 0)} 位成员 · ${Number(stats.usage?.generated_image_count || 0)} 张图 · ${Number(stats.assets?.asset_count || 0)} 个优秀资产</p>
     <p>满意 ${Number(stats.feedback?.totals?.good || 0)} · 一般 ${Number(stats.feedback?.totals?.ok || 0)} · 不好 ${Number(stats.feedback?.totals?.bad || 0)}</p>
   `
@@ -2583,7 +2736,7 @@ function renderTeamChatGroupSummary(summary) {
   }
   const text = summary?.text || "暂无周报。"
   refs.teamChatGroupSummary.innerHTML = `
-    <h4>Group 周报</h4>
+    <h4>部门群周报</h4>
     <p>${escapeHTML(text)}</p>
   `
 }
@@ -2631,7 +2784,7 @@ function useGroupAssetAsReference(asset) {
     refs.generatePromptInput.value = asset.prompt
   }
   if (asset.saved_image_url) {
-    const description = `Group 优秀资产 · 仅作可选参考 · ${asset.title || "满意作品"}`
+    const description = `部门群优秀资产 · 仅作可选参考 · ${asset.title || "满意作品"}`
     state.generateReferenceImage = null
     state.materialReferenceImage = null
     state.styleReferenceImage = {
@@ -2649,7 +2802,7 @@ function useGroupAssetAsReference(asset) {
   }
   updatePromptCounters()
   scheduleWorkspacePersist()
-  setStatusMessage("已把 Group 优秀资产作为可选参考。")
+  setStatusMessage("已把部门群优秀资产作为可选参考。")
   closeTeamChatModal()
   refs.generatePromptInput.focus()
 }
@@ -2658,8 +2811,10 @@ async function refreshTeamChatGroupContext() {
   refs.teamChatGroupContext?.classList.toggle("hidden", state.teamChatRoom.type !== "team")
   if (!state.currentUser || !refs.teamChatGroupContext || state.teamChatRoom.type !== "team") {
     renderTeamChatAnnouncement(null)
+    renderTeamChatGroupMembers()
     return
   }
+  renderTeamChatGroupMembers()
   try {
     const [announcementResponse, statsResponse, summaryResponse, assetsResponse] = await Promise.all([
       fetchJSON("/api/team-chat/group-announcement", { cache: "no-store" }),
@@ -2721,6 +2876,42 @@ function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) 
   updateTeamChatLastMessageId()
 }
 
+function isOwnTeamChatMessage(message) {
+  return Number(message?.sender_user_id || 0) === Number(state.currentUser?.id || 0)
+}
+
+function parseTeamChatQuotedContent(content = "") {
+  const text = String(content || "")
+  const match = text.match(/^引用 ([^：:\n]{1,80})[：:](.*?)(?:\n{2,}([\s\S]*))$/)
+  if (!match) {
+    return { quoteAuthor: "", quoteText: "", body: text }
+  }
+  return {
+    quoteAuthor: match[1].trim(),
+    quoteText: match[2].trim(),
+    body: (match[3] || "").trim(),
+  }
+}
+
+function renderTeamChatBubbleContent(container, message) {
+  container.replaceChildren()
+  const parsed = parseTeamChatQuotedContent(message.content || "")
+  if (parsed.quoteAuthor || parsed.quoteText) {
+    const quote = document.createElement("blockquote")
+    quote.className = "team-chat-message-quote"
+    const author = document.createElement("strong")
+    author.textContent = parsed.quoteAuthor ? `引用 ${parsed.quoteAuthor}` : "引用消息"
+    const text = document.createElement("span")
+    text.textContent = parsed.quoteText || "原消息"
+    quote.append(author, text)
+    container.append(quote)
+  }
+  const bodyText = document.createElement("span")
+  bodyText.className = "team-chat-message-text"
+  bodyText.textContent = parsed.body || message.content || ""
+  container.append(bodyText)
+}
+
 function renderTeamChatMessages({ scrollToBottom = true } = {}) {
   if (!refs.teamChatMessages) {
     return
@@ -2748,8 +2939,9 @@ function renderTeamChatMessages({ scrollToBottom = true } = {}) {
     meta.append(sender, time)
     const body = document.createElement("div")
     body.className = "team-chat-message-body"
-    const bubble = document.createElement("p")
-    bubble.textContent = message.content || ""
+    const bubble = document.createElement("div")
+    bubble.className = "team-chat-message-bubble"
+    renderTeamChatBubbleContent(bubble, message)
     const actions = document.createElement("div")
     actions.className = "team-chat-message-actions"
     const moreButton = document.createElement("button")
@@ -2832,8 +3024,10 @@ function createTeamChatMessageMenu(message) {
   const actions = [
     ["copy", "复制", () => copyTeamChatMessage(message)],
     ["quote", "引用", () => quoteTeamChatMessage(message)],
-    ["recall", "撤回", jokeRecallTeamChatMessage],
   ]
+  if (isOwnTeamChatMessage(message)) {
+    actions.push(["recall", "撤回", jokeRecallTeamChatMessage])
+  }
   actions.forEach(([action, label, handler]) => {
     const button = document.createElement("button")
     button.type = "button"
@@ -2924,7 +3118,7 @@ function formatTeamChatOutgoingContent(content) {
 }
 
 function jokeRecallTeamChatMessage() {
-  setStatusMessage("逗你的，撤回不了。")
+  setTeamChatStatus("逗你的，撤回不了。")
 }
 
 function formatTeamChatTime(value) {
@@ -2944,14 +3138,33 @@ function formatTeamChatTime(value) {
   })
 }
 
+function teamChatInputPlaceholder() {
+  if (state.teamChatRoom.type === "bot") {
+    return "向 GPT-BOT 提问，例如：这张海报怎么优化？"
+  }
+  if (state.teamChatRoom.type === "dm") {
+    return `发给 ${state.teamChatRoom.title || "对方"}`
+  }
+  return "输入群消息，可以 @GPT-BOT"
+}
+
 function updateTeamChatRoomHeader() {
+  const fallbackTitle = state.teamChatRoom.type === "team" ? teamChatGroupDisplayTitle() : "部门群"
+  const fallbackMeta = state.teamChatRoom.type === "team" ? teamChatGroupDisplayMeta() : state.teamChatGroup.subtitle
   if (refs.teamChatRoomTitle) {
-    refs.teamChatRoomTitle.textContent = state.teamChatRoom.title || "Group"
+    refs.teamChatRoomTitle.textContent = state.teamChatRoom.title || fallbackTitle
   }
   if (refs.teamChatRoomMeta) {
-    refs.teamChatRoomMeta.textContent = state.teamChatRoom.meta || state.teamChatGroup.title || "同公司同部门"
+    refs.teamChatRoomMeta.textContent = state.teamChatRoom.meta || fallbackMeta || "部门群"
+  }
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.placeholder = teamChatInputPlaceholder()
   }
   renderTeamChatMembers()
+  renderTeamChatGroupMembers()
+  refs.teamChatGroupMemberPanel?.classList.toggle("hidden", state.teamChatRoom.type !== "team")
+  refs.teamChatMain?.classList.toggle("without-member-panel", state.teamChatRoom.type !== "team")
+  renderTeamChatGroupContextDisclosure()
 }
 
 function setTeamChatStatus(message = "", isError = false) {
@@ -2991,15 +3204,27 @@ async function refreshTeamChatMembers() {
       return
     }
     state.teamChatGroup = normalizeTeamChatGroup(data.group || state.teamChatGroup)
+    const allMembers = Array.isArray(data.members) ? data.members : []
+    state.teamChatBot = data.bot || allMembers.find((member) => member.type === "bot") || null
+    state.teamChatHumanMembers = Array.isArray(data.human_members)
+      ? data.human_members
+      : allMembers.filter((member) => member.type !== "bot")
+    state.teamChatMembers = allMembers.length ? allMembers : [state.teamChatBot, ...state.teamChatHumanMembers].filter(Boolean)
+    state.teamChatGroup = {
+      ...state.teamChatGroup,
+      memberCount: Number(data.group?.member_count || state.teamChatHumanMembers.length || 0),
+    }
+    hydrateTeamChatRecentDmsFromMembers()
+    saveTeamChatRecentDms()
     if (state.teamChatRoom.type === "team") {
       state.teamChatRoom = {
         ...state.teamChatRoom,
-        title: "Group",
-        meta: state.teamChatGroup.title,
+        title: teamChatGroupDisplayTitle(),
+        meta: teamChatGroupDisplayMeta(),
       }
     }
-    state.teamChatMembers = Array.isArray(data.members) ? data.members : []
     renderTeamChatMembers()
+    renderTeamChatGroupMembers()
   } catch {
     setTeamChatStatus("成员列表暂时不可用", true)
   }
@@ -3094,8 +3319,8 @@ async function switchTeamChatRoom(nextRoom) {
   state.teamChatRoom = {
     type: nextRoom.type || "team",
     recipientUserId: nextRoom.recipientUserId || null,
-    title: nextRoom.title || "Group",
-    meta: nextRoom.meta || state.teamChatGroup.title || "同公司同部门",
+    title: nextRoom.title || (nextRoom.type === "team" ? teamChatGroupDisplayTitle() : "部门群"),
+    meta: nextRoom.meta || (nextRoom.type === "team" ? teamChatGroupDisplayMeta() : state.teamChatGroup.subtitle) || "部门群",
   }
   state.teamChatMessages = []
   state.teamChatLastMessageId = 0
@@ -3108,6 +3333,20 @@ async function switchTeamChatRoom(nextRoom) {
   await refreshTeamChatMessages()
   setTeamChatStatus("")
   refs.teamChatMessageInput?.focus()
+}
+
+function switchTeamChatDirectMember(member) {
+  if (!member || member.type === "bot") {
+    return switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "AI 创意与图片质量助手。" })
+  }
+  rememberTeamChatRecentDm(member)
+  renderTeamChatMembers()
+  return switchTeamChatRoom({
+    type: "dm",
+    recipientUserId: Number(member.id || 0),
+    title: teamChatDisplayName(member),
+    meta: `私聊 @${member.username || teamChatDisplayName(member)}`,
+  })
 }
 
 async function openTeamChatModal() {
@@ -7158,13 +7397,17 @@ function bindEvents() {
     void switchTeamChatRoom({
       type: "team",
       recipientUserId: null,
-      title: "Group",
-      meta: state.teamChatGroup.title || "同公司同部门",
+      title: teamChatGroupDisplayTitle(),
+      meta: teamChatGroupDisplayMeta(),
     })
   })
   refs.refreshTeamChatButton?.addEventListener("click", () => {
     void refreshTeamChatGroupContext()
     void refreshTeamChatMessages()
+  })
+  refs.teamChatGroupContextToggle?.addEventListener("click", () => {
+    state.teamChatGroupContextExpanded = !state.teamChatGroupContextExpanded
+    renderTeamChatGroupContextDisclosure()
   })
   refs.teamChatForm?.addEventListener("submit", submitTeamChatMessage)
   refs.clearTeamChatQuoteButton?.addEventListener("click", clearTeamChatQuote)
@@ -7602,6 +7845,7 @@ async function startAuthenticatedApp() {
   }
 
   state.history = loadJSON(historyStorageKey(), [])
+  loadTeamChatRecentDms()
   renderHistory()
   await loadUserPreferences()
   loadSettings()

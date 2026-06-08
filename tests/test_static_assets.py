@@ -322,6 +322,12 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "新疆游" not in app_js
     assert 'mode: "itinerary"' in app_js
     assert 'transport: "images-generate"' in app_js
+    itinerary_submit_block = app_js[
+        app_js.index("async function submitAIItineraryMap()") : app_js.index('rememberRegenerationRequest("itinerary"')
+    ]
+    assert 'const result = await postJSON("api/generate"' in itinerary_submit_block
+    assert 'mode: "itinerary"' in itinerary_submit_block
+    assert "logo_requested: logoRequested" in itinerary_submit_block
     assert "行程描述不能为空" in app_js
     assert "不要让 AI 绘制或改造 6 人游 LOGO" in app_js
     assert "左上角预留干净白底 LOGO 安全区" in app_js
@@ -444,17 +450,25 @@ def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
     assert "Team Chat" in index_html
     assert 'id="teamChatModal"' in index_html
     assert 'id="teamChatMembers"' in index_html
+    assert 'id="teamChatGroupMembers"' in index_html
     assert 'id="teamChatMessageInput"' in index_html
+    assert "输入群消息，可以 @GPT-BOT" in index_html
     assert 'id="teamChatQuotePreview"' in index_html
     assert 'id="clearTeamChatQuoteButton"' in index_html
     assert 'id="teamChatTeamRoomName"' in index_html
     assert 'id="teamChatTeamRoomMeta"' in index_html
+    assert 'id="teamChatMain"' in index_html
+    assert 'id="teamChatGroupContextToggle"' in index_html
+    assert 'id="teamChatGroupContextBody"' in index_html
     assert 'id="teamChatAnnouncement"' in index_html
+    assert 'id="teamChatGroupMemberPanel"' in index_html
     assert 'id="teamChatGroupAssets"' in index_html
     assert 'id="teamChatGroupStats"' in index_html
     assert 'id="teamChatGroupSummary"' in index_html
     assert 'id="saveGroupAssetButton"' in index_html
-    assert "同公司同部门" in index_html
+    assert "部门群" in index_html
+    assert "AI 助手" in index_html
+    assert "最近私聊" in app_js
     assert "OpenAI Images API" not in index_html
     assert "/api/team-chat/members" in app_js
     assert "/api/team-chat/messages" in app_js
@@ -467,6 +481,22 @@ def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
     assert "openTeamChatModal" in app_js
     assert "GPT-BOT" in app_js
     assert "normalizeTeamChatGroup" in app_js
+    assert "teamChatHumanMembers" in app_js
+    assert "teamChatRecentDms" in app_js
+    assert "TEAM_CHAT_MAX_RECENT_DMS" in app_js
+    assert "loadTeamChatRecentDms" in app_js
+    assert "rememberTeamChatRecentDm" in app_js
+    assert "saveTeamChatRecentDms" in app_js
+    assert "teamChatInputPlaceholder" in app_js
+    assert "向 GPT-BOT 提问" in app_js
+    assert "发给 ${state.teamChatRoom.title" in app_js
+    assert "renderTeamChatGroupMembers" in app_js
+    assert "human_members" in app_js
+    assert "teamChatGroupDisplayTitle" in app_js
+    assert "switchTeamChatDirectMember" in app_js
+    assert "without-member-panel" in app_js
+    assert "renderTeamChatGroupContextDisclosure" in app_js
+    assert "teamChatGroupContextExpanded" in app_js
     assert "state.teamChatGroup" in app_js
     assert "teamChatSending: false" in app_js
     assert "setTeamChatSending" in app_js
@@ -483,18 +513,33 @@ def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
     assert "openTeamChatMessageMenu" in app_js
     assert "copyTeamChatMessage" in app_js
     assert "quoteTeamChatMessage" in app_js
+    assert "parseTeamChatQuotedContent" in app_js
+    assert "renderTeamChatBubbleContent" in app_js
+    assert "isOwnTeamChatMessage" in app_js
     assert 'button.dataset.action = action' in app_js
     assert '"copy", "复制"' in app_js
     assert '"quote", "引用"' in app_js
     assert '"recall", "撤回"' in app_js
+    assert "actions.push([\"recall\"" in app_js
     assert "已引用这条消息。" in app_js
-    assert "逗你的，撤回不了" in app_js
+    assert 'setTeamChatStatus("逗你的，撤回不了。")' in app_js
     assert ".team-chat-dialog" in styles_css
     assert ".team-chat-button.has-unread" in styles_css
     assert "grid-template-rows: auto minmax(0, 1fr)" in styles_css
     assert ".team-chat-members" in styles_css
+    assert ".team-chat-conversation-label" in styles_css
+    assert ".team-chat-room-pane" in styles_css
+    assert ".team-chat-main.without-member-panel" in styles_css
+    assert ".team-chat-group-context-toggle" in styles_css
+    assert ".team-chat-group-context-body" in styles_css
+    assert ".team-chat-group-members" in styles_css
+    assert ".team-chat-current-dm" in styles_css
+    assert "min-height: 46px" in styles_css
+    assert "max-height: 96px" in styles_css
     assert "overscroll-behavior: contain" in styles_css
     assert "grid-template-columns: minmax(0, 1fr) 26px" in styles_css
+    assert ".team-chat-message-bubble" in styles_css
+    assert ".team-chat-message-quote" in styles_css
     assert ".team-chat-message.mine .team-chat-message-actions" not in styles_css
     assert ".team-chat-message-menu" in styles_css
     assert ".team-chat-message.pending" in styles_css

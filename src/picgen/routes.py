@@ -850,13 +850,19 @@ def create_router() -> APIRouter:
             lambda: auth_store.list_team_chat_members(current_user_id=user.id)
         )
         group = await anyio.to_thread.run_sync(lambda: auth_store.team_chat_group_for_user(user.id))
+        bot = next((member for member in members if member.get("type") == "bot"), None)
+        human_members = [member for member in members if member.get("type") != "bot"]
         return {
             "members": members,
+            "human_members": human_members,
+            "bot": bot,
             "group": {
                 "company": group["company"],
                 "department": group["department"],
                 "room_key": group["room_key"],
                 "title": team_chat_group_title(group["company"], group["department"]),
+                "subtitle": team_chat_group_subtitle(group["company"]),
+                "member_count": len(human_members),
             },
         }
 
@@ -1409,6 +1415,7 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(FinalImageRequest, payload)
+        started_at = time.perf_counter()
         try:
             source_record = await anyio.to_thread.run_sync(
                 lambda: auth_store.generated_image_for_user(
@@ -1460,6 +1467,15 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.FORBIDDEN, str(exc), code="forbidden") from exc
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        if parsed.logo_overlay_applied:
+            await _send_generation_success_alert(
+                settings,
+                _build_final_image_success_alert(
+                    image=updated,
+                    user=user,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                ),
+            )
         return {
             "status": "ok",
             "image": {
@@ -1575,9 +1591,13 @@ def _parse_team_chat_mentions(content: str) -> list[str]:
 
 
 def team_chat_group_title(company: str, department: str) -> str:
-    clean_company = company.strip() or "未分配公司"
     clean_department = department.strip() or "未分配部门"
-    return f"{clean_company} · {clean_department}"
+    return clean_department
+
+
+def team_chat_group_subtitle(company: str) -> str:
+    clean_company = company.strip() or "未分配公司"
+    return f"{clean_company} · 部门群"
 
 
 def _team_chat_display_name(user: AuthUser) -> str:
@@ -1990,6 +2010,34 @@ def _build_generation_success_alert(
         logo_overlay_applied=_result_logo_overlay_applied(result),
         saved_image_urls=_result_saved_image_urls(result),
         generated_image_ids=_result_generated_image_ids(result, image_records),
+    )
+
+
+def _build_final_image_success_alert(
+    *,
+    image: dict[str, Any],
+    user: AuthUser,
+    elapsed_ms: float,
+) -> GenerationSuccessAlert:
+    return GenerationSuccessAlert(
+        request_id=get_request_id(),
+        job_id=int(image.get("job_id") or 0),
+        user_id=user.id,
+        username=user.username,
+        method="POST",
+        path="/api/final-images",
+        mode=str(image.get("mode") or ""),
+        model=str(image.get("model") or ""),
+        size="",
+        prompt=str(image.get("prompt") or ""),
+        image_count=1 if image.get("saved_image_url") else 0,
+        candidate_count=1 if image.get("saved_image_url") else 0,
+        saved_bytes=max(0, int(image.get("saved_image_bytes") or 0)),
+        elapsed_ms=elapsed_ms,
+        logo_requested=bool(image.get("logo_requested") or image.get("logo_overlay_applied")),
+        logo_overlay_applied=bool(image.get("logo_overlay_applied")),
+        saved_image_urls=[str(image.get("saved_image_url") or "")] if image.get("saved_image_url") else [],
+        generated_image_ids=[int(image.get("id") or 0)] if image.get("id") else [],
     )
 
 
