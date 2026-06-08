@@ -17,7 +17,7 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 TEAM_CHAT_BOT_ID = "gpt-bot"
@@ -261,6 +261,10 @@ class AuthStore:
                         transport TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL DEFAULT 'started',
                         prompt TEXT NOT NULL DEFAULT '',
+                        original_prompt TEXT NOT NULL DEFAULT '',
+                        prompt_mode TEXT NOT NULL DEFAULT 'free',
+                        recipe_id TEXT NOT NULL DEFAULT '',
+                        recipe_version TEXT NOT NULL DEFAULT '',
                         model TEXT NOT NULL DEFAULT '',
                         size TEXT NOT NULL DEFAULT '',
                         sample_count INTEGER NOT NULL DEFAULT 1,
@@ -1229,6 +1233,10 @@ class AuthStore:
         mode: str = "",
         transport: str = "",
         prompt: str = "",
+        original_prompt: str = "",
+        prompt_mode: str = "free",
+        recipe_id: str = "",
+        recipe_version: str = "",
         model: str = "",
         size: str = "",
         sample_count: int = 1,
@@ -1245,13 +1253,17 @@ class AuthStore:
                     mode,
                     transport,
                     prompt,
+                    original_prompt,
+                    prompt_mode,
+                    recipe_id,
+                    recipe_version,
                     model,
                     size,
                     sample_count,
                     logo_requested,
                     started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id.strip()[:128],
@@ -1261,6 +1273,10 @@ class AuthStore:
                     mode.strip()[:64],
                     transport.strip()[:64],
                     prompt.strip()[:32_000],
+                    original_prompt.strip()[:32_000],
+                    prompt_mode.strip()[:32] or "free",
+                    recipe_id.strip()[:128],
+                    recipe_version.strip()[:64],
                     model.strip()[:128],
                     size.strip()[:64],
                     max(1, int(sample_count or 1)),
@@ -1419,6 +1435,79 @@ class AuthStore:
         if row is None:
             return None
         return _generated_image_row_to_dict(row)
+
+    def generated_image_detail_for_user(self, *, generated_image_id: int, user_id: int) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    gi.id,
+                    gi.job_id,
+                    gi.user_id,
+                    gi.candidate_index,
+                    gi.mode,
+                    gi.model,
+                    gi.prompt,
+                    gi.saved_image_path,
+                    gi.saved_image_url,
+                    gi.saved_image_name,
+                    gi.saved_metadata_path,
+                    gi.saved_metadata_url,
+                    gi.saved_image_mime,
+                    gi.saved_image_width,
+                    gi.saved_image_height,
+                    gi.saved_image_bytes,
+                    gi.logo_requested,
+                    gi.logo_overlay_applied,
+                    gi.created_at,
+                    j.request_id,
+                    j.endpoint_path,
+                    j.transport,
+                    j.prompt AS effective_prompt,
+                    j.original_prompt,
+                    j.prompt_mode,
+                    j.recipe_id,
+                    j.recipe_version,
+                    j.status,
+                    j.sample_count,
+                    j.started_at,
+                    j.completed_at,
+                    j.elapsed_ms,
+                    COALESCE(gim.metadata_json, '{}') AS metadata_json
+                FROM generated_images gi
+                JOIN generation_jobs j ON j.id = gi.job_id
+                LEFT JOIN generated_image_metadata gim ON gim.generated_image_id = gi.id
+                WHERE gi.id = ? AND gi.user_id = ?
+                """,
+                (generated_image_id, user_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = _generated_image_row_to_dict(row)
+        metadata: dict[str, Any] = {}
+        try:
+            parsed = json.loads(str(row["metadata_json"] or "{}"))
+            if isinstance(parsed, dict):
+                metadata = parsed
+        except json.JSONDecodeError:
+            metadata = {}
+        item["lineage"] = {
+            "request_id": str(row["request_id"] or ""),
+            "endpoint_path": str(row["endpoint_path"] or ""),
+            "transport": str(row["transport"] or ""),
+            "prompt_mode": str(row["prompt_mode"] or "free"),
+            "original_prompt": str(row["original_prompt"] or row["effective_prompt"] or ""),
+            "effective_prompt": str(row["effective_prompt"] or row["prompt"] or ""),
+            "recipe_id": str(row["recipe_id"] or ""),
+            "recipe_version": str(row["recipe_version"] or ""),
+            "status": str(row["status"] or ""),
+            "sample_count": max(1, int(row["sample_count"] or 1)),
+            "started_at": str(row["started_at"] or ""),
+            "completed_at": str(row["completed_at"] or ""),
+            "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
+        }
+        item["metadata"] = metadata
+        return item
 
     def replace_generated_image_asset(
         self,
@@ -1602,6 +1691,57 @@ class AuthStore:
                 (viewer_user_id, viewer_user_id, *params),
             ).fetchall()
         return [_gallery_image_row_to_dict(row) for row in rows]
+
+    def list_generation_jobs_for_user(self, *, user_id: int, limit: int = 30) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit or 30), 100))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    j.id,
+                    j.request_id,
+                    j.user_id,
+                    j.username,
+                    j.endpoint_path,
+                    j.mode,
+                    j.transport,
+                    j.status,
+                    j.prompt,
+                    j.original_prompt,
+                    j.prompt_mode,
+                    j.recipe_id,
+                    j.recipe_version,
+                    j.model,
+                    j.size,
+                    j.sample_count,
+                    j.logo_requested,
+                    j.image_count,
+                    j.saved_bytes,
+                    j.error_code,
+                    j.error_message,
+                    j.started_at,
+                    j.completed_at,
+                    j.elapsed_ms,
+                    first_image.id AS first_generated_image_id,
+                    first_image.saved_image_url AS first_saved_image_url,
+                    first_image.saved_image_name AS first_saved_image_name,
+                    first_image.logo_overlay_applied AS first_logo_overlay_applied
+                FROM generation_jobs j
+                LEFT JOIN generated_images first_image
+                    ON first_image.id = (
+                        SELECT gi.id
+                        FROM generated_images gi
+                        WHERE gi.job_id = j.id
+                        ORDER BY gi.candidate_index ASC, gi.id ASC
+                        LIMIT 1
+                    )
+                WHERE j.user_id = ?
+                ORDER BY j.started_at DESC, j.id DESC
+                LIMIT ?
+                """,
+                (user_id, bounded_limit),
+            ).fetchall()
+        return [_generation_job_row_to_dict(row) for row in rows]
 
     def update_gallery_item(
         self,
@@ -3111,6 +3251,12 @@ class AuthStore:
             "auto_copyright_check_enabled": "INTEGER NOT NULL DEFAULT 1",
             "updated_at": "TEXT NOT NULL DEFAULT ''",
         })
+        _ensure_columns(conn, "generation_jobs", {
+            "original_prompt": "TEXT NOT NULL DEFAULT ''",
+            "prompt_mode": "TEXT NOT NULL DEFAULT 'free'",
+            "recipe_id": "TEXT NOT NULL DEFAULT ''",
+            "recipe_version": "TEXT NOT NULL DEFAULT ''",
+        })
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_gallery_metadata_user_favorite
@@ -3177,7 +3323,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "group_collaboration", now),
+            (_SCHEMA_VERSION, "prompt_recipes_and_lineage", now),
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -3818,6 +3964,57 @@ def _generated_image_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "logo_requested": bool(row["logo_requested"]),
         "logo_overlay_applied": bool(row["logo_overlay_applied"]),
         "created_at": str(row["created_at"]),
+    }
+
+
+def _generation_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    row_keys = set(row.keys())
+    return {
+        "id": int(row["id"]),
+        "generation_job_id": int(row["id"]),
+        "request_id": str(row["request_id"] or ""),
+        "user_id": int(row["user_id"]) if row["user_id"] is not None else None,
+        "username": str(row["username"] or ""),
+        "endpoint_path": str(row["endpoint_path"] or ""),
+        "mode": str(row["mode"] or ""),
+        "transport": str(row["transport"] or ""),
+        "status": str(row["status"] or ""),
+        "prompt": str(row["prompt"] or ""),
+        "original_prompt": str(row["original_prompt"] or row["prompt"] or ""),
+        "prompt_mode": str(row["prompt_mode"] or "free"),
+        "recipe_id": str(row["recipe_id"] or ""),
+        "recipe_version": str(row["recipe_version"] or ""),
+        "model": str(row["model"] or ""),
+        "size": str(row["size"] or ""),
+        "sample_count": max(1, int(row["sample_count"] or 1)),
+        "logo_requested": bool(row["logo_requested"]),
+        "image_count": max(0, int(row["image_count"] or 0)),
+        "saved_bytes": max(0, int(row["saved_bytes"] or 0)),
+        "error_code": str(row["error_code"] or ""),
+        "error_message": str(row["error_message"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "completed_at": str(row["completed_at"] or ""),
+        "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
+        "first_generated_image_id": (
+            int(row["first_generated_image_id"])
+            if "first_generated_image_id" in row_keys and row["first_generated_image_id"] is not None
+            else None
+        ),
+        "first_saved_image_url": (
+            str(row["first_saved_image_url"] or "")
+            if "first_saved_image_url" in row_keys
+            else ""
+        ),
+        "first_saved_image_name": (
+            str(row["first_saved_image_name"] or "")
+            if "first_saved_image_name" in row_keys
+            else ""
+        ),
+        "first_logo_overlay_applied": (
+            bool(row["first_logo_overlay_applied"])
+            if "first_logo_overlay_applied" in row_keys and row["first_logo_overlay_applied"] is not None
+            else False
+        ),
     }
 
 

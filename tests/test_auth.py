@@ -997,6 +997,13 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         assert "idx_gallery_metadata_user_favorite" in gallery_metadata_indexes
         assert "idx_gallery_tags_user_tag" in gallery_tag_indexes
         assert "idx_gallery_tags_image" in gallery_tag_indexes
+        generation_job_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(generation_jobs)")
+        }
+        assert {"original_prompt", "prompt_mode", "recipe_id", "recipe_version"}.issubset(
+            generation_job_columns
+        )
         user = conn.execute(
             "SELECT role, is_active, company, department, last_seen_at FROM users WHERE id = ?",
             (user_id,),
@@ -1014,6 +1021,9 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         assert job["status"] == "succeeded"
         assert job["mode"] == "generate"
         assert job["logo_requested"] == 1
+        assert job["original_prompt"] == "生成一张旅行海报"
+        assert job["prompt_mode"] == "free"
+        assert job["recipe_id"] == ""
         image = conn.execute(
             "SELECT * FROM generated_images WHERE id = ?",
             (generated["generated_image_id"],),

@@ -519,8 +519,44 @@ kbd {
 }
 
 .rail-heading {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-bottom: 10px;
+}
+
+.rail-heading-toggle {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.rail-heading-toggle::after {
+  content: "⌄";
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  transform: translateY(-1px);
+}
+
+.rail-heading-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rail-section.collapsed .rail-section-body {
+  display: none;
+}
+
+.rail-section.collapsed .rail-heading-toggle::after {
+  transform: rotate(-90deg);
 }
 
 h2 {
@@ -575,6 +611,102 @@ h2 {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.task-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-card-title h2 {
+  margin: 0;
+}
+
+.job-center-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  margin-top: 10px;
+  overflow: auto;
+}
+
+.job-center-item {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.job-center-item.failed {
+  border-color: rgba(190, 18, 60, 0.22);
+  background: #fff7f8;
+}
+
+.job-center-thumb {
+  width: 46px;
+  height: 58px;
+  min-height: 58px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--soft);
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.job-center-thumb:disabled {
+  cursor: default;
+  opacity: 0.82;
+}
+
+.job-center-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.job-center-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.job-center-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-center-top strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.job-center-top time,
+.job-center-copy span,
+.job-center-copy small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.job-center-copy p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .gallery-rail {
@@ -813,6 +945,154 @@ select:focus,
   bottom: 9px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.prompt-mode-panel {
+  margin: 10px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.prompt-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.prompt-mode-tabs label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+}
+
+.prompt-mode-tabs input {
+  width: 16px;
+  min-height: 16px;
+  margin-top: 2px;
+}
+
+.prompt-mode-tabs strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.prompt-mode-tabs small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.prompt-mode-tabs label:has(input:checked) {
+  border-color: rgba(0, 149, 104, 0.38);
+  background: var(--green-soft);
+}
+
+.recipe-assist-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.recipe-selector-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.recipe-selector-row label > span {
+  display: block;
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.prompt-recipe-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.prompt-recipe-card {
+  min-height: 112px;
+  padding: 10px;
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  color: inherit;
+  text-align: left;
+}
+
+.prompt-recipe-card:hover,
+.prompt-recipe-card.active {
+  border-color: rgba(0, 149, 104, 0.38);
+  background: var(--green-soft);
+}
+
+.prompt-recipe-card strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.prompt-recipe-card span,
+.prompt-recipe-card small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.prompt-recipe-card p {
+  margin: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  color: #42526a;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.effective-prompt-panel {
+  margin-top: 8px;
+}
+
+.effective-prompt-panel summary {
+  color: var(--green-dark);
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.effective-prompt-panel pre {
+  max-height: 180px;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(247, 250, 252, 0.92);
+  color: #334155;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .tag-row {
@@ -1493,6 +1773,38 @@ select:focus,
   transform: translateY(0);
 }
 
+.result-hover-actions {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 16px;
+  display: flex;
+  max-width: calc(100% - 32px);
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 8px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.result-frame:hover .result-hover-actions,
+.result-frame:focus-within .result-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.result-hover-actions .ghost-button {
+  min-height: 32px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
 .full-width {
   width: calc(100% - 20px);
   margin: 10px;
@@ -1500,7 +1812,7 @@ select:focus,
 
 .result-actions {
   display: grid;
-  grid-template-columns: minmax(150px, 1.35fr) minmax(130px, 1.1fr) repeat(4, minmax(104px, 1fr));
+  grid-template-columns: minmax(180px, 1.45fr) minmax(92px, 0.8fr) minmax(124px, 1.05fr) repeat(4, minmax(98px, 1fr));
   align-items: stretch;
   gap: 10px;
   padding: 10px;
@@ -1516,6 +1828,10 @@ select:focus,
   line-height: 1.2;
   text-align: center;
   text-decoration: none;
+}
+
+.result-primary-action.download-ready-logo {
+  box-shadow: 0 8px 20px rgba(0, 149, 104, 0.16);
 }
 
 .emphasized-action {
@@ -1782,6 +2098,56 @@ select:focus,
 
 .generation-overlay-copy span {
   color: var(--muted);
+}
+
+.generation-overlay-steps {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.generation-overlay-steps li {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.generation-overlay-steps li.done {
+  border-color: rgba(0, 149, 104, 0.2);
+  color: var(--green-dark);
+}
+
+.generation-overlay-steps li.active {
+  border-color: rgba(217, 119, 6, 0.36);
+  background: #fff7ed;
+  color: #b45309;
+}
+
+.team-feed-entry {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0;
+  padding: 9px;
+  border: 1px solid rgba(0, 149, 104, 0.18);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.team-feed-entry strong {
+  color: var(--green-dark);
+  font-size: 12px;
+}
+
+.team-feed-entry span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .dashboard-row {
@@ -3481,7 +3847,20 @@ button:disabled {
   }
 
   .nav-rail .rail-section {
+    display: flex;
+  }
+
+  .nav-rail .rail-section:not(.collapsed) .rail-section-body {
+    max-height: 260px;
+    overflow: auto;
+  }
+
+  .nav-rail .rail-section .rail-section-body {
     display: none;
+  }
+
+  .nav-rail .rail-section:not(.collapsed) .rail-section-body {
+    display: block;
   }
 
   .mode-tabs,
@@ -3497,6 +3876,16 @@ button:disabled {
 
   .result-actions {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .result-hover-actions {
+    position: static;
+    max-width: none;
+    margin: 8px;
+    overflow-x: auto;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
   }
 
   .profile-grid,

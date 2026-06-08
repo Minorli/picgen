@@ -213,6 +213,75 @@ def test_gallery_library_controls_are_present() -> None:
     assert ".gallery-editor-panel" in styles_css
 
 
+def test_generation_task_center_and_lineage_controls_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="refreshJobsButton"' in index_html
+    assert 'id="jobCenterList"' in index_html
+    assert 'id="jobCenterEmpty"' in index_html
+    assert "/api/jobs?limit=20" in app_js
+    assert "/api/generated-images/${encodeURIComponent(generatedImageId)}" in app_js
+    assert "renderGenerationJobs" in app_js
+    assert "openGeneratedImageDetail" in app_js
+    assert "openGalleryLikeImage" in app_js
+    assert "void refreshGenerationJobs()" in app_js
+    assert ".job-center-item" in styles_css
+    assert ".job-center-thumb" in styles_css
+
+
+def test_image_centric_workspace_actions_and_brand_download_gateway_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="resultHoverActions" class="result-hover-actions hidden"' in index_html
+    assert 'id="inspectLongImageButton"' in index_html
+    assert 'id="downloadOriginalButton"' in index_html
+    assert "下载带 6 人游 LOGO 成品" in index_html
+    assert "原始底图" in index_html
+    assert "openPreview(\"result\", \"cinema\")" in app_js
+    assert "setDownloadPendingLogo" in app_js
+    assert "downloadOriginalButton" in app_js
+    assert "updateResultActionSurface" in app_js
+    assert "download-ready-logo" in styles_css
+    assert ".result-hover-actions" in styles_css
+    assert ".result-frame:hover .result-hover-actions" in styles_css
+
+
+def test_progress_overlay_and_team_inspiration_feed_are_visible_workflows() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="generationOverlaySteps"' in index_html
+    assert "准备请求" in index_html
+    assert "等待上游" in index_html
+    assert "保存成品" in index_html
+    assert "renderGenerationOverlaySteps" in app_js
+    assert "updateGenerationOverlay" in app_js
+    assert "后台如遇临时错误会自动重试" in app_js
+    assert 'id="teamInspirationFeedButton"' in index_html
+    assert "团队灵感流" in index_html
+    assert "openTeamInspirationFeed" in app_js
+    assert ".generation-overlay-steps" in styles_css
+    assert ".team-feed-entry" in styles_css
+
+
+def test_mobile_rail_sections_are_collapsible() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'data-rail-toggle="history"' in index_html
+    assert 'data-rail-toggle="shared"' in index_html
+    assert 'data-rail-toggle="gallery"' in index_html
+    assert "toggleRailSection" in app_js
+    assert "rail-section.collapsed" in styles_css
+    assert "@media (max-width: 820px)" in styles_css
+
+
 def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -622,6 +691,36 @@ def test_optional_creative_brief_keeps_free_prompt_as_primary_path() -> None:
     assert ".creative-brief-panel" in styles_css
 
 
+def test_prompt_recipe_mode_keeps_precise_prompt_as_default_and_records_lineage() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'name="promptMode" value="free" checked' in index_html
+    assert "精确提示词" in index_html
+    assert "默认原样发送" in index_html
+    assert "配方辅助" in index_html
+    assert 'id="promptRecipeSelect"' in index_html
+    assert 'id="promptRecipeCards"' in index_html
+    assert 'id="applyPromptRecipeButton"' in index_html
+    assert 'id="effectivePromptPreview"' in index_html
+    assert "buildEffectiveGeneratePrompt" in app_js
+    assert "loadPromptRecipes" in app_js
+    assert "renderPromptRecipeCards" in app_js
+    assert "selectPromptRecipe(" in app_js
+    assert 'fetchJSON("api/recipes"' in app_js
+    assert "original_prompt: prompt" in app_js
+    assert "prompt_mode: promptPlan.promptMode" in app_js
+    assert "recipe_id: promptPlan.recipe?.id" in app_js
+    assert "const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)" in app_js
+    assert "只追加质量要求，不覆盖原提示词" in app_js
+    assert ".prompt-mode-panel" in styles_css
+    assert ".recipe-assist-panel" in styles_css
+    assert ".prompt-recipe-cards" in styles_css
+    assert ".prompt-recipe-card" in styles_css
+    assert ".effective-prompt-panel" in styles_css
+
+
 def test_aesthetic_memory_is_optional_and_never_forced_into_prompts() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
 
@@ -647,6 +746,9 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert ".env.*" in dockerignore
     assert "data/" in dockerignore
     assert "/*.png" in dockerignore
+    assert "/*.jpg" in dockerignore
+    assert "/*.jpeg" in dockerignore
+    assert "/*.webp" in dockerignore
     assert "!static/*.png" in dockerignore
     assert "env_file:" not in compose
     assert f"image: minorli/picgen:{version}" in compose

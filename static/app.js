@@ -33,7 +33,7 @@ const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
 const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
-const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时 502/503/504 会自动重试；第几次重试以最终错误详情或服务端日志为准。"
+const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -155,6 +155,7 @@ const state = {
   gallerySearch: "",
   galleryFavoriteOnly: false,
   gallerySearchTimer: null,
+  generationJobs: [],
   currentGalleryMeta: {
     generatedImageId: null,
     isFavorite: false,
@@ -192,6 +193,9 @@ const state = {
   teamChatSending: false,
   adminOrgUnits: [],
   orgUnits: [],
+  promptMode: "free",
+  promptRecipes: [],
+  selectedRecipeId: "",
 }
 
 const refs = {
@@ -283,9 +287,15 @@ const refs = {
   sharedResultsList: document.querySelector("#sharedResultsList"),
   sharedResultsEmpty: document.querySelector("#sharedResultsEmpty"),
   refreshSharedResultsButton: document.querySelector("#refreshSharedResultsButton"),
+  railToggleButtons: Array.from(document.querySelectorAll("[data-rail-toggle]")),
+  teamInspirationFeedButton: document.querySelector("#teamInspirationFeedButton"),
+  teamInspirationFeed: document.querySelector("#teamInspirationFeed"),
   galleryList: document.querySelector("#galleryList"),
   galleryEmpty: document.querySelector("#galleryEmpty"),
   refreshGalleryButton: document.querySelector("#refreshGalleryButton"),
+  refreshJobsButton: document.querySelector("#refreshJobsButton"),
+  jobCenterList: document.querySelector("#jobCenterList"),
+  jobCenterEmpty: document.querySelector("#jobCenterEmpty"),
   gallerySearchInput: document.querySelector("#gallerySearchInput"),
   galleryFavoriteOnlyInput: document.querySelector("#galleryFavoriteOnlyInput"),
   clearGalleryFiltersButton: document.querySelector("#clearGalleryFiltersButton"),
@@ -326,6 +336,13 @@ const refs = {
   clearGenerateReferenceButton: document.querySelector("#clearGenerateReferenceButton"),
   generatePromptInput: document.querySelector("#generatePromptInput"),
   generatePromptCount: document.querySelector("#generatePromptCount"),
+  promptModeInputs: Array.from(document.querySelectorAll('input[name="promptMode"]')),
+  recipeAssistPanel: document.querySelector("#recipeAssistPanel"),
+  promptRecipeSelect: document.querySelector("#promptRecipeSelect"),
+  promptRecipeCards: document.querySelector("#promptRecipeCards"),
+  applyPromptRecipeButton: document.querySelector("#applyPromptRecipeButton"),
+  promptRecipeSummary: document.querySelector("#promptRecipeSummary"),
+  effectivePromptPreview: document.querySelector("#effectivePromptPreview"),
   generateModelInput: document.querySelector("#generateModelInput"),
   generateSizePreset: document.querySelector("#generateSizePreset"),
   generateWidthInput: document.querySelector("#generateWidthInput"),
@@ -376,12 +393,14 @@ const refs = {
   resultPreviewTrigger: document.querySelector("#resultPreviewTrigger"),
   resultImage: document.querySelector("#resultImage"),
   resultPreviewEmpty: document.querySelector("#resultPreviewEmpty"),
+  resultHoverActions: document.querySelector("#resultHoverActions"),
   resultActions: document.querySelector("#resultActions"),
   resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
   generationOverlay: document.querySelector("#generationOverlay"),
   generationOrbit: document.querySelector(".generation-orbit"),
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
   generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
+  generationOverlaySteps: document.querySelector("#generationOverlaySteps"),
   resultPrompt: document.querySelector("#resultPrompt"),
   resultMeta: document.querySelector("#resultMeta"),
   resultTiming: document.querySelector("#resultTiming"),
@@ -398,9 +417,14 @@ const refs = {
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
   generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
+  downloadOriginalButton: document.querySelector("#downloadOriginalButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
+  hoverContinueEditButton: document.querySelector("#hoverContinueEditButton"),
+  hoverVariantButton: document.querySelector("#hoverVariantButton"),
+  inspectLongImageButton: document.querySelector("#inspectLongImageButton"),
+  hoverShareButton: document.querySelector("#hoverShareButton"),
   saveGroupAssetButton: document.querySelector("#saveGroupAssetButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
@@ -1432,6 +1456,180 @@ function selectedGeneratedImageId() {
   return candidate.generated_image_id || state.lastResultImage?.generatedImageId || null
 }
 
+function selectedPromptRecipe() {
+  const recipeId = refs.promptRecipeSelect?.value || state.selectedRecipeId || ""
+  return state.promptRecipes.find((recipe) => recipe.id === recipeId) || null
+}
+
+function promptRecipeAppendText(recipe = selectedPromptRecipe()) {
+  if (!recipe?.prompt_suffix) {
+    return ""
+  }
+  return [
+    `配方辅助（${recipe.title} · ${recipe.version || "v1"}，只追加质量要求，不覆盖原提示词）：`,
+    recipe.prompt_suffix,
+  ].join("\n")
+}
+
+function buildEffectiveGeneratePrompt() {
+  const originalPrompt = refs.generatePromptInput.value.trim()
+  const recipe = selectedPromptRecipe()
+  const promptMode = state.promptMode === "recipe" && recipe ? "recipe" : "free"
+  const recipeText = promptMode === "recipe" ? promptRecipeAppendText(recipe) : ""
+  const effectivePrompt = [originalPrompt, recipeText].filter(Boolean).join("\n\n")
+  return {
+    originalPrompt,
+    effectivePrompt,
+    promptMode,
+    recipe,
+  }
+}
+
+function updatePromptModeUI() {
+  state.promptMode = refs.promptModeInputs.find((input) => input.checked)?.value || "free"
+  refs.recipeAssistPanel?.classList.toggle("hidden", state.promptMode !== "recipe")
+  updatePromptRecipeSummary()
+  updateEffectivePromptPreview()
+}
+
+function updatePromptRecipeSummary() {
+  const recipe = selectedPromptRecipe()
+  if (!refs.promptRecipeSummary) {
+    return
+  }
+  if (state.promptMode !== "recipe") {
+    refs.promptRecipeSummary.textContent = "精确提示词模式会把你写的提示词作为主输入原样发送。"
+    return
+  }
+  if (!recipe) {
+    refs.promptRecipeSummary.textContent = "选择一个配方后，可查看和追加最终发送提示词；配方不会自动覆盖你的意图。"
+    return
+  }
+  refs.promptRecipeSummary.textContent = `${recipe.summary || ""} ${recipe.guidance || ""}`.trim()
+}
+
+function updateEffectivePromptPreview() {
+  if (!refs.effectivePromptPreview) {
+    return
+  }
+  const { effectivePrompt, originalPrompt } = buildEffectiveGeneratePrompt()
+  refs.effectivePromptPreview.textContent = effectivePrompt || originalPrompt || "先输入提示词。"
+}
+
+function renderPromptRecipes() {
+  if (!refs.promptRecipeSelect) {
+    return
+  }
+  refs.promptRecipeSelect.replaceChildren()
+  const placeholder = document.createElement("option")
+  placeholder.value = ""
+  placeholder.textContent = "选择配方"
+  refs.promptRecipeSelect.append(placeholder)
+  state.promptRecipes
+    .filter((recipe) => recipe.mode === "generate")
+    .forEach((recipe) => {
+      const option = document.createElement("option")
+      option.value = recipe.id
+      option.textContent = recipe.title
+      refs.promptRecipeSelect.append(option)
+    })
+  if (state.selectedRecipeId) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
+  updatePromptRecipeSummary()
+  updateEffectivePromptPreview()
+  renderPromptRecipeCards()
+}
+
+async function loadPromptRecipes() {
+  try {
+    const { response, data } = await fetchJSON("api/recipes", { cache: "no-store" })
+    if (!response.ok) {
+      state.promptRecipes = []
+      renderPromptRecipes()
+      return
+    }
+    state.promptRecipes = Array.isArray(data.recipes) ? data.recipes : []
+    renderPromptRecipes()
+  } catch {
+    state.promptRecipes = []
+    renderPromptRecipes()
+  }
+}
+
+function renderPromptRecipeCards() {
+  if (!refs.promptRecipeCards) {
+    return
+  }
+  refs.promptRecipeCards.replaceChildren()
+  const recipes = state.promptRecipes.filter((recipe) => recipe.mode === "generate")
+  if (!recipes.length) {
+    const empty = document.createElement("p")
+    empty.className = "helper-text"
+    empty.textContent = "配方库暂时不可用；你仍然可以使用精确提示词生成。"
+    refs.promptRecipeCards.append(empty)
+    return
+  }
+  recipes.forEach((recipe) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "prompt-recipe-card"
+    button.classList.toggle("active", recipe.id === (refs.promptRecipeSelect?.value || state.selectedRecipeId))
+    button.dataset.recipeId = recipe.id
+
+    const title = document.createElement("strong")
+    title.textContent = recipe.title
+    const category = document.createElement("span")
+    category.textContent = recipe.category || "创作配方"
+    const summary = document.createElement("p")
+    summary.textContent = recipe.summary || recipe.guidance || ""
+    const keywords = document.createElement("small")
+    keywords.textContent = Array.isArray(recipe.recommended_keywords)
+      ? recipe.recommended_keywords.join(" / ")
+      : ""
+
+    button.append(title, category, summary, keywords)
+    button.addEventListener("click", () => selectPromptRecipe(recipe.id, { enableRecipeMode: true }))
+    refs.promptRecipeCards.append(button)
+  })
+}
+
+function selectPromptRecipe(recipeId, { enableRecipeMode = false } = {}) {
+  state.selectedRecipeId = recipeId || ""
+  if (refs.promptRecipeSelect) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
+  if (enableRecipeMode) {
+    state.promptMode = "recipe"
+    refs.promptModeInputs.forEach((input) => {
+      input.checked = input.value === "recipe"
+    })
+  }
+  updatePromptModeUI()
+  renderPromptRecipeCards()
+  scheduleWorkspacePersist()
+}
+
+function applyPromptRecipeToPrompt() {
+  const recipe = selectedPromptRecipe()
+  if (!recipe) {
+    setStatusMessage("请先选择一个创作配方。")
+    return
+  }
+  const snippet = promptRecipeAppendText(recipe)
+  const current = refs.generatePromptInput.value.trimEnd()
+  if (current.includes(`配方辅助（${recipe.title}`)) {
+    setStatusMessage("提示词里已经包含这个配方要求。")
+    return
+  }
+  refs.generatePromptInput.value = current ? `${current}\n\n${snippet}` : snippet
+  updatePromptCounters()
+  updateEffectivePromptPreview()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把配方要求追加到提示词。")
+  refs.generatePromptInput.focus()
+}
+
 function creativeBriefFields() {
   return [
     ["destination", refs.creativeBriefDestinationInput],
@@ -2105,6 +2303,39 @@ function renderGalleryItems(items = state.galleryItems) {
   })
 }
 
+function toggleRailSection(sectionName, forceExpanded = null) {
+  const section = document.querySelector(`[data-rail-section="${sectionName}"]`)
+  const toggle = document.querySelector(`[data-rail-toggle="${sectionName}"]`)
+  if (!section || !toggle) {
+    return
+  }
+  const shouldExpand = forceExpanded === null
+    ? section.classList.contains("collapsed")
+    : Boolean(forceExpanded)
+  section.classList.toggle("collapsed", !shouldExpand)
+  toggle.setAttribute("aria-expanded", String(shouldExpand))
+}
+
+function openTeamInspirationFeed() {
+  toggleRailSection("gallery", true)
+  refs.teamInspirationFeed?.classList.remove("hidden")
+  if (refs.galleryFavoriteOnlyInput) {
+    refs.galleryFavoriteOnlyInput.checked = true
+  }
+  state.galleryFavoriteOnly = true
+  void refreshGallery()
+  refs.gallerySearchInput?.focus()
+}
+
+function initializeRailDisclosure() {
+  if (!window.matchMedia("(max-width: 820px)").matches) {
+    return
+  }
+  refs.railToggleButtons.forEach((button) => {
+    toggleRailSection(button.dataset.railToggle || "", false)
+  })
+}
+
 async function refreshGallery() {
   if (!state.currentUser || !refs.galleryList) {
     return
@@ -2134,11 +2365,111 @@ async function refreshGallery() {
   refs.galleryEmpty?.classList.add("hidden")
 }
 
-function openGalleryItem(galleryId) {
-  const item = state.galleryItems.find((entry) => Number(entry.id || entry.generated_image_id) === Number(galleryId))
+function jobStatusLabel(status) {
+  if (status === "succeeded") return "已完成"
+  if (status === "failed") return "失败"
+  if (status === "started") return "生成中"
+  return status || "未知"
+}
+
+function renderGenerationJobs(jobs = state.generationJobs) {
+  state.generationJobs = Array.isArray(jobs) ? jobs : []
+  if (!refs.jobCenterList || !refs.jobCenterEmpty) {
+    return
+  }
+  refs.jobCenterList.replaceChildren()
+  refs.jobCenterEmpty.classList.toggle("hidden", state.generationJobs.length > 0)
+  state.generationJobs.slice(0, 8).forEach((job) => {
+    const item = document.createElement("article")
+    item.className = `job-center-item ${job.status === "failed" ? "failed" : ""}`
+    const thumb = document.createElement("button")
+    thumb.type = "button"
+    thumb.className = "job-center-thumb"
+    thumb.disabled = !job.first_generated_image_id
+    if (job.first_saved_image_url) {
+      const image = document.createElement("img")
+      image.src = job.first_saved_image_url
+      image.alt = ""
+      thumb.append(image)
+    } else {
+      thumb.textContent = job.status === "failed" ? "!" : "…"
+    }
+    thumb.addEventListener("click", () => {
+      if (job.first_generated_image_id) {
+        void openGeneratedImageDetail(job.first_generated_image_id)
+      }
+    })
+
+    const copy = document.createElement("div")
+    copy.className = "job-center-copy"
+    const top = document.createElement("div")
+    top.className = "job-center-top"
+    const status = document.createElement("strong")
+    status.textContent = jobStatusLabel(job.status)
+    const time = document.createElement("time")
+    time.textContent = formatTimestamp(job.started_at)
+    top.append(status, time)
+    const prompt = document.createElement("p")
+    prompt.textContent = job.original_prompt || job.prompt || "未记录提示词"
+    const meta = document.createElement("span")
+    const modeLabel = job.prompt_mode === "recipe" ? "配方辅助" : "精确提示词"
+    meta.textContent = [
+      job.mode || "生成",
+      modeLabel,
+      job.recipe_id || "",
+      job.size || "",
+      `${Number(job.image_count || 0)} 张`,
+    ].filter(Boolean).join(" · ")
+    copy.append(top, prompt, meta)
+    if (job.error_message) {
+      const error = document.createElement("small")
+      error.textContent = job.error_message
+      copy.append(error)
+    }
+    item.append(thumb, copy)
+    refs.jobCenterList.append(item)
+  })
+}
+
+async function refreshGenerationJobs() {
+  if (!state.currentUser || !refs.jobCenterList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/jobs?limit=20", { cache: "no-store" })
+    if (response.ok) {
+      renderGenerationJobs(data.jobs)
+      return
+    }
+  } catch {
+    // handled below
+  }
+  refs.jobCenterList.innerHTML = '<p class="empty-history">任务中心暂时不可用。</p>'
+  refs.jobCenterEmpty?.classList.add("hidden")
+}
+
+async function openGeneratedImageDetail(generatedImageId) {
+  if (!generatedImageId) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/generated-images/${encodeURIComponent(generatedImageId)}`, {
+      cache: "no-store",
+    })
+    if (!response.ok || !data.image) {
+      setError(data.error || "无法打开这张任务结果。")
+      return
+    }
+    openGalleryLikeImage(data.image, "任务结果")
+  } catch {
+    setError("打开任务结果时网络连接错误。")
+  }
+}
+
+function openGalleryLikeImage(item, label = "作品库") {
   const asset = galleryItemToAsset(item)
   if (!item || !asset) {
-    setError("这条作品没有可打开的图片。")
+    setError("这条记录没有可打开的图片。")
     return
   }
   state.resultCandidates = [{
@@ -2151,18 +2482,20 @@ function openGalleryItem(galleryId) {
     asset,
   }]
   state.selectedCandidateIndex = 0
-  state.lastResultPrompt = item.prompt || ""
-  state.lastResultModel = item.model || ""
+  const lineage = item.lineage || {}
+  state.lastResultPrompt = lineage.original_prompt || item.prompt || ""
+  state.lastResultModel = item.model || lineage.model || ""
   state.lastResultMode = item.mode || "gallery"
   state.lastResultImage = cloneImageAsset(asset)
   state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
-  refs.resultPreviewLabel.textContent = "作品库"
+  refs.resultPreviewLabel.textContent = label
   refs.resultImage.src = state.resultPreview.src
   refs.resultImage.classList.add("visible")
   refs.resultPreviewEmpty.classList.add("hidden")
   refs.resultPrompt.textContent = state.lastResultPrompt || "未记录提示词"
-  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", item.username || ""].filter(Boolean).join(" · ")
-  refs.resultTiming.textContent = ""
+  const promptMode = lineage.prompt_mode === "recipe" ? "配方辅助" : ""
+  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", promptMode, item.username || ""].filter(Boolean).join(" · ")
+  refs.resultTiming.textContent = lineage.elapsed_ms ? `${(Number(lineage.elapsed_ms) / 1000).toFixed(1)}s` : ""
   refs.resultStorage.textContent = item.saved_image_path ? `已落盘到 ${item.saved_image_path}` : ""
   setDownloadAvailable(state.resultPreview.src, asset.name)
   updateFeedbackSelection(null)
@@ -2174,6 +2507,11 @@ function openGalleryItem(galleryId) {
   updatePreviewAvailability()
   scheduleWorkspacePersist()
   document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function openGalleryItem(galleryId) {
+  const item = state.galleryItems.find((entry) => Number(entry.id || entry.generated_image_id) === Number(galleryId))
+  openGalleryLikeImage(item, "作品库")
 }
 
 function parseGalleryTagsInput() {
@@ -4244,8 +4582,10 @@ function updateWorkflowStatus() {
   const hasResult = Boolean(state.resultPreview?.src)
   const hasSource = Boolean(getAssetDisplaySrc(state.displayedSourceImage))
   refs.resultActions?.classList.toggle("hidden", !hasResult)
+  refs.resultHoverActions?.classList.toggle("hidden", !hasResult)
   refs.comparisonGrid?.classList.toggle("single-result", !hasSource)
   refs.sourcePreviewCard?.classList.toggle("hidden", !hasSource)
+  updateResultActionSurface()
 }
 
 function appendPromptSnippet(target, snippet) {
@@ -4656,6 +4996,8 @@ function currentFormSnapshot() {
     activeMode: state.activeMode,
     generateIntent: state.generateIntent,
     imageTransport: getImageTransport(),
+    promptMode: state.promptMode,
+    promptRecipeId: refs.promptRecipeSelect?.value || state.selectedRecipeId || "",
     generatePrompt: refs.generatePromptInput.value,
     generateModel: refs.generateModelInput.value,
     generateSize: getSizeSnapshotValue(),
@@ -4693,6 +5035,14 @@ function applyFormSnapshot(snapshot) {
     return
   }
   setImageTransport(snapshot.imageTransport || "images")
+  state.promptMode = snapshot.promptMode || "free"
+  refs.promptModeInputs.forEach((input) => {
+    input.checked = input.value === state.promptMode
+  })
+  state.selectedRecipeId = snapshot.promptRecipeId || ""
+  if (refs.promptRecipeSelect) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
   refs.generatePromptInput.value = snapshot.generatePrompt || ""
   refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
   setGenerateSize(snapshot.generateSize || "auto")
@@ -4728,6 +5078,7 @@ function applyFormSnapshot(snapshot) {
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateLogoControlUI()
   updatePromptCounters()
+  updatePromptModeUI()
 }
 
 function rememberRegenerationRequest(kind, snapshot) {
@@ -4864,8 +5215,30 @@ function renderProgress() {
   }
   refs.generationOverlayTitle.textContent = state.progressLabel || "处理中"
   refs.generationOverlaySubtitle.textContent = hint
+  renderGenerationOverlaySteps(state.progressPhase)
   refs.generationOrbit?.style.setProperty("--progress-degrees", `${(progress * 3.6).toFixed(1)}deg`)
   refs.generationOrbit?.setAttribute("data-progress", `${Math.round(progress)}%`)
+}
+
+function renderGenerationOverlaySteps(activePhase = state.progressPhase) {
+  const order = ["preparing", "uploading", "waiting", "receiving"]
+  const activeIndex = Math.max(0, order.indexOf(activePhase))
+  refs.generationOverlaySteps?.querySelectorAll("[data-progress-step]").forEach((item) => {
+    const step = item.dataset.progressStep || ""
+    const stepIndex = order.indexOf(step)
+    item.classList.toggle("active", stepIndex === activeIndex || (step === "waiting" && activePhase === "uploading"))
+    item.classList.toggle("done", stepIndex >= 0 && stepIndex < activeIndex)
+  })
+}
+
+function updateGenerationOverlay(title, subtitle, phase = state.progressPhase) {
+  if (refs.generationOverlayTitle) {
+    refs.generationOverlayTitle.textContent = title
+  }
+  if (refs.generationOverlaySubtitle) {
+    refs.generationOverlaySubtitle.textContent = subtitle
+  }
+  renderGenerationOverlaySteps(phase)
 }
 
 function setProgressPhase(phase, label) {
@@ -4874,8 +5247,7 @@ function setProgressPhase(phase, label) {
   }
   state.progressPhase = phase
   state.progressLabel = label
-  refs.generationOverlayTitle.textContent = label
-  refs.generationOverlaySubtitle.textContent = progressHintForPhase(phase, label)
+  updateGenerationOverlay(label, progressHintForPhase(phase, label), phase)
   renderProgress()
 }
 
@@ -4895,8 +5267,7 @@ function startProgress(label, options = {}) {
   refs.progressElapsed.textContent = "0.0s"
   refs.progressStageLabel.textContent = label
   refs.progressHint.textContent = progressHintForPhase("preparing", label)
-  refs.generationOverlayTitle.textContent = label
-  refs.generationOverlaySubtitle.textContent = progressHintForPhase("preparing", label)
+  updateGenerationOverlay(label, progressHintForPhase("preparing", label), "preparing")
   state.progressTimer = window.setInterval(renderProgress, 100)
 }
 
@@ -4911,8 +5282,7 @@ function setPendingResultFailure(message, details = "") {
   refs.resultPreviewEmpty.textContent = safeMessage
   refs.resultTiming.textContent = "已多次尝试仍未成功"
   refs.resultStorage.textContent = safeDetails ? "可展开错误详情查看技术信息。" : ""
-  refs.generationOverlayTitle.textContent = "生成失败"
-  refs.generationOverlaySubtitle.textContent = safeMessage
+  updateGenerationOverlay("生成失败", safeMessage, "receiving")
   refs.requestProgressFill.style.width = "100%"
   refs.generationOrbit?.style.setProperty("--progress-degrees", "360deg")
   refs.generationOrbit?.setAttribute("data-progress", "失败")
@@ -4937,6 +5307,7 @@ function stopProgress({ cancelled = false } = {}) {
     refs.requestProgressFill.style.width = "0%"
     refs.generationOrbit?.style.setProperty("--progress-degrees", "0deg")
     refs.generationOrbit?.setAttribute("data-progress", "0%")
+    renderGenerationOverlaySteps("idle")
   }, 420)
 }
 
@@ -5357,6 +5728,16 @@ function applyPreviewZoom() {
   refs.previewZoomResetButton.disabled = zoom.scale <= 1.01 && zoom.x === 0 && zoom.y === 0
 }
 
+function isLikelyLongImageAsset(asset = state.lastResultImage) {
+  const width = Number(asset?.width || asset?.saved_image_width || 0)
+  const height = Number(asset?.height || asset?.saved_image_height || 0)
+  if (width > 0 && height > 0) {
+    return height / width >= 1.45 || width / height >= 1.45
+  }
+  const name = String(asset?.name || asset?.saved_image_name || "")
+  return name.includes("1088x2240") || name.includes("2160x3840")
+}
+
 function changePreviewZoom(delta) {
   const nextScale = Math.max(1, Math.min(4, Number((state.previewZoom.scale + delta).toFixed(2))))
   state.previewZoom.scale = nextScale
@@ -5442,8 +5823,10 @@ function renderPreviewModal() {
   refs.previewComparePane.classList.toggle("hidden", previewMode !== "compare")
 
   if (previewMode === "single" && singleItem) {
-    refs.previewModalTitle.textContent = `${singleItem.label}预览`
-    refs.previewModalMeta.textContent = singleItem.meta
+    refs.previewModalTitle.textContent = state.preview.mode === "cinema" ? "长图检查" : `${singleItem.label}预览`
+    refs.previewModalMeta.textContent = state.preview.mode === "cinema"
+      ? `${singleItem.meta || "输出图"} · 可放大、拖拽检查人物、文字和 LOGO 拼接。`
+      : singleItem.meta
     refs.previewSingleImage.src = singleItem.src
     applyPreviewZoom()
     return
@@ -5464,10 +5847,14 @@ function openPreview(target = "result", mode = "single") {
   state.preview.target = target
   state.preview.mode = mode
   resetPreviewZoom()
+  if (mode === "cinema") {
+    state.previewZoom.scale = isLikelyLongImageAsset() ? 1.35 : 1.2
+  }
   renderPreviewModal()
   refs.previewModal.classList.remove("hidden")
   refs.previewModal.setAttribute("aria-hidden", "false")
   document.body.classList.add("modal-open")
+  applyPreviewZoom()
 }
 
 function clearResult() {
@@ -5511,6 +5898,7 @@ function clearResult() {
   state.debugLines = []
   state.generateIntent = "fresh"
   setGalleryEditorMeta(null)
+  updateOriginalDownloadButton(null)
 
   closePreview()
   renderRawResponsePreview()
@@ -5589,15 +5977,41 @@ function candidateAsset(candidate, payload, index) {
   }
 }
 
-function setDownloadAvailable(href, filename) {
+function selectedResultCandidate() {
+  return state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0] || null
+}
+
+function originalCandidateDownloadSource(candidate = selectedResultCandidate()) {
+  const asset = candidate?.asset || {}
+  return {
+    href: asset.originalSavedUrl || asset.originalFileUrl || asset.originalDataUrl || candidate?.saved_image_url || candidateImageSource(candidate),
+    filename: imageDataUrlName(asset.name || candidate?.saved_image_name || "picgen-original.png", "original"),
+  }
+}
+
+function updateOriginalDownloadButton(candidate = selectedResultCandidate()) {
+  if (!refs.downloadOriginalButton) {
+    return
+  }
+  const source = originalCandidateDownloadSource(candidate)
+  refs.downloadOriginalButton.disabled = !source.href
+  refs.downloadOriginalButton.dataset.href = source.href || ""
+  refs.downloadOriginalButton.dataset.filename = source.filename || "picgen-original.png"
+}
+
+function setDownloadAvailable(href, filename, options = {}) {
   if (!refs.downloadButton) {
     return
   }
   refs.downloadButton.href = href
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.textContent = "下载图像"
+  refs.downloadButton.classList.toggle("download-ready-logo", Boolean(options.logoReady))
+  refs.downloadButton.textContent = options.logoReady
+    ? "下载带 6 人游 LOGO 成品"
+    : "下载图像"
   refs.downloadButton.download = filename
+  updateOriginalDownloadButton(options.candidate)
 }
 
 function setDownloadDisabled(label = "下载图像") {
@@ -5608,11 +6022,24 @@ function setDownloadDisabled(label = "下载图像") {
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
   refs.downloadButton.removeAttribute("download")
+  refs.downloadButton.classList.remove("download-ready-logo")
   refs.downloadButton.textContent = label
 }
 
 function setDownloadPendingLogo() {
-  setDownloadDisabled("成品保存中")
+  setDownloadDisabled("LOGO 成品保存中")
+}
+
+function updateResultActionSurface() {
+  const hasResult = Boolean(state.resultPreview?.src)
+  const hasImage = Boolean(state.lastResultImage)
+  refs.continueEditButton.disabled = !hasImage
+  refs.startVariantButton.disabled = !hasImage
+  refs.hoverContinueEditButton && (refs.hoverContinueEditButton.disabled = !hasImage)
+  refs.hoverVariantButton && (refs.hoverVariantButton.disabled = !hasImage)
+  refs.inspectLongImageButton && (refs.inspectLongImageButton.disabled = !hasResult)
+  refs.hoverShareButton && (refs.hoverShareButton.disabled = !selectedGeneratedImageId())
+  updateOriginalDownloadButton()
 }
 
 function selectResultCandidate(index, { persist = true } = {}) {
@@ -5634,6 +6061,10 @@ function selectResultCandidate(index, { persist = true } = {}) {
   setDownloadAvailable(
     candidate.saved_image_url || imageSource,
     candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`,
+    {
+      candidate,
+      logoReady: Boolean(candidate.logo_overlay_applied || candidate.logo_final_persisted),
+    },
   )
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
@@ -5645,6 +6076,7 @@ function selectResultCandidate(index, { persist = true } = {}) {
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   updatePreviewAvailability()
+  updateResultActionSurface()
   if (persist) {
     scheduleWorkspacePersist()
   }
@@ -5703,6 +6135,10 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
   setDownloadAvailable(
     firstCandidate.saved_image_url || imageSource,
     firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`,
+    {
+      candidate: firstCandidate,
+      logoReady: Boolean(firstCandidate.logo_overlay_applied || firstCandidate.logo_final_persisted),
+    },
   )
 }
 
@@ -5722,6 +6158,7 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs) {
     applyPrimaryResultCandidate(selectedCandidate, payload, imageSource, durationMs)
     renderResultCandidates()
     updatePreviewAvailability()
+    updateResultActionSurface()
     refs.logoComposeStatus.textContent = selectedCandidate.logo_final_persisted ? "成品已保存" : "本地已贴图"
     scheduleWorkspacePersist()
   } catch (error) {
@@ -5858,6 +6295,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   void checkCopyrightRisk(payload)
   void refreshUsageSummary()
   void refreshGallery()
+  void refreshGenerationJobs()
 
   updateEditSourceUI()
   updateGenerateIntentUI()
@@ -6662,14 +7100,16 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   if (resetLog) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
-  const prompt = refs.generatePromptInput.value
+  const promptPlan = buildEffectiveGeneratePrompt()
+  const prompt = promptPlan.originalPrompt
+  const effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
+  const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
   let imageOptions
   let size
 
@@ -6797,7 +7237,9 @@ async function submitGenerate() {
 
   resetDebugLog("点击生成按钮：生成图片")
 
-  const prompt = refs.generatePromptInput.value
+  const promptPlan = buildEffectiveGeneratePrompt()
+  const prompt = promptPlan.originalPrompt
+  const effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
@@ -6805,7 +7247,7 @@ async function submitGenerate() {
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
   const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
-  const baseRequestPrompt = dualReference ? styleTransferPrompt(prompt) : prompt
+  const baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
   const requestPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
   const requiresReferenceTransport = referenceImages.length > 0
 
@@ -6891,6 +7333,10 @@ async function submitGenerate() {
           api_key: settings.apiKey,
           endpoint_url: settings.responsesUrl,
           prompt: requestPrompt,
+          original_prompt: prompt,
+          prompt_mode: promptPlan.promptMode,
+          recipe_id: promptPlan.recipe?.id || "",
+          recipe_version: promptPlan.recipe?.version || "",
           model: settings.responsesModel,
           mode: "reference",
           transport: "responses-image",
@@ -6910,6 +7356,10 @@ async function submitGenerate() {
           api_key: settings.apiKey,
           endpoint_url: settings.editUrl,
           prompt: requestPrompt,
+          original_prompt: prompt,
+          prompt_mode: promptPlan.promptMode,
+          recipe_id: promptPlan.recipe?.id || "",
+          recipe_version: promptPlan.recipe?.version || "",
           model: imageModel,
           mode: "reference",
           sample_count: referenceSampleCount,
@@ -6943,6 +7393,10 @@ async function submitGenerate() {
       api_key: settings.apiKey,
       endpoint_url: settings.generateUrl,
       prompt: requestPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
       model,
       sample_count: sampleCount,
       size,
@@ -7342,6 +7796,34 @@ function bindEvents() {
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
   refs.saveGroupAssetButton?.addEventListener("click", saveCurrentResultToGroupAssets)
+  refs.hoverContinueEditButton?.addEventListener("click", continueEditingFromResult)
+  refs.hoverVariantButton?.addEventListener("click", startVariantFromResult)
+  refs.inspectLongImageButton?.addEventListener("click", () => openPreview("result", "cinema"))
+  refs.hoverShareButton?.addEventListener("click", () => {
+    if (selectedGeneratedImageId()) {
+      showSharePanel()
+      refs.shareRecipientSearchInput?.focus()
+    }
+  })
+  refs.downloadOriginalButton?.addEventListener("click", () => {
+    const href = refs.downloadOriginalButton.dataset.href || ""
+    if (!href) {
+      setStatusMessage("当前没有可下载的原始底图。")
+      return
+    }
+    const link = document.createElement("a")
+    link.href = href
+    link.download = refs.downloadOriginalButton.dataset.filename || "picgen-original.png"
+    document.body.append(link)
+    link.click()
+    link.remove()
+  })
+  refs.teamInspirationFeedButton?.addEventListener("click", openTeamInspirationFeed)
+  refs.railToggleButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleRailSection(button.dataset.railToggle || "")
+    })
+  })
   refs.feedbackRatingButtons.forEach((button) => {
     button.addEventListener("click", () => {
       void submitResultFeedback(button.dataset.rating)
@@ -7360,6 +7842,7 @@ function bindEvents() {
     openSharedResult(button.dataset.shareId)
   })
   refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
+  refs.refreshJobsButton?.addEventListener("click", refreshGenerationJobs)
   refs.gallerySearchInput?.addEventListener("input", () => {
     window.clearTimeout(state.gallerySearchTimer)
     state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
@@ -7481,6 +7964,7 @@ function bindEvents() {
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updatePromptCounters()
+      updateEffectivePromptPreview()
       updateWorkflowStatus()
       updateGenerateIntentUI()
       updateOpenAIOptionUI()
@@ -7531,8 +8015,21 @@ function bindEvents() {
   refs.askBotCreativeBriefButton?.addEventListener("click", () => {
     void askBotWithCreativeBrief()
   })
+  refs.promptModeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      updatePromptModeUI()
+      scheduleWorkspacePersist()
+    })
+  })
+  refs.promptRecipeSelect?.addEventListener("change", () => {
+    selectPromptRecipe(refs.promptRecipeSelect.value)
+  })
+  refs.applyPromptRecipeButton?.addEventListener("click", applyPromptRecipeToPrompt)
   creativeBriefFields().forEach(([, input]) => {
-    input?.addEventListener("input", scheduleWorkspacePersist)
+    input?.addEventListener("input", () => {
+      updateEffectivePromptPreview()
+      scheduleWorkspacePersist()
+    })
   })
   ;[
     refs.itineraryTitleInput,
@@ -7822,6 +8319,7 @@ async function init() {
   }
 
   bindEvents()
+  initializeRailDisclosure()
   await refreshOrgUnits()
   const resetToken = getPasswordResetTokenFromUrl()
   if (resetToken) {
@@ -7839,6 +8337,7 @@ async function init() {
 async function startAuthenticatedApp() {
   if (state.appReady) {
     await refreshUsageSummary()
+    await refreshGenerationJobs()
     startTeamChatPolling()
     await refreshTeamChatUnread()
     return
@@ -7849,8 +8348,10 @@ async function startAuthenticatedApp() {
   renderHistory()
   await loadUserPreferences()
   loadSettings()
+  await loadPromptRecipes()
   updateLogoControlUI()
   updatePromptCounters()
+  updatePromptModeUI()
   updateGenerateIntentUI()
   const restored = await restoreWorkspaceState()
 
@@ -7869,6 +8370,7 @@ async function startAuthenticatedApp() {
   startTeamChatPolling()
   await refreshTeamChatUnread()
   await refreshUsageSummary()
+  await refreshGenerationJobs()
   scheduleWorkspacePersist()
 }
 

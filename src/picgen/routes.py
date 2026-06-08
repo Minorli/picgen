@@ -40,6 +40,7 @@ from .notifications import (
     send_password_reset_request_notification,
     smtp_notifications_enabled,
 )
+from .recipes import list_prompt_recipes, recipe_public_dict
 from .redaction import redact_sensitive_text
 from .schemas import (
     AdminCreateUserRequest,
@@ -493,6 +494,12 @@ def create_router() -> APIRouter:
             upstream_client_ready=client is not None,
             version=__version__,
         )
+
+    @router.get("/api/recipes")
+    async def recipes(user: AuthUser | None = Depends(require_current_user)) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        return {"recipes": list_prompt_recipes()}
 
     @router.get("/files/{relative_path:path}")
     async def files(
@@ -1115,6 +1122,37 @@ def create_router() -> APIRouter:
             "count": len(items),
             "items": items,
         }
+
+    @router.get("/api/jobs")
+    async def generation_jobs(
+        limit: int = 30,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        jobs = await anyio.to_thread.run_sync(
+            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit)
+        )
+        return {"scope": "self", "count": len(jobs), "jobs": jobs}
+
+    @router.get("/api/generated-images/{generated_image_id}")
+    async def generated_image_detail(
+        generated_image_id: int,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        image = await anyio.to_thread.run_sync(
+            lambda: auth_store.generated_image_detail_for_user(
+                generated_image_id=generated_image_id,
+                user_id=user.id,
+            )
+        )
+        if image is None:
+            raise APIError(HTTPStatus.NOT_FOUND, "图片不存在或无权查看", code="not_found")
+        return {"image": image}
 
     @router.put("/api/gallery/{generated_image_id}")
     async def update_gallery_item(
@@ -1914,6 +1952,11 @@ def _job_transport(path: str) -> str:
 
 def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
     payload = body if isinstance(body, dict) else {}
+    prompt_mode = str(payload.get("prompt_mode") or "free")
+    raw_recipe_id = str(payload.get("recipe_id") or "").strip()
+    recipe = recipe_public_dict(raw_recipe_id) if raw_recipe_id else None
+    recipe_id = raw_recipe_id if prompt_mode == "recipe" and recipe is not None else ""
+    recipe_version = str(payload.get("recipe_version") or "").strip() if recipe_id else ""
     return {
         "request_id": get_request_id(),
         "user_id": user.id,
@@ -1922,6 +1965,10 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "mode": _job_mode(path, payload),
         "transport": _job_transport(path),
         "prompt": str(payload.get("prompt") or ""),
+        "original_prompt": str(payload.get("original_prompt") or payload.get("prompt") or ""),
+        "prompt_mode": prompt_mode,
+        "recipe_id": recipe_id,
+        "recipe_version": recipe_version,
         "model": str(payload.get("model") or ""),
         "size": str(payload.get("size") or ""),
         "sample_count": _job_sample_count(payload),
@@ -2255,9 +2302,19 @@ async def handle_generate(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     image_options = openai_image_options(payload)
     mode = _generate_mode(parsed.mode)
+    original_prompt = (parsed.original_prompt or parsed.prompt).strip()
+    prompt_mode = parsed.prompt_mode
+    recipe_id = parsed.recipe_id or ""
+    recipe_version = parsed.recipe_version or ""
+    recipe = recipe_public_dict(recipe_id) if recipe_id else None
 
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
+    if prompt_mode == "recipe" and recipe is None:
+        raise APIError(HTTPStatus.BAD_REQUEST, "请选择有效的创作配方", code="validation_error")
+    if prompt_mode != "recipe":
+        recipe_id = ""
+        recipe_version = ""
 
     upstream_payload: dict[str, Any] = {
         "model": model,
@@ -2278,6 +2335,18 @@ async def handle_generate(
         sample_count=parsed.sample_count,
     )
     metadata = request_metadata({**payload, **image_options}, size=size)
+    lineage_metadata: dict[str, Any] = {
+        "original_prompt": original_prompt,
+        "effective_prompt": parsed.prompt,
+        "prompt_mode": prompt_mode,
+    }
+    if recipe_id:
+        lineage_metadata["recipe_id"] = recipe_id
+    if recipe_version:
+        lineage_metadata["recipe_version"] = recipe_version
+    if recipe is not None:
+        lineage_metadata["recipe_title"] = recipe["title"]
+    metadata.update(lineage_metadata)
 
     return await _finalize_image_response(
         upstream_response=upstream_response,
@@ -2291,12 +2360,15 @@ async def handle_generate(
             "transport": "images-generate",
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
+            **lineage_metadata,
             **_user_metadata(user),
             **metadata,
         },
         extra={
             "mode": mode,
             "prompt": parsed.prompt,
+            **lineage_metadata,
+            **({"recipe": recipe} if recipe is not None else {}),
             "model": model,
             "logo_requested": parsed.logo_requested,
             "sample_count": parsed.sample_count,

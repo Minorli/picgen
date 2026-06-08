@@ -56,10 +56,20 @@ class GenerateRequest(_ImageOptions):
     mode: str | None = Field(default=None, max_length=64)
     sample_count: int = Field(default=1, ge=1, le=3)
     logo_requested: bool = False
+    prompt_mode: Literal["free", "recipe"] = "free"
+    original_prompt: str | None = Field(default=None, max_length=32_000)
+    recipe_id: str | None = Field(default=None, max_length=128)
+    recipe_version: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> GenerateRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="生成提示词不能为空")
+        if self.original_prompt is not None:
+            self.original_prompt = self.original_prompt.strip()
+        if self.recipe_id is not None:
+            self.recipe_id = self.recipe_id.strip()
+        if self.recipe_version is not None:
+            self.recipe_version = self.recipe_version.strip()
         return self
 
 

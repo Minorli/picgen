@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=0.1.29">
+    <link rel="stylesheet" href="styles.css?v=0.1.30">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -112,36 +112,55 @@
             <a href="#connectionSettings">设置</a>
           </nav>
 
-          <section class="rail-section">
+          <section class="rail-section" data-rail-section="history">
             <div class="rail-heading">
-              <h2>历史记录</h2>
+              <button class="rail-heading-toggle" type="button" data-rail-toggle="history" aria-expanded="true">
+                <h2>历史记录</h2>
+              </button>
               <button id="clearHistoryButton" class="text-button" type="button">清空</button>
             </div>
-            <div id="historyList" class="history-list"></div>
-            <p id="historyEmpty" class="empty-history">还没有历史记录。完成一次生成或编辑后，这里会记录参数。</p>
+            <div class="rail-section-body">
+              <div id="historyList" class="history-list"></div>
+              <p id="historyEmpty" class="empty-history">还没有历史记录。完成一次生成或编辑后，这里会记录参数。</p>
+            </div>
           </section>
 
-          <section class="rail-section">
+          <section class="rail-section" data-rail-section="shared">
             <div class="rail-heading">
-              <h2>收到分享</h2>
+              <button class="rail-heading-toggle" type="button" data-rail-toggle="shared" aria-expanded="true">
+                <h2>收到分享</h2>
+              </button>
               <button id="refreshSharedResultsButton" class="text-button" type="button">刷新</button>
             </div>
-            <div id="sharedResultsList" class="shared-results-list"></div>
-            <p id="sharedResultsEmpty" class="empty-history">还没有收到分享。</p>
+            <div class="rail-section-body">
+              <div id="sharedResultsList" class="shared-results-list"></div>
+              <p id="sharedResultsEmpty" class="empty-history">还没有收到分享。</p>
+            </div>
           </section>
 
-          <section class="rail-section gallery-rail">
+          <section class="rail-section gallery-rail" data-rail-section="gallery">
             <div class="rail-heading">
-              <h2>作品库</h2>
-              <button id="refreshGalleryButton" class="text-button" type="button">刷新</button>
+              <button class="rail-heading-toggle" type="button" data-rail-toggle="gallery" aria-expanded="true">
+                <h2>作品库</h2>
+              </button>
+              <div class="rail-heading-actions">
+                <button id="teamInspirationFeedButton" class="text-button" type="button">团队灵感流</button>
+                <button id="refreshGalleryButton" class="text-button" type="button">刷新</button>
+              </div>
             </div>
-            <input id="gallerySearchInput" class="rail-search-input" type="search" placeholder="搜索提示词、标签、用户">
-            <div class="gallery-filter-row">
-              <label><input id="galleryFavoriteOnlyInput" type="checkbox"> 只看收藏</label>
-              <button id="clearGalleryFiltersButton" class="text-button" type="button">重置</button>
+            <div class="rail-section-body">
+              <input id="gallerySearchInput" class="rail-search-input" type="search" placeholder="搜索提示词、标签、用户">
+              <div class="gallery-filter-row">
+                <label><input id="galleryFavoriteOnlyInput" type="checkbox"> 只看收藏</label>
+                <button id="clearGalleryFiltersButton" class="text-button" type="button">重置</button>
+              </div>
+              <div id="teamInspirationFeed" class="team-feed-entry hidden">
+                <strong>团队灵感流</strong>
+                <span>从作品库、收到分享和部门群里挑选好图继续讨论。</span>
+              </div>
+              <div id="galleryList" class="gallery-list"></div>
+              <p id="galleryEmpty" class="empty-history">还没有作品。生成成功后会自动出现在这里。</p>
             </div>
-            <div id="galleryList" class="gallery-list"></div>
-            <p id="galleryEmpty" class="empty-history">还没有作品。生成成功后会自动出现在这里。</p>
           </section>
 
         </aside>
@@ -163,6 +182,42 @@
                 <textarea id="generatePromptInput" rows="6" placeholder="宁静的山间湖泊，清晨薄雾，湖边有一座木屋，周围是茂密的松树，远处是雪山，自然光，超写实，细节丰富"></textarea>
                 <strong id="generatePromptCount" class="field-meter">0 字</strong>
               </label>
+
+              <section class="prompt-mode-panel" aria-label="提示词控制方式">
+                <div class="prompt-mode-tabs">
+                  <label>
+                    <input type="radio" name="promptMode" value="free" checked>
+                    <span>
+                      <strong>精确提示词</strong>
+                      <small>默认原样发送，适合专业用户自己控制完整画面。</small>
+                    </span>
+                  </label>
+                  <label>
+                    <input type="radio" name="promptMode" value="recipe">
+                    <span>
+                      <strong>配方辅助</strong>
+                      <small>选择一个创作配方，只追加质量要求，不覆盖你的意图。</small>
+                    </span>
+                  </label>
+                </div>
+                <div id="recipeAssistPanel" class="recipe-assist-panel hidden">
+                  <div class="recipe-selector-row">
+                    <label>
+                      <span>创作配方</span>
+                      <select id="promptRecipeSelect">
+                        <option value="">选择配方</option>
+                      </select>
+                    </label>
+                    <button id="applyPromptRecipeButton" class="ghost-button" type="button">追加配方要求</button>
+                  </div>
+                  <p id="promptRecipeSummary" class="helper-text">配方只作为可选辅助，不会自动重写提示词。</p>
+                  <div id="promptRecipeCards" class="prompt-recipe-cards" aria-label="创作配方库"></div>
+                  <details id="effectivePromptPanel" class="effective-prompt-panel">
+                    <summary>查看最终发送提示词</summary>
+                    <pre id="effectivePromptPreview"></pre>
+                  </details>
+                </div>
+              </section>
 
               <details id="creativeBriefPanel" class="creative-brief-panel">
                 <summary>创意辅助（可选）</summary>
@@ -525,12 +580,24 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                         <strong id="generationOverlayTitle">正在生成</strong>
                         <span id="generationOverlaySubtitle">请求已发出，等待上游返回图像。</span>
                       </div>
+                      <ol id="generationOverlaySteps" class="generation-overlay-steps" aria-label="生成进度阶段">
+                        <li data-progress-step="preparing">准备请求</li>
+                        <li data-progress-step="waiting">等待上游</li>
+                        <li data-progress-step="receiving">保存成品</li>
+                      </ol>
+                    </div>
+                    <div id="resultHoverActions" class="result-hover-actions hidden" aria-label="图片快捷操作">
+                      <button id="hoverContinueEditButton" class="ghost-button" type="button">继续编辑</button>
+                      <button id="hoverVariantButton" class="ghost-button" type="button">再生成</button>
+                      <button id="inspectLongImageButton" class="ghost-button" type="button">长图检查</button>
+                      <button id="hoverShareButton" class="ghost-button" type="button">分享</button>
                     </div>
                     <span class="preview-hint">点击放大</span>
                   </div>
                   <div id="resultCandidateStrip" class="candidate-strip hidden" aria-label="结果候选图"></div>
                   <div id="resultActions" class="result-actions hidden">
-                    <a id="downloadButton" class="primary-button result-primary-action disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载图像</a>
+                    <a id="downloadButton" class="primary-button result-primary-action disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载带 6 人游 LOGO 成品</a>
+                    <button id="downloadOriginalButton" class="ghost-button" type="button" disabled>原始底图</button>
                     <button id="continueEditButton" class="ghost-button emphasized-action" type="button" disabled>继续编辑</button>
                     <button id="startVariantButton" class="ghost-button" type="button" disabled>基于结果再生成</button>
                     <button id="previewCompareButton" class="ghost-button" type="button" disabled>前后对比</button>
@@ -586,7 +653,10 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
 
             <section class="dashboard-row">
               <section class="studio-card progress-card">
-                <h2>请求进度</h2>
+                <div class="task-card-title">
+                  <h2>请求进度</h2>
+                  <button id="refreshJobsButton" class="text-button" type="button">任务中心</button>
+                </div>
                 <div id="progressInspectorItem" class="progress-inspector hidden">
                   <span id="progressStageLabel">等待阶段</span>
                   <strong id="progressElapsed">0.0s</strong>
@@ -596,6 +666,8 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   <p id="progressHint" class="progress-hint">准备发送请求。</p>
                 </div>
                 <p class="idle-note">发起请求后，这里显示本地代理与上游响应进度。</p>
+                <div id="jobCenterList" class="job-center-list"></div>
+                <p id="jobCenterEmpty" class="empty-history">暂无近期任务。</p>
               </section>
 
               <section class="studio-card inspector-card">
@@ -798,7 +870,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.29</span>
+        <span>PicGen Console　v0.1.30</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -1079,6 +1151,6 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
 
     <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
 
-    <script src="app.js?v=0.1.29" type="module"></script>
+    <script src="app.js?v=0.1.30" type="module"></script>
   </body>
 </html>
