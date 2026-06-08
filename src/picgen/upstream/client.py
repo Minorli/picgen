@@ -535,7 +535,12 @@ class HttpxAsyncClient:
         upstream_message, upstream_details = extract_error_message(body_text)
         code = classify_upstream_error(status, upstream_message, upstream_details)
         public_message = public_upstream_error_message(status, code, _action_from_event_prefix(event_prefix))
+        attempts = attempt + 1
+        if status in _RETRY_STATUS and attempts >= self.max_retries + 1:
+            public_message = f"{public_message} 已自动尝试 {attempts} 次，仍未成功。"
         detail_lines = [f"上游状态码：{status}", f"上游错误：{upstream_message}"]
+        if status in _RETRY_STATUS and attempts >= self.max_retries + 1:
+            detail_lines.append(f"上游连续返回 {status}，已自动尝试 {attempts} 次后停止。")
         if upstream_details:
             detail_lines.extend(["", upstream_details])
         raise APIError(status, public_message, "\n".join(detail_lines)[:4000], code=code)

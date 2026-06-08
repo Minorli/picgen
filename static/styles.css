@@ -1024,6 +1024,75 @@ select:focus,
   margin: 12px 0;
 }
 
+.itinerary-panel {
+  gap: 14px;
+}
+
+.itinerary-help-panel {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(0, 149, 104, 0.18);
+  border-radius: 8px;
+  background: #f7fcfa;
+}
+
+.itinerary-help-panel strong {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.itinerary-help-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.itinerary-stop-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.itinerary-stop-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.itinerary-stop-grid span,
+.itinerary-textarea > span {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.itinerary-textarea {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.itinerary-textarea textarea {
+  min-height: 228px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.itinerary-ai-options {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(15, 118, 110, 0.28);
+  border-radius: 8px;
+  background: #f8fbf9;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .compact-title {
   margin: 13px 0 8px;
 }
@@ -2105,6 +2174,18 @@ select:focus,
   width: 100%;
 }
 
+.preview-empty.failure {
+  color: var(--danger);
+  font-weight: 750;
+}
+
+.itinerary-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: -4px;
+}
+
 .timing-row {
   justify-content: space-between;
   margin-top: 14px;
@@ -2219,6 +2300,7 @@ select:focus,
 
 #generatePanel,
 #editPanel,
+#itineraryPanel,
 #resultPanel,
 #connectionSettings {
   scroll-margin-top: 84px;

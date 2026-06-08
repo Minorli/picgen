@@ -53,6 +53,7 @@ class GenerateRequest(_ImageOptions):
     model: str | None = Field(default=None, max_length=128)
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
+    mode: str | None = Field(default=None, max_length=64)
     sample_count: int = Field(default=1, ge=1, le=3)
     logo_requested: bool = False
 

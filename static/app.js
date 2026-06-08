@@ -15,6 +15,11 @@ const COMPANY_LOGO_LAYOUT_PROMPT = [
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
   "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
 ].join("\n")
+const EDIT_PRESERVE_PROMPT = [
+  "编辑保护要求：只修改用户明确要求修改的部分。",
+  "用户没有明确要求删除或替换的元素必须保留，包括主体构图、路线、地点、日期标签、距离标注、交通工具图标、人物/景物、文字层级、色彩气质和已有品牌安全区。",
+  "如果输入图包含或预留 6 人游 LOGO，不能重绘、改造、遮挡或删除 LOGO；最终 LOGO 会由程序使用官方透明 PNG 原样贴入。",
+].join("\n")
 const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
 const TEAM_CHAT_FAST_POLL_LIMIT = 8
 const MAX_HISTORY_ITEMS = 12
@@ -26,6 +31,52 @@ const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
 const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
+const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时 502/503/504 会自动重试；第几次重试以最终错误详情或服务端日志为准。"
+const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
+const DEFAULT_ITINERARY_SUBTITLE = ""
+const XINJIANG_ITINERARY_EXAMPLE_TITLE = "新疆深度定制旅行"
+const XINJIANG_ITINERARY_EXAMPLE_SUBTITLE = "5/12 - 5/24"
+const AI_ITINERARY_EXAMPLE = [
+  "5/12：抵达乌鲁木齐，入住Super8国际酒店（乌鲁木齐高铁站北广场经开万达店）",
+  "5/13：伊宁（抵达） → 租车前往赛里木湖（赛里木湖AC万豪）",
+  "5/14：赛里木湖 → 晃晃村 霍城见树民宿（晃晃村店）",
+  "5/15：晃晃村 → 霍尔果斯 → 阿帕民宿（喀赞其店）",
+  "5/16：伊宁市休整 → 森林活动 (16:00-21:00) → （伊宁自治州博物馆文化路轻居酒店）",
+  "5/17：伊宁市 → 喀拉峻 → 特克斯（琼库什台暮云春树）",
+  "5/18：特克斯 → 阔克苏大峡谷-特克斯（慢慢民宿）",
+  "5/19：特克斯 → 库尔德宁 → 伊宁（伊宁自治州博物馆文化路轻居酒店）",
+  "5/20：伊宁经乌鲁木齐飞喀什（喀什古城万斐国际酒店）",
+  "5/21：喀什（喀什古城万斐国际酒店）",
+  "5/22：小团",
+  "5/23：小团回喀什（喀什亚朵）",
+  "5/24：喀什牛羊大巴扎",
+].join("\n")
+const DETAILED_ITINERARY_TEMPLATE = [
+  "行程基础信息：",
+  "- 目的地/主题：请替换为本次路线目的地（例如：伊比利亚半岛亲子游 / 北欧峡湾自驾 / 日本关西赏枫）",
+  "- 出行日期：请替换为本次真实日期范围（例如：5/12 - 5/24）",
+  "- 客户偏好：请替换为真实偏好（例如：高端定制、小众自然风光、亲子友好、酒店质感、人文街区）",
+  "- 地图标题建议：请替换为客户可见标题（例如：多彩新疆游 / 伊比利亚半岛旅行地图）",
+  "",
+  "逐日行程：",
+  "- 日期：城市/地点 A → 城市/地点 B；交通：请写明包车/自驾/火车/飞机/步行；入住：酒店名；当天重点：请写明 1-3 个核心活动。",
+  "- 日期：城市/地点 B → 景区/街区 C；交通：请写明；入住：酒店名；当天重点：请写明。",
+  "- 日期：景区/街区 C → 城市/地点 D；交通：请写明；入住：酒店名；当天重点：请写明。",
+  "- 按真实行程继续补齐每一天；不要保留示例地名，不要省略中间日期。",
+  "",
+  "地点与地理校验（请按本次目的地改写）：",
+  "- 必须保持真实相对位置：请列出本次路线中容易画错的城市、景区、海岸、山脉、湖泊、岛屿或边境关系。",
+  "- 如果路线跨国家/大区，请明确哪些是飞行或长距离转场，哪些是地面路线；不要把远距离城市画成相邻小镇。",
+  "- 每两个连续地点之间都要有路线连接，并标注合理的距离或转场方式；不确定精确距离时写“约 xx km”或“飞行转场”。",
+  "- 每段路线中间放一个很小的交通工具图标：包车/自驾用小车，火车用列车，飞行转场用飞机，活动/步行用脚印或点线。",
+  "",
+  "画面要求：",
+  "- 水彩漫画路线图，不要像手机导航截图或低质 PPT。",
+  "- 日期必须逐日出现，不能漏任何一天；地点、交通、酒店和核心活动必须按用户原文保留。",
+  "- 左上角预留 6 人游 LOGO 安全区；不要让 AI 绘制 LOGO，程序会用官方透明 PNG 原样贴入。",
+  "- 风格：水彩漫画路线图，参考 template-route.jpg 的表达方式：柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
+  "- 漫画风格不能牺牲地理真实性；日期、距离、交通方式、酒店和核心景区不能省略，信息丰富但不拥挤。",
+].join("\n")
 
 const SIZE_PRESETS = [
   "auto",
@@ -241,8 +292,20 @@ const refs = {
   requestBadge: document.querySelector("#requestBadge"),
   generateTab: document.querySelector("#generateTab"),
   editTab: document.querySelector("#editTab"),
+  itineraryTab: document.querySelector("#itineraryTab"),
   generatePanel: document.querySelector("#generatePanel"),
   editPanel: document.querySelector("#editPanel"),
+  itineraryPanel: document.querySelector("#itineraryPanel"),
+  itineraryTitleInput: document.querySelector("#itineraryTitleInput"),
+  itinerarySubtitleInput: document.querySelector("#itinerarySubtitleInput"),
+  itinerarySizeSelect: document.querySelector("#itinerarySizeSelect"),
+  itineraryThemeSelect: document.querySelector("#itineraryThemeSelect"),
+  itineraryDescriptionInput: document.querySelector("#itineraryDescriptionInput"),
+  itineraryLogoEnabled: document.querySelector("#itineraryLogoEnabled"),
+  renderItineraryMapButton: document.querySelector("#renderItineraryMapButton"),
+  clearItineraryMapButton: document.querySelector("#clearItineraryMapButton"),
+  copyItineraryTemplateButton: document.querySelector("#copyItineraryTemplateButton"),
+  applyItineraryTemplateButton: document.querySelector("#applyItineraryTemplateButton"),
   freshGenerateMode: document.querySelector("#freshGenerateMode"),
   variantGenerateMode: document.querySelector("#variantGenerateMode"),
   generateIntentHint: document.querySelector("#generateIntentHint"),
@@ -1441,6 +1504,232 @@ async function askBotWithCreativeBrief() {
     refs.teamChatMessageInput.value = message.slice(0, TEAM_CHAT_MAX_MESSAGE_LENGTH)
     refs.teamChatMessageInput.focus()
   }
+}
+
+function parseItinerarySize() {
+  const [widthText, heightText] = (refs.itinerarySizeSelect?.value || "1088x2240").split("x")
+  const width = Number.parseInt(widthText, 10)
+  const height = Number.parseInt(heightText, 10)
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    throw new Error("行程地图尺寸无效。")
+  }
+  if (width % 16 !== 0 || height % 16 !== 0) {
+    throw new Error("行程地图尺寸的宽高都必须是 16 的倍数。")
+  }
+  return formatSizeValue(width, height)
+}
+
+function itineraryThemePrompt() {
+  const theme = refs.itineraryThemeSelect?.value || "comic"
+  if (theme === "comic") {
+    return "水彩漫画路线图，参考 template-route.jpg：柔和浅蓝/浅黄水彩底、清晰地图轮廓、红色粗路线、白心红点或圆点站位、手写感中文标题、地标小插画、车辆/飞机/脚印小图标；画面亲切有旅行手帐感，但漫画风格不能牺牲地理真实性，地点相对位置、路线顺序、日期、距离、交通方式、酒店和核心景区不能省略。"
+  }
+  if (theme === "dark") {
+    return "深色高级手绘地形地图，午夜蓝与暖金路线，低饱和、高对比，适合高端旅行海报；保留真实山脉、湖泊、沙漠和城市层级，路线像精品旅行地图而不是导航截图。"
+  }
+  if (theme === "classic") {
+    return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线、指南针和图例，保持现代高级旅行质感，地点落位仍必须服从真实地理。"
+  }
+  return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；视觉仍参考 template-route.jpg 的红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
+}
+
+function shouldUseXinjiangRouteGuard(description) {
+  const text = String(description || "")
+  return /新疆|乌鲁木齐|伊宁|伊犁|赛里木湖|喀拉峻|库尔德宁|琼库什台|特克斯|阔克苏|霍尔果斯|喀什|塔克拉玛干|那拉提/.test(text)
+}
+
+function xinjiangRouteGuardPrompt() {
+  return [
+    "- 仅当行程文本包含新疆、伊犁、赛里木湖、喀拉峻、库尔德宁、喀什等新疆地点时才追加以下校验。",
+    "- 新疆伊犁/南疆行程的重点校验：赛里木湖在伊犁河谷西北方向，伊宁是伊犁河谷重要中心城市，特克斯在伊宁东南方向，喀拉峻在特克斯县方向，琼库什台在特克斯南部山区方向，库尔德宁在巩留县方向，那拉提在新源县方向，喀什在南疆；严禁把库尔德宁和喀拉峻位置画反或互换。",
+    "- 不要把库尔德宁和喀拉峻位置互换；新疆路线应让赛里木湖、伊犁河谷、天山山脉、塔克拉玛干沙漠、喀什形成清楚地理层次。",
+    "- 如果是西班牙、欧洲或其他非新疆目的地，不要套用新疆地点和地貌校验。",
+  ]
+}
+
+function drawItineraryLogoSafeArea() {
+  return "左上角预留干净白底 LOGO 安全区；不要让 AI 绘制或改造 6 人游 LOGO，最终由程序使用官方透明 PNG 原样贴入。"
+}
+
+function stripCodeFence(value) {
+  const text = String(value || "").trim()
+  const match = text.match(/^```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*```$/)
+  return (match ? match[1] : text).trim()
+}
+
+function isCompleteItineraryPrompt(value) {
+  const text = stripCodeFence(value)
+  // 用户粘贴完整行程地图 prompt 时不再二次包裹，避免重复标题和要求。
+  return text.includes("客户行程原文如下")
+    && text.includes("画面与信息要求")
+    && text.includes("地理正确性硬性要求")
+}
+
+function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
+  const normalizedTitle = String(title || "").trim() || "定制旅行行程地图"
+  const normalizedSubtitle = String(subtitle || "").trim() || "AI 路线图"
+  const normalizedDescription = stripCodeFence(description)
+  if (isCompleteItineraryPrompt(normalizedDescription)) {
+    return normalizedDescription
+  }
+  const geographyGuards = shouldUseXinjiangRouteGuard(normalizedDescription) ? xinjiangRouteGuardPrompt() : []
+  return [
+    "请生成一张漫画风格的高级定制旅行行程路线图海报，不是普通导航截图，也不是纯信息表格。",
+    `标题：${normalizedTitle}`,
+    `副标题：${normalizedSubtitle}`,
+    "",
+    "客户行程原文如下，请先理解日期、城市、景区、酒店、交通和活动关系，再转化为清晰的路线地图视觉：",
+    normalizedDescription,
+    "",
+    "画面与信息要求：",
+    "- 地理正确性硬性要求：所有地点落位、东西南北关系、前后路线顺序必须以真实地图为准；不能为了画面好看而调整地点相对位置，也不要把城市、景区顺序画反。",
+    "- 对任何目的地都要先按真实世界地图理解相对位置：城市、国家/地区边界、山脉、湖泊、海岸线、岛屿、沙漠、峡谷和主要交通走廊不能乱画。",
+    ...geographyGuards,
+    "- 必须展示行程原文里的每一个日期，不要漏掉中间日期；日期必须逐日出现，像 5/18 这样的中间日期也必须单独标出；日期标签用小金色日期牌或清晰日程标签呈现。",
+    "- 地点层级要有主次；酒店可作为小字备注，不要把所有酒店全文挤满画面，但不能删掉用户明确给出的核心城市、景区、日期和活动。",
+    "- 每两个连续地点之间必须有路线连接，并必须标注大致距离或飞行/转场说明；若无法确定精确距离，用“约 xx km”或“飞行转场”这类合理估算，不要空着。",
+    "- 自驾/包车路线用实线或柔和路线带，飞机/长距离转场用虚线或飞行弧线，避免路线互相缠绕。",
+    "- 在每段连接线中间放一个很小的交通工具图标：自驾/包车用小车图标，飞机转场用飞机图标，步行/活动可用小脚印或点线；图标要小而精致，不遮挡地点和日期。",
+    "- 画面需要像高级旅行定制海报，适合发给客户预览；采用水彩漫画路线图表达，地图轮廓清晰、地貌层次准确、地标小插画精致；不要像低质 PPT、不要像手机地图截图。",
+    "- 漫画风格参考 template-route.jpg 的视觉语言：柔和水彩铺底、红色粗路线、圆点站位、手写感标题、地标小插画、海/湖/山地用轻松但清晰的插画表达；但信息密度和真实地理不能下降。",
+    "- 已验证满意样张的稳定风格（参考请求 22cee0390f9c）：上方日期区间，左上 LOGO 安全区，地点层级清楚，路线连接完整，信息丰富但不拥挤；本次保持这些信息组织方式，视觉切换为漫画路线图。",
+    `- 视觉风格：${theme || itineraryThemePrompt()}`,
+    `- ${drawItineraryLogoSafeArea()}`,
+    "- 不要出现 OpenAI、API、debug、水印、二维码、虚构品牌 LOGO。",
+  ].join("\n")
+}
+
+async function submitAIItineraryMap() {
+  try {
+    resetDebugLog("点击行程路线：AI 生成")
+    const startedAt = performance.now()
+    const title = refs.itineraryTitleInput?.value.trim() || "定制旅行行程地图"
+    const subtitle = refs.itinerarySubtitleInput?.value.trim() || ""
+    const description = refs.itineraryDescriptionInput?.value.trim() || ""
+    const settings = getSettings()
+    const model = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+    const logoRequested = refs.itineraryLogoEnabled?.checked !== false
+
+    if (!description) {
+      setError("行程描述不能为空。")
+      refs.itineraryDescriptionInput?.focus()
+      return
+    }
+
+    if (!settings.generateUrl) {
+      appendDebugLine("参数校验失败：行程地图生成接口 URL 为空")
+      setError("请先填写生成接口 URL。")
+      refs.generateUrlInput.focus()
+      return
+    }
+
+    let size
+    let imageOptions
+    try {
+      size = parseItinerarySize()
+      imageOptions = getOpenAIImageOptions()
+    } catch (error) {
+      appendDebugLine("参数校验失败：行程地图参数无效", { error: error.message })
+      setError(error.message, error.details)
+      return
+    }
+
+    const aiPrompt = buildAIItineraryMapPrompt({
+      title,
+      subtitle,
+      description,
+      theme: itineraryThemePrompt(),
+    })
+    const requestPrompt = withLogoLayoutPrompt(aiPrompt, logoRequested)
+    const requestSnapshot = currentFormSnapshot()
+
+    saveSettings()
+    setError("")
+    closePreview()
+    setBusy(true, "行程路线生成中", {
+      progressLabel: "准备 AI 行程路线",
+      expectedCount: 1,
+      estimatedSecondsPerImage: 210,
+    })
+    previewPendingResult({
+      mode: "itinerary",
+      prompt: description,
+      model,
+      size,
+    })
+
+    const result = await postJSON("api/generate", {
+      api_key: settings.apiKey,
+      endpoint_url: settings.generateUrl,
+      prompt: requestPrompt,
+      model,
+      mode: "itinerary",
+      sample_count: 1,
+      size,
+      ...imageOptions,
+    }, {
+      mode: "itinerary",
+      progressLabel: "提交 AI 行程路线",
+      waitingLabel: "等待 AI 绘制路线图",
+    })
+    await setResult({ ...result, mode: "itinerary", prompt: aiPrompt, size, transport: "images-generate", logo_requested: logoRequested }, performance.now() - startedAt)
+    rememberRegenerationRequest("itinerary", requestSnapshot)
+    pushHistory({
+      mode: "itinerary",
+      prompt: title,
+      itineraryTitle: title,
+      itinerarySubtitle: subtitle,
+      itineraryDescription: description,
+      itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+      model,
+      transport: "images-generate",
+      logoRequested,
+      sampleCount: 1,
+      size,
+      ...imageOptions,
+      createdAt: new Date().toISOString(),
+    })
+    document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+  } catch (error) {
+    appendDebugLine("AI 行程路线生成失败", { error: error.message })
+    setError(error.cancelled ? "已中断行程路线生成，可以修改行程后重新提交。" : error.message, error.details)
+  } finally {
+    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+    state.activeRequestCancelled = false
+  }
+}
+
+function resetItineraryMapExample() {
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = XINJIANG_ITINERARY_EXAMPLE_TITLE
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = XINJIANG_ITINERARY_EXAMPLE_SUBTITLE
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = AI_ITINERARY_EXAMPLE
+  }
+  scheduleWorkspacePersist()
+}
+
+async function copyDetailedItineraryTemplate() {
+  await navigator.clipboard.writeText(DETAILED_ITINERARY_TEMPLATE)
+  setStatusMessage("精细行程模板已复制。")
+}
+
+function applyDetailedItineraryTemplate() {
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = DETAILED_ITINERARY_TEMPLATE
+    refs.itineraryDescriptionInput.focus()
+  }
+  if (refs.itineraryTitleInput && !refs.itineraryTitleInput.value.trim()) {
+    refs.itineraryTitleInput.value = DEFAULT_ITINERARY_TITLE
+  }
+  if (refs.itinerarySubtitleInput && !refs.itinerarySubtitleInput.value.trim()) {
+    refs.itinerarySubtitleInput.value = DEFAULT_ITINERARY_SUBTITLE
+  }
+  scheduleWorkspacePersist()
+  setStatusMessage("已套用精细行程模板。")
 }
 
 function serverShareableImageUrl(candidate = {}) {
@@ -3388,6 +3677,12 @@ function createWorkspaceSnapshot() {
       moderation: refs.moderationSelect.value,
       generateSampleCount: refs.generateSampleCountInput.value,
       creativeBrief: creativeBriefSnapshot(),
+      itineraryTitle: refs.itineraryTitleInput?.value || "",
+      itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
+      itinerarySize: refs.itinerarySizeSelect?.value || "1088x2240",
+      itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+      itineraryDescription: refs.itineraryDescriptionInput?.value || "",
+      itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
@@ -3464,6 +3759,24 @@ async function restoreWorkspaceState() {
   refs.moderationSelect.value = forms.moderation || "auto"
   refs.generateSampleCountInput.value = forms.generateSampleCount || ""
   restoreCreativeBrief(forms.creativeBrief || {})
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = forms.itineraryTitle || refs.itineraryTitleInput.value
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = forms.itinerarySubtitle || refs.itinerarySubtitleInput.value
+  }
+  if (refs.itinerarySizeSelect) {
+    refs.itinerarySizeSelect.value = forms.itinerarySize || "1088x2240"
+  }
+  if (refs.itineraryThemeSelect) {
+    refs.itineraryThemeSelect.value = forms.itineraryTheme || "comic"
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = forms.itineraryDescription || forms.itineraryStops || refs.itineraryDescriptionInput.value || AI_ITINERARY_EXAMPLE
+  }
+  if (refs.itineraryLogoEnabled) {
+    refs.itineraryLogoEnabled.checked = forms.itineraryLogoEnabled !== false
+  }
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
@@ -3686,7 +3999,7 @@ function updateGenerateIntentUI() {
     ? "基于当前结果延展"
     : hasReference
       ? "参考图生成"
-      : "开始生成"
+      : "开始海报生成"
   updateGenerateSampleCountUI()
 }
 
@@ -3930,6 +4243,12 @@ function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
   return logoRequested ? `${basePrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : basePrompt
 }
 
+function withEditPreservePrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+  const basePrompt = String(prompt || "").trim()
+  const logoInstruction = logoRequested ? COMPANY_LOGO_LAYOUT_PROMPT : ""
+  return [basePrompt, EDIT_PRESERVE_PROMPT, logoInstruction].filter(Boolean).join("\n\n")
+}
+
 function updateGenerateSampleCountUI() {
   const hasReference = Boolean(generateReferenceImages().length)
   const isVariant = state.generateIntent === "variant"
@@ -4132,6 +4451,12 @@ function currentFormSnapshot() {
     moderation: refs.moderationSelect.value,
     generateSampleCount: refs.generateSampleCountInput.value,
     creativeBrief: creativeBriefSnapshot(),
+    itineraryTitle: refs.itineraryTitleInput?.value || "",
+    itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
+    itinerarySize: refs.itinerarySizeSelect?.value || "1088x2240",
+    itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+    itineraryDescription: refs.itineraryDescriptionInput?.value || "",
+    itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
     logoOverlayEnabled: refs.logoOverlayEnabled.checked,
     editPrompt: refs.editPromptInput.value,
     editModel: refs.editModelInput.value,
@@ -4163,6 +4488,24 @@ function applyFormSnapshot(snapshot) {
   refs.moderationSelect.value = snapshot.moderation || "auto"
   refs.generateSampleCountInput.value = snapshot.generateSampleCount || ""
   restoreCreativeBrief(snapshot.creativeBrief || {})
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = snapshot.itineraryTitle || refs.itineraryTitleInput.value
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = snapshot.itinerarySubtitle || refs.itinerarySubtitleInput.value
+  }
+  if (refs.itinerarySizeSelect) {
+    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "1088x2240"
+  }
+  if (refs.itineraryThemeSelect) {
+    refs.itineraryThemeSelect.value = snapshot.itineraryTheme || "comic"
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = snapshot.itineraryDescription || snapshot.itineraryStops || refs.itineraryDescriptionInput.value || AI_ITINERARY_EXAMPLE
+  }
+  if (refs.itineraryLogoEnabled) {
+    refs.itineraryLogoEnabled.checked = snapshot.itineraryLogoEnabled !== false
+  }
   refs.logoOverlayEnabled.checked = snapshot.logoOverlayEnabled !== false
   refs.editPromptInput.value = snapshot.editPrompt || ""
   refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
@@ -4190,6 +4533,8 @@ async function rerunLastGeneration() {
     applyFormSnapshot(snapshot)
     if (kind === "edit") {
       await submitEdit()
+    } else if (kind === "itinerary") {
+      await submitAIItineraryMap()
     } else {
       await submitGenerate()
     }
@@ -4268,7 +4613,7 @@ function progressHintForPhase(phase, label) {
     return "请求已交给本地代理，正在连接上游接口。"
   }
   if (phase === "waiting") {
-    return "上游正在生成图像，较大尺寸通常需要更久。"
+    return UPSTREAM_RETRY_HINT
   }
   if (phase === "receiving") {
     return "上游已响应，正在解析结果并保存到本地。"
@@ -4299,6 +4644,9 @@ function renderProgress() {
   refs.resultTiming.textContent = `请求进行中 ${(elapsedMs / 1000).toFixed(1)}s`
   refs.progressStageLabel.textContent = state.progressLabel || "处理中"
   refs.progressHint.textContent = hint
+  if (state.progressPhase === "waiting") {
+    refs.resultPreviewEmpty.textContent = hint
+  }
   refs.generationOverlayTitle.textContent = state.progressLabel || "处理中"
   refs.generationOverlaySubtitle.textContent = hint
   refs.generationOrbit?.style.setProperty("--progress-degrees", `${(progress * 3.6).toFixed(1)}deg`)
@@ -4337,6 +4685,24 @@ function startProgress(label, options = {}) {
   state.progressTimer = window.setInterval(renderProgress, 100)
 }
 
+function setPendingResultFailure(message, details = "") {
+  const safeMessage = String(message || "生成失败，请稍后再试。").trim()
+  const safeDetails = String(details || "").trim()
+  refs.resultPreviewLabel.textContent = "生成失败"
+  refs.resultImage.removeAttribute("src")
+  refs.resultImage.classList.remove("visible")
+  refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.add("failure")
+  refs.resultPreviewEmpty.textContent = safeMessage
+  refs.resultTiming.textContent = "已多次尝试仍未成功"
+  refs.resultStorage.textContent = safeDetails ? "可展开错误详情查看技术信息。" : ""
+  refs.generationOverlayTitle.textContent = "生成失败"
+  refs.generationOverlaySubtitle.textContent = safeMessage
+  refs.requestProgressFill.style.width = "100%"
+  refs.generationOrbit?.style.setProperty("--progress-degrees", "360deg")
+  refs.generationOrbit?.setAttribute("data-progress", "失败")
+}
+
 function stopProgress({ cancelled = false } = {}) {
   window.clearInterval(state.progressTimer)
   state.progressTimer = null
@@ -4369,6 +4735,12 @@ function setBusy(isBusy, label, options = {}) {
   refs.editButton.disabled = isBusy
   refs.generateTab.disabled = isBusy
   refs.editTab.disabled = isBusy
+  if (refs.itineraryTab) {
+    refs.itineraryTab.disabled = isBusy
+  }
+  if (refs.renderItineraryMapButton) {
+    refs.renderItineraryMapButton.disabled = isBusy
+  }
   refs.cancelRequestButton?.classList.toggle("hidden", !isBusy)
   refs.cancelRequestButton.disabled = !isBusy
   refs.requestStatus.textContent = label
@@ -4662,6 +5034,18 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
     refs.editModelInput.value = state.lastResultModel
   }
 
+  if (focus && !refs.editPromptInput.value.trim()) {
+    refs.editPromptInput.value = [
+      "请基于当前图做精细修改：",
+      "- 只修改我接下来明确说明的部分；",
+      "- 保留现有构图、路线、地点、日期、距离标注、交通工具图标、文字层级和整体风格；",
+      "- 保留 6 人游 LOGO 安全区，最终 LOGO 由程序使用官方 PNG 原样贴入，不要重绘或改造 LOGO。",
+      "",
+      "需要修改：",
+    ].join("\n")
+    updatePromptCounters()
+  }
+
   if (focus) {
     refs.editPromptInput.focus()
   }
@@ -4676,11 +5060,13 @@ function setMode(mode, options = {}) {
 
   refs.generateTab.classList.toggle("active", mode === "generate")
   refs.editTab.classList.toggle("active", mode === "edit")
+  refs.itineraryTab?.classList.toggle("active", mode === "itinerary")
   refs.navModeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === mode)
   })
   refs.generatePanel.classList.toggle("hidden", mode !== "generate")
   refs.editPanel.classList.toggle("hidden", mode !== "edit")
+  refs.itineraryPanel?.classList.toggle("hidden", mode !== "itinerary")
   refs.sourcePreviewCard.classList.toggle("subtle", mode !== "edit")
 
   if (mode === "edit" && previousMode !== "edit" && options.autoLoadLatest !== false && state.lastResultImage) {
@@ -4694,7 +5080,6 @@ function setMode(mode, options = {}) {
   if (mode === "edit" && !state.displayedSourceImage && getAssetDisplaySrc(state.editImage)) {
     applySourcePreview(state.editImage, "输入图")
   }
-
   updateGenerateIntentUI()
   updateEditSourceUI()
   updatePreviewAvailability()
@@ -4875,6 +5260,7 @@ function clearResult() {
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
   refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.remove("failure")
   refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
   refs.resultPrompt.textContent = "还没有结果。"
   refs.resultMeta.textContent = ""
@@ -4927,8 +5313,18 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
       ? "编辑中"
       : mode === "reference"
         ? "参考生成中"
-        : "生成中"
-  const metaLabel = mode === "variant" ? "延展" : mode === "edit" ? "编辑" : mode === "reference" ? "参考生成" : "生成"
+        : mode === "itinerary"
+          ? "行程路线生成中"
+          : "生成中"
+  const metaLabel = mode === "variant"
+    ? "延展"
+    : mode === "edit"
+      ? "编辑"
+      : mode === "reference"
+        ? "参考生成"
+        : mode === "itinerary"
+          ? "行程路线"
+          : "生成"
   const metaParts = [metaLabel, model]
 
   if (size) {
@@ -4942,6 +5338,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
   refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.remove("failure")
   refs.resultPreviewEmpty.textContent = "请求已提交，正在等待上游返回新图。"
   refs.resultPrompt.textContent = prompt || "本次请求已提交。"
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
@@ -5151,7 +5548,9 @@ async function setResult(payload, durationMs, requestSource = null) {
       ? "编辑后"
       : payload.mode === "reference"
         ? "参考生成"
-        : "输出"
+        : payload.mode === "itinerary"
+          ? "行程路线"
+          : "输出"
   const displayedPrompt = payload.prompt || "结果已生成"
   state.lastResultPrompt = displayedPrompt
   refs.resultPrompt.textContent = displayedPrompt
@@ -5183,7 +5582,15 @@ async function setResult(payload, durationMs, requestSource = null) {
     }
   }
 
-  const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : payload.mode === "reference" ? "参考生成" : "生成"
+  const metaLabel = payload.mode === "variant"
+    ? "延展"
+    : payload.mode === "edit"
+      ? "编辑"
+      : payload.mode === "reference"
+        ? "参考生成"
+        : payload.mode === "itinerary"
+          ? "行程路线"
+          : "生成"
   const metaParts = [metaLabel, payload.model]
   if (payload.transport === "responses-image") {
     metaParts.push("Responses")
@@ -5280,7 +5687,15 @@ function renderHistory() {
     top.className = "history-item-top"
 
     const mode = document.createElement("strong")
-    mode.textContent = item.mode === "variant" ? "延展" : item.mode === "edit" ? "编辑" : item.mode === "reference" ? "参考生成" : "生成"
+    mode.textContent = item.mode === "variant"
+      ? "延展"
+      : item.mode === "edit"
+        ? "编辑"
+        : item.mode === "reference"
+          ? "参考生成"
+          : item.mode === "itinerary"
+            ? "行程路线"
+            : "生成"
 
     const time = document.createElement("time")
     time.textContent = formatTimestamp(item.createdAt)
@@ -5296,7 +5711,17 @@ function renderHistory() {
     top.append(mode, time)
     button.append(top, prompt, meta)
     button.addEventListener("click", () => {
-      if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
+      if (item.mode === "itinerary") {
+        setMode("itinerary")
+        refs.itineraryTitleInput.value = item.itineraryTitle || item.prompt || refs.itineraryTitleInput.value
+        refs.itinerarySubtitleInput.value = item.itinerarySubtitle || refs.itinerarySubtitleInput.value
+        refs.itinerarySizeSelect.value = item.size || refs.itinerarySizeSelect.value
+        refs.itineraryThemeSelect.value = item.itineraryTheme || refs.itineraryThemeSelect.value
+        refs.itineraryDescriptionInput.value = item.itineraryDescription || item.prompt
+        refs.itineraryLogoEnabled.checked = item.logoRequested !== false
+        refs.generateModelInput.value = item.model || refs.generateModelInput.value
+        refs.itineraryDescriptionInput.focus()
+      } else if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
@@ -5428,6 +5853,7 @@ async function postJSON(url, payload, options = {}) {
     }
     const requestError = new Error(data.error || "请求失败")
     requestError.details = errorDetailsWithRequestId(data)
+    setPendingResultFailure(requestError.message, requestError.details)
     throw requestError
   }
 
@@ -6341,7 +6767,7 @@ async function submitEdit() {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
+  const requestPrompt = withEditPreservePrompt(prompt, logoRequested)
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -6652,6 +7078,7 @@ function bindEvents() {
     clearResult()
     clearGenerateForm()
     clearEditForm()
+    resetItineraryMapExample()
     setMode("generate", { autoLoadLatest: false })
     refs.generatePromptInput.focus()
     setError("")
@@ -6671,11 +7098,14 @@ function bindEvents() {
 
   refs.generateTab.addEventListener("click", () => setMode("generate"))
   refs.editTab.addEventListener("click", () => setMode("edit"))
+  refs.itineraryTab?.addEventListener("click", () => setMode("itinerary"))
   refs.navModeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setMode(button.dataset.mode || "generate")
       if (button.dataset.mode === "edit") {
         refs.editPromptInput.focus()
+      } else if (button.dataset.mode === "itinerary") {
+        refs.itineraryDescriptionInput?.focus()
       } else {
         refs.generatePromptInput.focus()
       }
@@ -6885,6 +7315,25 @@ function bindEvents() {
   creativeBriefFields().forEach(([, input]) => {
     input?.addEventListener("input", scheduleWorkspacePersist)
   })
+  ;[
+    refs.itineraryTitleInput,
+    refs.itinerarySubtitleInput,
+    refs.itinerarySizeSelect,
+    refs.itineraryThemeSelect,
+    refs.itineraryDescriptionInput,
+    refs.itineraryLogoEnabled,
+  ].forEach((input) => {
+    input?.addEventListener("input", scheduleWorkspacePersist)
+    input?.addEventListener("change", scheduleWorkspacePersist)
+  })
+  refs.renderItineraryMapButton?.addEventListener("click", () => {
+    void submitAIItineraryMap()
+  })
+  refs.clearItineraryMapButton?.addEventListener("click", resetItineraryMapExample)
+  refs.copyItineraryTemplateButton?.addEventListener("click", () => {
+    void copyDetailedItineraryTemplate()
+  })
+  refs.applyItineraryTemplateButton?.addEventListener("click", applyDetailedItineraryTemplate)
 
   refs.generatePromptInput.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -7096,6 +7545,13 @@ function bindEvents() {
       event.preventDefault()
       setMode("edit")
       refs.editPromptInput.focus()
+      return
+    }
+
+    if (event.altKey && event.key === "3") {
+      event.preventDefault()
+      setMode("itinerary")
+      refs.itineraryDescriptionInput?.focus()
       return
     }
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=0.1.26">
+    <link rel="stylesheet" href="styles.css?v=0.1.27">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -106,7 +106,8 @@
         <aside class="nav-rail">
           <button id="newTaskButton" class="new-task-button" type="button">＋ 新建任务</button>
           <nav class="side-nav" aria-label="主导航">
-            <button class="nav-link active" type="button" data-mode="generate">生成</button>
+            <button class="nav-link active" type="button" data-mode="generate">海报生成</button>
+            <button class="nav-link" type="button" data-mode="itinerary">行程路线</button>
             <button class="nav-link" type="button" data-mode="edit">编辑</button>
             <a href="#connectionSettings">设置</a>
           </nav>
@@ -148,7 +149,8 @@
         <main class="workbench">
           <section class="control-panel">
             <div class="mode-tabs" aria-label="模式切换">
-              <button id="generateTab" class="mode-tab active" type="button" data-mode="generate">生成图像</button>
+              <button id="generateTab" class="mode-tab active" type="button" data-mode="generate">海报生成</button>
+              <button id="itineraryTab" class="mode-tab" type="button" data-mode="itinerary">行程路线</button>
               <button id="editTab" class="mode-tab" type="button" data-mode="edit">编辑图像</button>
             </div>
 
@@ -355,7 +357,7 @@
               </div>
 
               <div class="primary-run-row">
-                <button id="generateButton" class="primary-button" type="button">▶ 开始生成 <kbd>Ctrl ↵</kbd></button>
+                <button id="generateButton" class="primary-button" type="button">▶ 开始海报生成 <kbd>Ctrl ↵</kbd></button>
                 <button id="cancelRequestButton" class="cancel-request-button hidden" type="button">中断生成</button>
                 <button id="clearGenerateButton" class="ghost-button" type="button">清空</button>
               </div>
@@ -387,7 +389,7 @@
               </div>
 
               <label class="prompt-field">
-                <textarea id="editPromptInput" rows="8" placeholder="把背景改成纯白，主体不变，保留边缘和材质细节。"></textarea>
+                <textarea id="editPromptInput" rows="8" placeholder="只修改我明确说明的部分；保留现有构图、路线、日期、文字、人物/景物、6 人游 LOGO 和品牌元素，不要擅自删除。"></textarea>
                 <strong id="editPromptCount" class="field-meter">0 字</strong>
               </label>
 
@@ -409,6 +411,86 @@
               <div class="primary-run-row">
                 <button id="editButton" class="primary-button" type="button">▶ 开始编辑</button>
                 <button id="clearEditButton" class="ghost-button" type="button">清空输入</button>
+              </div>
+            </section>
+
+            <section id="itineraryPanel" class="studio-card command-card itinerary-panel hidden">
+              <div class="section-title">
+                <h2>行程路线</h2>
+                <span class="soft-label">AI 路线图</span>
+              </div>
+
+              <div class="itinerary-help-panel">
+                <strong>粘贴客户行程</strong>
+                <p>把客户发来的日期、城市、酒店、交通和活动原文贴进来。默认按漫画风格路线图生成，但地理位置、日期、距离和转场信息必须真实，程序最后使用官方透明 PNG 贴入 LOGO。</p>
+              </div>
+
+              <div class="itinerary-stop-grid">
+                <label>
+                  <span>标题</span>
+                  <input id="itineraryTitleInput" type="text" maxlength="120" value="定制旅行路线图">
+                </label>
+                <label>
+                  <span>副标题</span>
+                  <input id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24">
+                </label>
+                <label>
+                  <span>输出尺寸</span>
+                  <select id="itinerarySizeSelect">
+                    <option value="1088x2240">6 人游竖版 1088 x 2240</option>
+                    <option value="1792x1792">方图 1792 x 1792</option>
+                    <option value="1920x1088">横版 1920 x 1088</option>
+                  </select>
+                </label>
+                <label>
+                  <span>风格</span>
+                  <select id="itineraryThemeSelect">
+                    <option value="comic">漫画路线图</option>
+                    <option value="premium">高级旅行</option>
+                    <option value="classic">经典地图</option>
+                    <option value="dark">深海蓝</option>
+                  </select>
+                </label>
+              </div>
+
+              <label class="prompt-field itinerary-textarea">
+                <span>行程描述</span>
+                <textarea id="itineraryDescriptionInput" rows="14" spellcheck="false">5/12：抵达乌鲁木齐，入住Super8国际酒店（乌鲁木齐高铁站北广场经开万达店）
+5/13：伊宁（抵达） → 租车前往赛里木湖（赛里木湖AC万豪）
+5/14：赛里木湖 → 晃晃村 霍城见树民宿（晃晃村店）
+5/15：晃晃村 → 霍尔果斯 → 阿帕民宿（喀赞其店）
+5/16：伊宁市休整 → 森林活动 (16:00-21:00) → （伊宁自治州博物馆文化路轻居酒店）
+5/17：伊宁市 → 喀拉峻 → 特克斯（琼库什台暮云春树）
+5/18：特克斯 → 阔克苏大峡谷-特克斯（慢慢民宿）
+5/19：特克斯 → 库尔德宁 → 伊宁（伊宁自治州博物馆文化路轻居酒店）
+5/20：伊宁经乌鲁木齐飞喀什（喀什古城万斐国际酒店）
+5/21：喀什（喀什古城万斐国际酒店）
+5/22：小团
+5/23：小团回喀什（喀什亚朵）
+5/24：喀什牛羊大巴扎</textarea>
+              </label>
+
+              <div class="itinerary-template-actions">
+                <button id="copyItineraryTemplateButton" class="ghost-button" type="button">复制精细模板</button>
+                <button id="applyItineraryTemplateButton" class="ghost-button" type="button">套用精细模板</button>
+              </div>
+
+              <div class="itinerary-ai-options">
+                <span>AI 会整理地点层级、交通方式、日期标签和地图视觉，不要求用户提供经纬度。</span>
+                <span>提示词会明确要求左上角预留干净白底 LOGO 安全区。</span>
+              </div>
+
+              <div class="logo-run-toggle">
+                <label>
+                  <input id="itineraryLogoEnabled" type="checkbox" checked>
+                  <span>集成 6 人游 LOGO</span>
+                </label>
+                <strong>官方 LOGO 安全区</strong>
+              </div>
+
+              <div class="primary-run-row">
+                <button id="renderItineraryMapButton" class="primary-button" type="button">AI 生成行程路线</button>
+                <button id="clearItineraryMapButton" class="ghost-button" type="button">恢复示例</button>
               </div>
             </section>
           </section>
@@ -723,7 +805,7 @@
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.26</span>
+        <span>PicGen Console　v0.1.27</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -988,6 +1070,6 @@
 
     <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
 
-    <script src="app.js?v=0.1.26" type="module"></script>
+    <script src="app.js?v=0.1.27" type="module"></script>
   </body>
 </html>

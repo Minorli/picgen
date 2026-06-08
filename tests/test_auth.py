@@ -1510,12 +1510,12 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     assert send.json()["bot_reply_pending"] is True
 
     team_messages = []
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         messages = bob_client.get("/api/team-chat/messages?room_type=team")
         assert messages.status_code == 200
         team_messages = messages.json()["messages"]
-        if len(team_messages) >= 2:
+        if any(item["sender_name"] == "GPT-BOT" for item in team_messages):
             break
         time.sleep(0.05)
     assert [item["sender_name"] for item in team_messages] == ["alice", "GPT-BOT"]

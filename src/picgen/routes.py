@@ -1866,9 +1866,16 @@ def _job_sample_count(payload: dict[str, Any]) -> int:
     return max(1, min(parsed, 3))
 
 
+def _generate_mode(value: Any) -> str:
+    mode = str(value or "").strip()
+    if mode == "itinerary":
+        return "itinerary"
+    return "generate"
+
+
 def _job_mode(path: str, payload: dict[str, Any]) -> str:
     if path == "/api/generate":
-        return "generate"
+        return _generate_mode(payload.get("mode"))
     if path == "/api/edit":
         return str(payload.get("mode") or "edit")
     if path == "/api/responses-image":
@@ -2199,6 +2206,7 @@ async def handle_generate(
     size = (parsed.size or settings.default_size).strip() or settings.default_size
     api_key = (parsed.api_key or settings.default_api_key).strip()
     image_options = openai_image_options(payload)
+    mode = _generate_mode(parsed.mode)
 
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -2228,7 +2236,7 @@ async def handle_generate(
         settings=settings,
         client=client,
         save_context={
-            "mode": "generate",
+            "mode": mode,
             "prompt": parsed.prompt,
             "model": model,
             "endpoint_url": endpoint_url,
@@ -2239,7 +2247,7 @@ async def handle_generate(
             **metadata,
         },
         extra={
-            "mode": "generate",
+            "mode": mode,
             "prompt": parsed.prompt,
             "model": model,
             "logo_requested": parsed.logo_requested,

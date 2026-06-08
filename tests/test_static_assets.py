@@ -130,6 +130,25 @@ def test_result_preview_zoom_and_feedback_controls_are_present() -> None:
     assert "refreshFeedbackSummary" in app_js
 
 
+def test_generation_progress_explains_retry_attempts_inside_preview() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "UPSTREAM_ATTEMPT_PLAN" not in app_js
+    assert "progressAttemptInfo" not in app_js
+    assert "第 1 次尝试" not in app_js
+    assert "第 2 次尝试" not in app_js
+    assert "第 3 次尝试" not in app_js
+    assert "等待上游响应中" in app_js
+    assert "后台如遇临时 502/503/504 会自动重试" in app_js
+    assert "第几次重试以最终错误详情或服务端日志为准" in app_js
+    assert "已多次尝试仍未成功" in app_js
+    assert "setPendingResultFailure" in app_js
+    assert "refs.resultPreviewEmpty.textContent = safeMessage" in app_js
+    assert "refs.resultPreviewLabel.textContent = \"生成失败\"" in app_js
+    assert ".preview-empty.failure" in styles_css
+
+
 def test_copyright_risk_state_survives_workspace_restore() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
 
@@ -194,11 +213,149 @@ def test_gallery_library_controls_are_present() -> None:
     assert ".gallery-editor-panel" in styles_css
 
 
+def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+    detailed_template = app_js.split("const DETAILED_ITINERARY_TEMPLATE = [", 1)[1].split(
+        '].join("\\n")',
+        1,
+    )[0]
+
+    assert (
+        index_html.index('data-mode="generate">海报生成')
+        < index_html.index('data-mode="itinerary">行程路线')
+        < index_html.index('data-mode="edit">编辑')
+    )
+    assert 'data-mode="itinerary"' in index_html
+    assert 'id="itineraryTab"' in index_html
+    assert 'id="itineraryPanel"' in index_html
+    assert 'id="itineraryDescriptionInput"' in index_html
+    assert 'id="renderItineraryMapButton"' in index_html
+    assert "行程路线" in index_html
+    assert "粘贴客户行程" in index_html
+    assert "AI 路线图" in index_html
+    assert "AI 生成行程路线" in index_html
+    assert 'id="copyItineraryTemplateButton"' in index_html
+    assert 'id="applyItineraryTemplateButton"' in index_html
+    assert "复制精细模板" in index_html
+    assert "套用精细模板" in index_html
+    assert "官方 LOGO 安全区" in index_html
+    assert 'value="定制旅行路线图"' in index_html
+    assert 'id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24"' in index_html
+    assert 'id="itineraryTitleInput" type="text" maxlength="120" value="新疆深度定制旅行"' not in index_html
+    assert 'value="comic"' in index_html
+    assert "漫画路线图" in index_html
+    assert "默认按漫画风格路线图生成" in index_html
+    assert 'value="1088x2240"' in index_html
+    assert 'value="1792x1792"' in index_html
+    assert 'value="1920x1088"' in index_html
+    assert "1800x1800" not in index_html
+    assert "1920x1080" not in index_html
+
+    assert "itineraryPanel: document.querySelector(\"#itineraryPanel\")" in app_js
+    assert "itineraryDescriptionInput: document.querySelector(\"#itineraryDescriptionInput\")" in app_js
+    assert "buildAIItineraryMapPrompt" in app_js
+    assert "isCompleteItineraryPrompt" in app_js
+    assert "完整行程地图 prompt" in app_js
+    assert "return normalizedDescription" in app_js
+    assert "stripCodeFence" in app_js
+    assert "submitAIItineraryMap" in app_js
+    assert "AI_ITINERARY_EXAMPLE" in app_js
+    assert "DETAILED_ITINERARY_TEMPLATE" in app_js
+    assert "DEFAULT_ITINERARY_TITLE" in app_js
+    assert "XINJIANG_ITINERARY_EXAMPLE_TITLE" in app_js
+    assert "目的地/主题：请替换为本次路线目的地" in detailed_template
+    assert "出行日期：请替换为本次真实日期范围" in detailed_template
+    assert "地图标题建议：请替换为客户可见标题" in detailed_template
+    assert "地点与地理校验（请按本次目的地改写）" in detailed_template
+    assert "不要保留示例地名" in detailed_template
+    assert '"- 目的地/主题：新疆深度定制旅行"' not in detailed_template
+    assert '"- 地图标题建议：新疆游"' not in detailed_template
+    assert "赛里木湖 AC 万豪" not in detailed_template
+    assert "喀什古城万斐国际酒店" not in detailed_template
+    assert "行程基础信息" in app_js
+    assert "逐日行程" in app_js
+    assert "地点与地理校验" in app_js
+    assert "不要把库尔德宁和喀拉峻位置互换" in app_js
+    assert "copyDetailedItineraryTemplate" in app_js
+    assert "applyDetailedItineraryTemplate" in app_js
+    assert "shouldUseXinjiangRouteGuard" in app_js
+    assert "xinjiangRouteGuardPrompt" in app_js
+    assert "api/generate" in app_js
+    assert "drawItineraryLogoSafeArea" in app_js
+    assert "withLogoLayoutPrompt(aiPrompt, logoRequested)" in app_js
+    assert "地理正确性硬性要求" in app_js
+    assert "不能为了画面好看而调整地点相对位置" in app_js
+    assert "库尔德宁在巩留县方向" in app_js
+    assert "喀拉峻在特克斯县方向" in app_js
+    assert "严禁把库尔德宁和喀拉峻位置画反或互换" in app_js
+    assert "伊宁是伊犁河谷重要中心城市" in app_js
+    assert "琼库什台在特克斯南部山区方向" in app_js
+    assert "赛里木湖在伊犁河谷西北方向" in app_js
+    assert "喀什在南疆" in app_js
+    assert "日期必须逐日出现" in app_js
+    assert "5/18" in app_js
+    assert "每两个连续地点之间必须有路线连接" in app_js
+    assert "必须标注大致距离或飞行/转场说明" in app_js
+    assert "交通工具图标" in app_js
+    assert "template-route.jpg" in app_js
+    assert "水彩漫画路线图" in app_js
+    assert "红色粗路线" in app_js
+    assert "圆点站位" in app_js
+    assert "地标小插画" in app_js
+    assert "漫画风格不能牺牲地理真实性" in app_js
+    assert "日期、距离、交通方式、酒店和核心景区不能省略" in app_js
+    assert "已验证满意样张的稳定风格" in app_js
+    assert "22cee0390f9c" in app_js
+    assert "新疆游" in app_js
+    assert "赛里木湖、伊犁河谷、天山山脉、塔克拉玛干沙漠、喀什" in app_js
+    assert "仅当行程文本包含新疆、伊犁、赛里木湖、喀拉峻、库尔德宁、喀什等新疆地点时才追加" in app_js
+    assert "如果是西班牙、欧洲或其他非新疆目的地，不要套用新疆地点和地貌校验" in app_js
+    assert 'mode: "itinerary"' in app_js
+    assert 'transport: "images-generate"' in app_js
+    assert "行程描述不能为空" in app_js
+    assert "不要让 AI 绘制或改造 6 人游 LOGO" in app_js
+    assert "左上角预留干净白底 LOGO 安全区" in app_js
+    assert "mode: \"itinerary\"" in app_js
+    assert "COMPANY_LOGO_URL" in app_js
+    assert "ensureCompanyLogoCanvas" not in app_js
+    assert "parseItineraryStops" not in app_js
+    assert "projectItineraryPoint" not in app_js
+    assert "ITINERARY_MAP_FEATURES" not in app_js
+    assert "setMode(\"itinerary\"" in app_js
+
+    assert "#itineraryPanel" in styles_css
+    assert ".itinerary-ai-options" in styles_css
+    assert ".itinerary-stop-grid" in styles_css
+    assert ".itinerary-help-panel" in styles_css
+    assert "约 350km" not in index_html
+    assert "约 350km" not in app_js
+
+
+def test_edit_prompt_preserves_user_assets_dates_routes_and_logo() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert "EDIT_PRESERVE_PROMPT" in app_js
+    assert "withEditPreservePrompt" in app_js
+    assert "只修改用户明确要求修改的部分" in app_js
+    assert "用户没有明确要求删除或替换的元素必须保留" in app_js
+    assert "路线、地点、日期标签、距离标注、交通工具图标" in app_js
+    assert "不能重绘、改造、遮挡或删除 LOGO" in app_js
+    assert "withEditPreservePrompt(prompt, logoRequested)" in app_js
+    assert "保留现有构图、路线、日期、文字、人物/景物、6 人游 LOGO 和品牌元素" in index_html
+
+
 def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
     styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
 
+    assert "海报生成" in index_html
+    assert "开始海报生成" in index_html
+    assert "\"开始海报生成\"" in app_js
+    assert "\"开始生成\"" not in app_js
     assert "--font: \"SF Pro Text\"" in styles_css
     assert "Inter" not in styles_css
     assert 'class="advanced-params"' in index_html

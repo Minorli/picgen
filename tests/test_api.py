@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import anyio
@@ -130,6 +131,73 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
 
     upstream_payload = fake.run_json.await_args.args[2]
     assert "n" not in upstream_payload
+
+
+def test_generate_preserves_itinerary_mode_in_response_and_database(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成新疆行程地图，必须保持地点真实相对位置",
+            "model": "gpt-image-2",
+            "mode": "itinerary",
+            "size": "1792x1792",
+            "logo_requested": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "itinerary"
+    assert payload["saved_image_name"].startswith("routeplanner-itinerary-")
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        job = conn.execute("SELECT * FROM generation_jobs").fetchone()
+        image = conn.execute("SELECT * FROM generated_images").fetchone()
+
+    assert job["mode"] == "itinerary"
+    assert job["transport"] == "images-generate"
+    assert job["logo_requested"] == 1
+    assert image["mode"] == "itinerary"
+    assert image["saved_image_name"].startswith("routeplanner-itinerary-")
+
+
+def test_generate_ignores_unrecognized_client_mode(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "posteruser", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+            "mode": "unexpected-mode",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "generate"
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        job = conn.execute("SELECT * FROM generation_jobs").fetchone()
+        image = conn.execute("SELECT * FROM generated_images").fetchone()
+    assert job["mode"] == "generate"
+    assert image["mode"] == "generate"
 
 
 def test_authenticated_generation_sends_success_telegram_alert(
