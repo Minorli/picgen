@@ -1681,24 +1681,31 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     assert group["room_key"].startswith("team:")
 
     fake.run_responses.return_value = {"output_text": "可以，建议把标题压低一点，画面会更高级。"}
-    send = alice_client.post(
-        "/api/team-chat/messages",
-        json={"room_type": "team", "content": "@GPT-BOT 这张旅行海报怎么优化？"},
-    )
-    assert send.status_code == 200
-    created = send.json()["messages"]
-    assert [item["sender_type"] for item in created] == ["user"]
-    assert send.json()["bot_reply_pending"] is True
+    # The bot reply is dispatched as a fire-and-forget asyncio task on the loop that
+    # handled alice's POST. Use alice_client as a context manager so its portal/event
+    # loop stays alive while we poll for the reply — otherwise the ephemeral per-request
+    # portal is torn down and the background task is cancelled before it persists the
+    # reply, which makes this test flaky under load. (In production the uvicorn event
+    # loop is long-lived, so the reply is always delivered.)
+    with alice_client:
+        send = alice_client.post(
+            "/api/team-chat/messages",
+            json={"room_type": "team", "content": "@GPT-BOT 这张旅行海报怎么优化？"},
+        )
+        assert send.status_code == 200
+        created = send.json()["messages"]
+        assert [item["sender_type"] for item in created] == ["user"]
+        assert send.json()["bot_reply_pending"] is True
 
-    team_messages = []
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        messages = bob_client.get("/api/team-chat/messages?room_type=team")
-        assert messages.status_code == 200
-        team_messages = messages.json()["messages"]
-        if any(item["sender_name"] == "GPT-BOT" for item in team_messages):
-            break
-        time.sleep(0.05)
+        team_messages = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            messages = bob_client.get("/api/team-chat/messages?room_type=team")
+            assert messages.status_code == 200
+            team_messages = messages.json()["messages"]
+            if any(item["sender_name"] == "GPT-BOT" for item in team_messages):
+                break
+            time.sleep(0.05)
     assert [item["sender_name"] for item in team_messages] == ["alice", "GPT-BOT"]
     assert team_messages[1]["content"].startswith("@alice ")
     fake.run_responses.assert_awaited_once()
