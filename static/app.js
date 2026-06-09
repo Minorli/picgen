@@ -1,6 +1,7 @@
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
+const TEAM_CHAT_RECENT_DM_KEY = "picgen-team-chat-recent-dms-v1"
 const COMPANY_LOGO_URL = "6renyou.png"
 const COMPANY_LOGO_NAME = "6renyou.png"
 const COMPANY_LOGO_MIME = "image/png"
@@ -15,6 +16,14 @@ const COMPANY_LOGO_LAYOUT_PROMPT = [
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
   "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
 ].join("\n")
+const EDIT_PRESERVE_PROMPT = [
+  "编辑保护要求：只修改用户明确要求修改的部分。",
+  "用户没有明确要求删除或替换的元素必须保留，包括主体构图、路线、地点、日期标签、距离标注、交通工具图标、人物/景物、文字层级、色彩气质和已有品牌安全区。",
+  "如果输入图包含或预留 6 人游 LOGO，不能重绘、改造、遮挡或删除 LOGO；最终 LOGO 会由程序使用官方透明 PNG 原样贴入。",
+].join("\n")
+const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
+const TEAM_CHAT_FAST_POLL_LIMIT = 8
+const TEAM_CHAT_MAX_RECENT_DMS = 8
 const MAX_HISTORY_ITEMS = 12
 const WORKSPACE_DB_NAME = "picgen-console-workspace"
 const WORKSPACE_STORE_NAME = "snapshots"
@@ -24,6 +33,45 @@ const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
 const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
+const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
+const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
+const DEFAULT_ITINERARY_SUBTITLE = ""
+const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
+const SANITIZED_ITINERARY_EXAMPLE_SUBTITLE = "示例日期范围"
+const AI_ITINERARY_EXAMPLE = [
+  "D1：抵达城市 A；交通：飞机；入住：酒店 A；当天重点：抵达、休整、城市初印象。",
+  "D2：城市 A → 景区 B；交通：包车/自驾；入住：酒店 B；当天重点：自然风光、观景点、轻徒步。",
+  "D3：景区 B → 小镇 C；交通：地面转场；入住：精品民宿 C；当天重点：小镇街区、当地餐食、人文体验。",
+  "D4：小镇 C → 城市 D；交通：火车/包车；入住：酒店 D；当天重点：博物馆、历史街区、夜景。",
+  "D5：城市 D 周边活动；交通：步行/短途车；入住：酒店 D；当天重点：自由活动、亲子或小团体验。",
+  "D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程或下一段旅程。",
+].join("\n")
+const DETAILED_ITINERARY_TEMPLATE = [
+  "行程基础信息：",
+  "- 目的地/主题：请替换为本次路线目的地（例如：伊比利亚半岛亲子游 / 北欧峡湾自驾 / 日本关西赏枫）",
+  "- 出行日期：请替换为本次真实日期范围（例如：5/12 - 5/24）",
+  "- 客户偏好：请替换为真实偏好（例如：高端定制、小众自然风光、亲子友好、酒店质感、人文街区）",
+  "- 地图标题建议：请替换为客户可见标题（例如：伊比利亚半岛旅行地图 / 北欧峡湾自驾路线）",
+  "",
+  "逐日行程：",
+  "- 日期：城市/地点 A → 城市/地点 B；交通：请写明包车/自驾/火车/飞机/步行；入住：酒店名；当天重点：请写明 1-3 个核心活动。",
+  "- 日期：城市/地点 B → 景区/街区 C；交通：请写明；入住：酒店名；当天重点：请写明。",
+  "- 日期：景区/街区 C → 城市/地点 D；交通：请写明；入住：酒店名；当天重点：请写明。",
+  "- 按真实行程继续补齐每一天；不要保留示例地名，不要省略中间日期。",
+  "",
+  "地点与地理校验（请按本次目的地改写）：",
+  "- 必须保持真实相对位置：请列出本次路线中容易画错的城市、景区、海岸、山脉、湖泊、岛屿或边境关系。",
+  "- 如果路线跨国家/大区，请明确哪些是飞行或长距离转场，哪些是地面路线；不要把远距离城市画成相邻小镇。",
+  "- 每两个连续地点之间都要有路线连接，并标注合理的距离或转场方式；不确定精确距离时写“约 xx km”或“飞行转场”。",
+  "- 每段路线中间放一个很小的交通工具图标：包车/自驾用小车，火车用列车，飞行转场用飞机，活动/步行用脚印或点线。",
+  "",
+  "画面要求：",
+  "- 水彩漫画路线图，不要像手机导航截图或低质 PPT。",
+  "- 日期必须逐日出现，不能漏任何一天；地点、交通、酒店和核心活动必须按用户原文保留。",
+  "- 左上角预留 6 人游 LOGO 安全区；不要让 AI 绘制 LOGO，程序会用官方透明 PNG 原样贴入。",
+  "- 风格：水彩漫画路线图，使用柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
+  "- 漫画风格不能牺牲地理真实性；日期、距离、交通方式、酒店和核心景区不能省略，信息丰富但不拥挤。",
+].join("\n")
 
 const SIZE_PRESETS = [
   "auto",
@@ -46,6 +94,7 @@ const state = {
   serverConfig: null,
   currentUser: null,
   authMode: "login",
+  passwordResetToken: "",
   appReady: false,
   editImage: null,
   editMaskImage: null,
@@ -102,7 +151,51 @@ const state = {
   shareRecipients: [],
   shareSelectedRecipientIds: new Set(),
   sharedResults: [],
+  galleryItems: [],
+  gallerySearch: "",
+  galleryFavoriteOnly: false,
+  gallerySearchTimer: null,
+  generationJobs: [],
+  currentGalleryMeta: {
+    generatedImageId: null,
+    isFavorite: false,
+    tags: [],
+  },
   userPreferences: null,
+  teamChatMembers: [],
+  teamChatHumanMembers: [],
+  teamChatBot: null,
+  teamChatRecentDms: [],
+  teamChatMessages: [],
+  teamChatRoom: {
+    type: "team",
+    recipientUserId: null,
+    title: "部门群",
+    meta: "部门群",
+  },
+  teamChatGroup: {
+    company: "6renyou",
+    department: "PD & OPS",
+    roomKey: "",
+    title: "PD & OPS",
+    subtitle: "6renyou · 部门群",
+    memberCount: 0,
+  },
+  teamChatGroupContextExpanded: false,
+  teamChatLastMessageId: 0,
+  teamChatLocalMessageSeq: 0,
+  teamChatUnreadTotal: 0,
+  teamChatPollTimer: null,
+  teamChatFastPollRemaining: 0,
+  teamChatUnreadTimer: null,
+  teamChatQuotedMessage: null,
+  teamChatOpenMenuId: null,
+  teamChatSending: false,
+  adminOrgUnits: [],
+  orgUnits: [],
+  promptMode: "free",
+  promptRecipes: [],
+  selectedRecipeId: "",
 }
 
 const refs = {
@@ -112,6 +205,9 @@ const refs = {
   authSubtitle: document.querySelector("#authSubtitle"),
   authUsernameInput: document.querySelector("#authUsernameInput"),
   authPasswordInput: document.querySelector("#authPasswordInput"),
+  authOrgFields: document.querySelector("#authOrgFields"),
+  authCompanyInput: document.querySelector("#authCompanyInput"),
+  authDepartmentInput: document.querySelector("#authDepartmentInput"),
   authError: document.querySelector("#authError"),
   loginAuthButton: document.querySelector("#loginAuthButton"),
   registerAuthButton: document.querySelector("#registerAuthButton"),
@@ -121,9 +217,18 @@ const refs = {
   passwordResetRequestStatus: document.querySelector("#passwordResetRequestStatus"),
   submitPasswordResetRequestButton: document.querySelector("#submitPasswordResetRequestButton"),
   cancelPasswordResetRequestButton: document.querySelector("#cancelPasswordResetRequestButton"),
+  passwordResetConfirmForm: document.querySelector("#passwordResetConfirmForm"),
+  passwordResetNewPasswordInput: document.querySelector("#passwordResetNewPasswordInput"),
+  passwordResetConfirmPasswordInput: document.querySelector("#passwordResetConfirmPasswordInput"),
+  passwordResetConfirmStatus: document.querySelector("#passwordResetConfirmStatus"),
+  submitPasswordResetConfirmButton: document.querySelector("#submitPasswordResetConfirmButton"),
+  cancelPasswordResetConfirmButton: document.querySelector("#cancelPasswordResetConfirmButton"),
   bugReportButton: document.querySelector("#bugReportButton"),
   changePasswordButton: document.querySelector("#changePasswordButton"),
+  teamChatButton: document.querySelector("#teamChatButton"),
+  teamChatUnreadBadge: document.querySelector("#teamChatUnreadBadge"),
   logoutButton: document.querySelector("#logoutButton"),
+  openProfileButton: document.querySelector("#openProfileButton"),
   currentUsername: document.querySelector("#currentUsername"),
   userAvatar: document.querySelector("#userAvatar"),
   userUsageSummary: document.querySelector("#userUsageSummary"),
@@ -139,6 +244,22 @@ const refs = {
   adminUserError: document.querySelector("#adminUserError"),
   adminUsersList: document.querySelector("#adminUsersList"),
   refreshAdminUsersButton: document.querySelector("#refreshAdminUsersButton"),
+  adminOrgPanel: document.querySelector("#adminOrgPanel"),
+  adminOrgCreateForm: document.querySelector("#adminOrgCreateForm"),
+  adminOrgCompanyInput: document.querySelector("#adminOrgCompanyInput"),
+  adminOrgDepartmentInput: document.querySelector("#adminOrgDepartmentInput"),
+  adminUserOrgForm: document.querySelector("#adminUserOrgForm"),
+  adminOrgUserIdInput: document.querySelector("#adminOrgUserIdInput"),
+  adminOrgUnitSelect: document.querySelector("#adminOrgUnitSelect"),
+  adminOrgReasonInput: document.querySelector("#adminOrgReasonInput"),
+  adminGroupAnnouncementForm: document.querySelector("#adminGroupAnnouncementForm"),
+  adminAnnouncementOrgSelect: document.querySelector("#adminAnnouncementOrgSelect"),
+  adminAnnouncementContentInput: document.querySelector("#adminAnnouncementContentInput"),
+  adminOrgStatus: document.querySelector("#adminOrgStatus"),
+  adminOrgStatsList: document.querySelector("#adminOrgStatsList"),
+  adminOrgUnitsList: document.querySelector("#adminOrgUnitsList"),
+  adminOrgAuditList: document.querySelector("#adminOrgAuditList"),
+  refreshAdminOrgButton: document.querySelector("#refreshAdminOrgButton"),
   adminFeedbackSummary: document.querySelector("#adminFeedbackSummary"),
   adminBugReportsPanel: document.querySelector("#adminBugReportsPanel"),
   refreshFeedbackSummaryButton: document.querySelector("#refreshFeedbackSummaryButton"),
@@ -166,12 +287,36 @@ const refs = {
   sharedResultsList: document.querySelector("#sharedResultsList"),
   sharedResultsEmpty: document.querySelector("#sharedResultsEmpty"),
   refreshSharedResultsButton: document.querySelector("#refreshSharedResultsButton"),
+  railToggleButtons: Array.from(document.querySelectorAll("[data-rail-toggle]")),
+  teamInspirationFeedButton: document.querySelector("#teamInspirationFeedButton"),
+  teamInspirationFeed: document.querySelector("#teamInspirationFeed"),
+  galleryList: document.querySelector("#galleryList"),
+  galleryEmpty: document.querySelector("#galleryEmpty"),
+  refreshGalleryButton: document.querySelector("#refreshGalleryButton"),
+  refreshJobsButton: document.querySelector("#refreshJobsButton"),
+  jobCenterList: document.querySelector("#jobCenterList"),
+  jobCenterEmpty: document.querySelector("#jobCenterEmpty"),
+  gallerySearchInput: document.querySelector("#gallerySearchInput"),
+  galleryFavoriteOnlyInput: document.querySelector("#galleryFavoriteOnlyInput"),
+  clearGalleryFiltersButton: document.querySelector("#clearGalleryFiltersButton"),
   requestStatus: document.querySelector("#requestStatus"),
   requestBadge: document.querySelector("#requestBadge"),
   generateTab: document.querySelector("#generateTab"),
   editTab: document.querySelector("#editTab"),
+  itineraryTab: document.querySelector("#itineraryTab"),
   generatePanel: document.querySelector("#generatePanel"),
   editPanel: document.querySelector("#editPanel"),
+  itineraryPanel: document.querySelector("#itineraryPanel"),
+  itineraryTitleInput: document.querySelector("#itineraryTitleInput"),
+  itinerarySubtitleInput: document.querySelector("#itinerarySubtitleInput"),
+  itinerarySizeSelect: document.querySelector("#itinerarySizeSelect"),
+  itineraryThemeSelect: document.querySelector("#itineraryThemeSelect"),
+  itineraryDescriptionInput: document.querySelector("#itineraryDescriptionInput"),
+  itineraryLogoEnabled: document.querySelector("#itineraryLogoEnabled"),
+  renderItineraryMapButton: document.querySelector("#renderItineraryMapButton"),
+  clearItineraryMapButton: document.querySelector("#clearItineraryMapButton"),
+  copyItineraryTemplateButton: document.querySelector("#copyItineraryTemplateButton"),
+  applyItineraryTemplateButton: document.querySelector("#applyItineraryTemplateButton"),
   freshGenerateMode: document.querySelector("#freshGenerateMode"),
   variantGenerateMode: document.querySelector("#variantGenerateMode"),
   generateIntentHint: document.querySelector("#generateIntentHint"),
@@ -191,6 +336,13 @@ const refs = {
   clearGenerateReferenceButton: document.querySelector("#clearGenerateReferenceButton"),
   generatePromptInput: document.querySelector("#generatePromptInput"),
   generatePromptCount: document.querySelector("#generatePromptCount"),
+  promptModeInputs: Array.from(document.querySelectorAll('input[name="promptMode"]')),
+  recipeAssistPanel: document.querySelector("#recipeAssistPanel"),
+  promptRecipeSelect: document.querySelector("#promptRecipeSelect"),
+  promptRecipeCards: document.querySelector("#promptRecipeCards"),
+  applyPromptRecipeButton: document.querySelector("#applyPromptRecipeButton"),
+  promptRecipeSummary: document.querySelector("#promptRecipeSummary"),
+  effectivePromptPreview: document.querySelector("#effectivePromptPreview"),
   generateModelInput: document.querySelector("#generateModelInput"),
   generateSizePreset: document.querySelector("#generateSizePreset"),
   generateWidthInput: document.querySelector("#generateWidthInput"),
@@ -201,6 +353,15 @@ const refs = {
   outputCompressionInput: document.querySelector("#outputCompressionInput"),
   moderationSelect: document.querySelector("#moderationSelect"),
   generateSampleCountInput: document.querySelector("#generateSampleCountInput"),
+  creativeBriefPanel: document.querySelector("#creativeBriefPanel"),
+  creativeBriefDestinationInput: document.querySelector("#creativeBriefDestinationInput"),
+  creativeBriefAudienceInput: document.querySelector("#creativeBriefAudienceInput"),
+  creativeBriefChannelInput: document.querySelector("#creativeBriefChannelInput"),
+  creativeBriefMoodInput: document.querySelector("#creativeBriefMoodInput"),
+  creativeBriefMustHaveInput: document.querySelector("#creativeBriefMustHaveInput"),
+  creativeBriefAvoidInput: document.querySelector("#creativeBriefAvoidInput"),
+  applyCreativeBriefButton: document.querySelector("#applyCreativeBriefButton"),
+  askBotCreativeBriefButton: document.querySelector("#askBotCreativeBriefButton"),
   visualSizeInputs: Array.from(document.querySelectorAll('input[name="visualSize"]')),
   clearGenerateButton: document.querySelector("#clearGenerateButton"),
   generateButton: document.querySelector("#generateButton"),
@@ -232,12 +393,14 @@ const refs = {
   resultPreviewTrigger: document.querySelector("#resultPreviewTrigger"),
   resultImage: document.querySelector("#resultImage"),
   resultPreviewEmpty: document.querySelector("#resultPreviewEmpty"),
+  resultHoverActions: document.querySelector("#resultHoverActions"),
   resultActions: document.querySelector("#resultActions"),
   resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
   generationOverlay: document.querySelector("#generationOverlay"),
   generationOrbit: document.querySelector(".generation-orbit"),
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
   generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
+  generationOverlaySteps: document.querySelector("#generationOverlaySteps"),
   resultPrompt: document.querySelector("#resultPrompt"),
   resultMeta: document.querySelector("#resultMeta"),
   resultTiming: document.querySelector("#resultTiming"),
@@ -254,10 +417,15 @@ const refs = {
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
   generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
-  openResultPreviewButton: document.querySelector("#openResultPreviewButton"),
+  downloadOriginalButton: document.querySelector("#downloadOriginalButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
+  hoverContinueEditButton: document.querySelector("#hoverContinueEditButton"),
+  hoverVariantButton: document.querySelector("#hoverVariantButton"),
+  inspectLongImageButton: document.querySelector("#inspectLongImageButton"),
+  hoverShareButton: document.querySelector("#hoverShareButton"),
+  saveGroupAssetButton: document.querySelector("#saveGroupAssetButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
   errorMessage: document.querySelector("#errorMessage"),
   toastMessage: document.querySelector("#toastMessage"),
@@ -294,6 +462,11 @@ const refs = {
   shareRecipientSearchInput: document.querySelector("#shareRecipientSearchInput"),
   shareResultNoteInput: document.querySelector("#shareResultNoteInput"),
   submitShareResultButton: document.querySelector("#submitShareResultButton"),
+  galleryEditorPanel: document.querySelector("#galleryEditorPanel"),
+  galleryEditorStatus: document.querySelector("#galleryEditorStatus"),
+  galleryFavoriteInput: document.querySelector("#galleryFavoriteInput"),
+  galleryTagsInput: document.querySelector("#galleryTagsInput"),
+  saveGalleryMetaButton: document.querySelector("#saveGalleryMetaButton"),
   changePasswordModal: document.querySelector("#changePasswordModal"),
   changePasswordBackdrop: document.querySelector("#changePasswordBackdrop"),
   changePasswordForm: document.querySelector("#changePasswordForm"),
@@ -302,6 +475,57 @@ const refs = {
   changePasswordStatus: document.querySelector("#changePasswordStatus"),
   submitChangePasswordButton: document.querySelector("#submitChangePasswordButton"),
   closeChangePasswordButton: document.querySelector("#closeChangePasswordButton"),
+  profileModal: document.querySelector("#profileModal"),
+  profileBackdrop: document.querySelector("#profileBackdrop"),
+  profileForm: document.querySelector("#profileForm"),
+  closeProfileButton: document.querySelector("#closeProfileButton"),
+  profileAvatarPreview: document.querySelector("#profileAvatarPreview"),
+  profileAvatarInput: document.querySelector("#profileAvatarInput"),
+  profileUsernameInput: document.querySelector("#profileUsernameInput"),
+  profileDisplayNameInput: document.querySelector("#profileDisplayNameInput"),
+  profileWechatInput: document.querySelector("#profileWechatInput"),
+  profileEmailInput: document.querySelector("#profileEmailInput"),
+  profilePhoneCountryCodeInput: document.querySelector("#profilePhoneCountryCodeInput"),
+  profilePhoneInput: document.querySelector("#profilePhoneInput"),
+  profileCompanyInput: document.querySelector("#profileCompanyInput"),
+  profileDepartmentInput: document.querySelector("#profileDepartmentInput"),
+  profileTeamInput: document.querySelector("#profileTeamInput"),
+  profileJobTitleInput: document.querySelector("#profileJobTitleInput"),
+  profileNoteInput: document.querySelector("#profileNoteInput"),
+  profileCurrentPasswordLabel: document.querySelector("#profileCurrentPasswordLabel"),
+  profileCurrentPasswordInput: document.querySelector("#profileCurrentPasswordInput"),
+  profileStatus: document.querySelector("#profileStatus"),
+  submitProfileButton: document.querySelector("#submitProfileButton"),
+  teamChatModal: document.querySelector("#teamChatModal"),
+  teamChatBackdrop: document.querySelector("#teamChatBackdrop"),
+  closeTeamChatButton: document.querySelector("#closeTeamChatButton"),
+  teamChatMembers: document.querySelector("#teamChatMembers"),
+  teamChatTeamRoomButton: document.querySelector("#teamChatTeamRoomButton"),
+  teamChatTeamRoomName: document.querySelector("#teamChatTeamRoomName"),
+  teamChatTeamRoomMeta: document.querySelector("#teamChatTeamRoomMeta"),
+  teamChatMain: document.querySelector("#teamChatMain"),
+  teamChatRoomTitle: document.querySelector("#teamChatRoomTitle"),
+  teamChatRoomMeta: document.querySelector("#teamChatRoomMeta"),
+  teamChatGroupContext: document.querySelector("#teamChatGroupContext"),
+  teamChatGroupContextToggle: document.querySelector("#teamChatGroupContextToggle"),
+  teamChatGroupContextBody: document.querySelector("#teamChatGroupContextBody"),
+  teamChatAnnouncement: document.querySelector("#teamChatAnnouncement"),
+  teamChatGroupMemberPanel: document.querySelector("#teamChatGroupMemberPanel"),
+  teamChatGroupMembers: document.querySelector("#teamChatGroupMembers"),
+  teamChatGroupMemberCount: document.querySelector("#teamChatGroupMemberCount"),
+  teamChatGroupStats: document.querySelector("#teamChatGroupStats"),
+  teamChatGroupSummary: document.querySelector("#teamChatGroupSummary"),
+  teamChatGroupAssets: document.querySelector("#teamChatGroupAssets"),
+  teamChatMessages: document.querySelector("#teamChatMessages"),
+  teamChatForm: document.querySelector("#teamChatForm"),
+  teamChatMessageInput: document.querySelector("#teamChatMessageInput"),
+  teamChatQuotePreview: document.querySelector("#teamChatQuotePreview"),
+  teamChatQuoteAuthor: document.querySelector("#teamChatQuoteAuthor"),
+  teamChatQuoteText: document.querySelector("#teamChatQuoteText"),
+  clearTeamChatQuoteButton: document.querySelector("#clearTeamChatQuoteButton"),
+  teamChatStatus: document.querySelector("#teamChatStatus"),
+  refreshTeamChatButton: document.querySelector("#refreshTeamChatButton"),
+  sendTeamChatButton: document.querySelector("#sendTeamChatButton"),
   bugReportModal: document.querySelector("#bugReportModal"),
   bugReportBackdrop: document.querySelector("#bugReportBackdrop"),
   bugReportForm: document.querySelector("#bugReportForm"),
@@ -354,6 +578,10 @@ function historyStorageKey() {
   return scopedStorageKey(HISTORY_KEY)
 }
 
+function teamChatRecentDmStorageKey() {
+  return scopedStorageKey(TEAM_CHAT_RECENT_DM_KEY)
+}
+
 function workspaceStorageKey() {
   return scopedStorageKey(WORKSPACE_KEY)
 }
@@ -383,12 +611,13 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   refs.authOverlay?.setAttribute("aria-hidden", "false")
   refs.authForm?.classList.remove("hidden")
   refs.passwordResetRequestForm?.classList.add("hidden")
+  refs.passwordResetConfirmForm?.classList.add("hidden")
   if (refs.authTitle) {
     refs.authTitle.textContent = state.authMode === "register" ? "注册 PicGen" : "登录 PicGen"
   }
   if (refs.authSubtitle) {
     refs.authSubtitle.textContent = state.authMode === "register"
-      ? "填写用户名和密码即可创建账号。之后用同一账号登录。"
+      ? "填写用户名、密码、公司和部门即可创建账号。"
       : "已有账号可直接登录；新用户可以注册后进入图像工作台。"
   }
   if (refs.loginAuthButton) {
@@ -403,12 +632,17 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   if (refs.authPasswordInput) {
     refs.authPasswordInput.autocomplete = state.authMode === "register" ? "new-password" : "current-password"
   }
+  refs.authOrgFields?.classList.toggle("hidden", state.authMode !== "register")
   if (refs.authError) {
     refs.authError.textContent = message
   }
   if (refs.passwordResetRequestStatus) {
     refs.passwordResetRequestStatus.textContent = ""
     refs.passwordResetRequestStatus.classList.remove("is-error")
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
   }
   window.setTimeout(() => refs.authUsernameInput?.focus(), 0)
 }
@@ -423,13 +657,15 @@ function enterAppShell() {
 }
 
 function enterPasswordResetRequest() {
+  state.passwordResetToken = ""
   refs.authForm?.classList.add("hidden")
   refs.passwordResetRequestForm?.classList.remove("hidden")
+  refs.passwordResetConfirmForm?.classList.add("hidden")
   if (refs.authTitle) {
     refs.authTitle.textContent = "找回密码"
   }
   if (refs.authSubtitle) {
-    refs.authSubtitle.textContent = "提交申请后，请联系管理员为你重置密码。"
+    refs.authSubtitle.textContent = "优先发送邮箱重置链接；没有邮箱时管理员会看到申请。"
   }
   if (refs.passwordResetUsernameInput && refs.authUsernameInput) {
     refs.passwordResetUsernameInput.value = refs.authUsernameInput.value.trim()
@@ -448,17 +684,75 @@ function leavePasswordResetRequest() {
   enterAuthGate("login")
 }
 
+function getPasswordResetTokenFromUrl() {
+  try {
+    return new URL(window.location.href).searchParams.get("reset_token")?.trim() || ""
+  } catch {
+    return ""
+  }
+}
+
+function enterPasswordResetConfirm(token) {
+  state.passwordResetToken = token || ""
+  refs.authForm?.classList.add("hidden")
+  refs.passwordResetRequestForm?.classList.add("hidden")
+  refs.passwordResetConfirmForm?.classList.remove("hidden")
+  document.body.classList.add("auth-gate")
+  document.body.classList.remove("app-shell")
+  refs.authOverlay?.setAttribute("aria-hidden", "false")
+  if (refs.authTitle) {
+    refs.authTitle.textContent = "设置新密码"
+  }
+  if (refs.authSubtitle) {
+    refs.authSubtitle.textContent = "请输入新密码完成自助重置。"
+  }
+  if (refs.passwordResetNewPasswordInput) {
+    refs.passwordResetNewPasswordInput.value = ""
+  }
+  if (refs.passwordResetConfirmPasswordInput) {
+    refs.passwordResetConfirmPasswordInput.value = ""
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.passwordResetNewPasswordInput?.focus(), 0)
+}
+
 function setCurrentUser(user) {
   state.currentUser = user || null
+  if (!state.currentUser) {
+    resetTeamChatState()
+  }
   const username = state.currentUser?.username || "未登录"
+  const displayName = state.currentUser?.display_name || username
   const roleLabel = state.currentUser?.is_admin || state.currentUser?.role === "admin" ? "管理员" : "用户"
   if (refs.currentUsername) {
-    refs.currentUsername.textContent = state.currentUser ? `${username} · ${roleLabel}` : username
+    refs.currentUsername.textContent = state.currentUser ? `${displayName} · ${roleLabel}` : username
   }
   if (refs.userAvatar) {
-    refs.userAvatar.textContent = state.currentUser?.username?.slice(0, 1).toUpperCase() || "?"
+    renderAvatarElement(refs.userAvatar, state.currentUser, "user-avatar")
   }
   updateAdminPanelVisibility()
+}
+
+function renderAvatarElement(element, user, imageClassName = "") {
+  if (!element) {
+    return
+  }
+  element.replaceChildren()
+  if (user?.avatar_url) {
+    const image = document.createElement("img")
+    image.src = user.avatar_url
+    image.alt = ""
+    if (imageClassName) {
+      image.className = imageClassName
+    }
+    element.append(image)
+    return
+  }
+  const label = user?.display_name || user?.username || "?"
+  element.textContent = label.slice(0, 1).toUpperCase()
 }
 
 async function checkAuthSession({ showLogin = true } = {}) {
@@ -504,11 +798,13 @@ async function refreshUsageSummary() {
     refs.userUsageSummary.textContent = "用量统计暂时不可用。"
   }
   await refreshAdminUsers()
+  await refreshAdminOrgContext()
   await refreshFeedbackSummary()
   await refreshBugReports()
   await refreshPasswordResetRequests()
   await refreshSharedResults()
   await refreshShareRecipients()
+  await refreshGallery()
 }
 
 function updateAdminPanelVisibility() {
@@ -551,7 +847,8 @@ function renderAdminUsers(users) {
       <article class="admin-user-row">
         <div>
           <strong>${escapeHTML(user.username || "")}</strong>
-          <span>${roleLabel} · ${activeLabel}</span>
+          <span>ID ${Number(user.id || 0)} · ${roleLabel} · ${activeLabel}</span>
+          <span>${escapeHTML(user.company || "未分配")} · ${escapeHTML(user.department || "未分配")}</span>
         </div>
         <div class="admin-user-usage">
           <span>${Number(user.request_count || 0)} 次</span>
@@ -562,6 +859,257 @@ function renderAdminUsers(users) {
       </article>
     `
   }).join("")
+}
+
+function renderAdminOrgUnits(units) {
+  state.adminOrgUnits = Array.isArray(units) ? units : []
+  if (refs.adminOrgUnitSelect) {
+    refs.adminOrgUnitSelect.replaceChildren()
+    state.adminOrgUnits.forEach((unit) => {
+      const option = document.createElement("option")
+      option.value = `${unit.company}\n${unit.department}`
+      option.textContent = `${unit.company} · ${unit.department}`
+      refs.adminOrgUnitSelect.append(option)
+    })
+  }
+  if (refs.adminOrgUnitsList) {
+    if (!state.adminOrgUnits.length) {
+      refs.adminOrgUnitsList.innerHTML = '<p class="admin-empty">暂无组织。</p>'
+    } else {
+      refs.adminOrgUnitsList.innerHTML = state.adminOrgUnits.map((unit) => `
+        <article class="feedback-recent-row">
+          <div>
+            <strong>${escapeHTML(unit.company)} · ${escapeHTML(unit.department)}</strong>
+            <span>${unit.is_active ? "启用" : "停用"} · ${escapeHTML(unit.updated_at || "")}</span>
+          </div>
+        </article>
+      `).join("")
+    }
+  }
+}
+
+function renderOrgUnitSelect(select, units, { includeNewlineValue = false } = {}) {
+  if (!select) {
+    return
+  }
+  const currentValue = select.value
+  select.replaceChildren()
+  const source = Array.isArray(units) && units.length
+    ? units
+    : [{ company: "6renyou", department: "PD & OPS" }]
+  source.forEach((unit) => {
+    const option = document.createElement("option")
+    option.value = includeNewlineValue ? `${unit.company}\n${unit.department}` : unit.company
+    option.dataset.company = unit.company
+    option.dataset.department = unit.department
+    option.textContent = includeNewlineValue ? `${unit.company} · ${unit.department}` : unit.company
+    select.append(option)
+  })
+  if (currentValue && Array.from(select.options).some((option) => option.value === currentValue)) {
+    select.value = currentValue
+  }
+}
+
+function renderDepartmentSelect(select, units, selectedCompany) {
+  if (!select) {
+    return
+  }
+  const currentValue = select.value
+  const departments = (Array.isArray(units) ? units : [])
+    .filter((unit) => unit.company === selectedCompany)
+    .map((unit) => unit.department)
+  const source = departments.length ? departments : ["PD & OPS"]
+  select.replaceChildren()
+  Array.from(new Set(source)).forEach((department) => {
+    const option = document.createElement("option")
+    option.value = department
+    option.textContent = department
+    select.append(option)
+  })
+  if (currentValue && source.includes(currentValue)) {
+    select.value = currentValue
+  }
+}
+
+function renderOrgUnitControls() {
+  renderOrgUnitSelect(refs.authCompanyInput, state.orgUnits)
+  renderDepartmentSelect(refs.authDepartmentInput, state.orgUnits, refs.authCompanyInput?.value || "6renyou")
+  renderOrgUnitSelect(refs.profileCompanyInput, state.orgUnits)
+  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  renderOrgUnitSelect(refs.adminOrgUnitSelect, state.orgUnits, { includeNewlineValue: true })
+  renderOrgUnitSelect(refs.adminAnnouncementOrgSelect, state.orgUnits, { includeNewlineValue: true })
+}
+
+async function refreshOrgUnits() {
+  try {
+    const { response, data } = await fetchJSON("/api/org-units", { cache: "no-store" })
+    if (response.ok && Array.isArray(data.org_units)) {
+      state.orgUnits = data.org_units
+      renderOrgUnitControls()
+    }
+  } catch {
+    renderOrgUnitControls()
+  }
+}
+
+function renderAdminOrgAudit(events) {
+  if (!refs.adminOrgAuditList) {
+    return
+  }
+  const rows = Array.isArray(events) ? events : []
+  if (!rows.length) {
+    refs.adminOrgAuditList.innerHTML = '<p class="admin-empty">暂无组织调整记录。</p>'
+    return
+  }
+  refs.adminOrgAuditList.innerHTML = rows.slice(0, 8).map((event) => `
+    <article class="feedback-recent-row">
+      <div>
+        <strong>${escapeHTML(event.target_username || `用户 ${event.target_user_id}`)}</strong>
+        <span>${escapeHTML(event.actor_username || "系统")} · ${escapeHTML(event.created_at || "")}</span>
+      </div>
+      <p>${escapeHTML(event.old_company || "未分配")} · ${escapeHTML(event.old_department || "未分配")} → ${escapeHTML(event.new_company || "未分配")} · ${escapeHTML(event.new_department || "未分配")}</p>
+      <p>${escapeHTML(event.reason || "未填写原因")}</p>
+    </article>
+  `).join("")
+}
+
+function renderAdminOrgStats(items) {
+  if (!refs.adminOrgStatsList) {
+    return
+  }
+  const rows = Array.isArray(items) ? items : []
+  if (!rows.length) {
+    refs.adminOrgStatsList.innerHTML = '<p class="admin-empty">暂无组织统计。</p>'
+    return
+  }
+  refs.adminOrgStatsList.innerHTML = rows.map((item) => `
+    <article class="feedback-recent-row">
+      <div>
+        <strong>${escapeHTML(item.group?.title || "未命名组织")}</strong>
+        <span>${Number(item.users?.member_count || 0)} 人 · ${Number(item.usage?.generated_image_count || 0)} 张图 · ${Number(item.assets?.asset_count || 0)} 个资产</span>
+      </div>
+      <p>满意 ${Number(item.feedback?.totals?.good || 0)} · 一般 ${Number(item.feedback?.totals?.ok || 0)} · 不好 ${Number(item.feedback?.totals?.bad || 0)}</p>
+    </article>
+  `).join("")
+}
+
+async function refreshAdminOrgContext() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  if (!isAdmin || !refs.adminOrgPanel) {
+    return
+  }
+  if (refs.adminOrgStatus) {
+    refs.adminOrgStatus.textContent = ""
+  }
+  try {
+    const [orgResponse, auditResponse, statsResponse] = await Promise.all([
+      fetchJSON("/api/admin/org-units", { cache: "no-store" }),
+      fetchJSON("/api/admin/org-audit", { cache: "no-store" }),
+      fetchJSON("/api/admin/org-stats", { cache: "no-store" }),
+    ])
+    if (orgResponse.response.ok) {
+      renderAdminOrgUnits(orgResponse.data.org_units)
+      state.orgUnits = Array.isArray(orgResponse.data.org_units) ? orgResponse.data.org_units : state.orgUnits
+      renderOrgUnitControls()
+    }
+    if (auditResponse.response.ok) {
+      renderAdminOrgAudit(auditResponse.data.events)
+    }
+    if (statsResponse.response.ok) {
+      renderAdminOrgStats(statsResponse.data.org_stats)
+    }
+  } catch {
+    if (refs.adminOrgStatus) {
+      refs.adminOrgStatus.textContent = "组织信息暂时不可用。"
+    }
+  }
+}
+
+async function submitAdminOrgUnit(event) {
+  event.preventDefault()
+  if (!refs.adminOrgCompanyInput || !refs.adminOrgDepartmentInput) {
+    return
+  }
+  const company = refs.adminOrgCompanyInput.value.trim()
+  const department = refs.adminOrgDepartmentInput.value.trim()
+  if (!company || !department) {
+    refs.adminOrgStatus.textContent = "请填写公司和部门。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/admin/org-units", {
+      method: "POST",
+      body: JSON.stringify({ company, department }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "组织创建失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = "组织已更新。"
+    refs.adminOrgDepartmentInput.value = ""
+    await refreshAdminOrgContext()
+  } catch {
+    refs.adminOrgStatus.textContent = "组织创建失败。"
+  }
+}
+
+async function submitAdminUserOrg(event) {
+  event.preventDefault()
+  const userId = Number(refs.adminOrgUserIdInput?.value || 0)
+  const selected = refs.adminOrgUnitSelect?.value || ""
+  const [company = "", department = ""] = selected.split("\n")
+  if (!userId || !company || !department) {
+    refs.adminOrgStatus.textContent = "请选择用户和组织。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/admin/users/${userId}/org`, {
+      method: "PUT",
+      body: JSON.stringify({
+        company,
+        department,
+        reason: refs.adminOrgReasonInput?.value.trim() || "",
+      }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "组织调整失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = "用户组织已调整。"
+    if (refs.adminOrgReasonInput) {
+      refs.adminOrgReasonInput.value = ""
+    }
+    await Promise.all([refreshAdminOrgContext(), refreshAdminUsers()])
+  } catch {
+    refs.adminOrgStatus.textContent = "组织调整失败。"
+  }
+}
+
+async function submitAdminGroupAnnouncement(event) {
+  event.preventDefault()
+  const selected = refs.adminAnnouncementOrgSelect?.value || ""
+  const [company = "", department = ""] = selected.split("\n")
+  const content = refs.adminAnnouncementContentInput?.value.trim() || ""
+  if (!company || !department) {
+    refs.adminOrgStatus.textContent = "请选择公告组织。"
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/group-announcement", {
+      method: "PUT",
+      body: JSON.stringify({ company, department, content }),
+    })
+    if (!response.ok) {
+      refs.adminOrgStatus.textContent = data.error || "群公告保存失败"
+      return
+    }
+    refs.adminOrgStatus.textContent = content ? "群公告已保存。" : "群公告已清空。"
+    if (state.teamChatRoom.type === "team") {
+      await refreshTeamChatGroupContext()
+    }
+  } catch {
+    refs.adminOrgStatus.textContent = "群公告保存失败。"
+  }
 }
 
 async function refreshAdminUsers() {
@@ -693,8 +1241,11 @@ function createPasswordResetRequestRow(item) {
 
   const meta = document.createElement("span")
   const timeText = item.created_at ? ` · ${item.created_at}` : ""
+  const emailText = item.email_available
+    ? `邮箱 ${item.email_masked || "已填写"}${item.email_sent_at ? " · 已发邮件" : ""}`
+    : "无邮箱，需管理员兜底"
   meta.textContent = item.matched_user
-    ? `待管理员重置${timeText}`
+    ? `${emailText}${timeText}`
     : `请先核对用户名${timeText}`
 
   header.append(title, meta)
@@ -900,6 +1451,480 @@ function buildFeedbackPayload(rating, reason = "") {
   }
 }
 
+function selectedGeneratedImageId() {
+  const candidate = state.resultCandidates[state.selectedCandidateIndex] || {}
+  return candidate.generated_image_id || state.lastResultImage?.generatedImageId || null
+}
+
+function selectedPromptRecipe() {
+  const recipeId = refs.promptRecipeSelect?.value || state.selectedRecipeId || ""
+  return state.promptRecipes.find((recipe) => recipe.id === recipeId) || null
+}
+
+function promptRecipeAppendText(recipe = selectedPromptRecipe()) {
+  if (!recipe?.prompt_suffix) {
+    return ""
+  }
+  return [
+    `配方辅助（${recipe.title} · ${recipe.version || "v1"}，只追加质量要求，不覆盖原提示词）：`,
+    recipe.prompt_suffix,
+  ].join("\n")
+}
+
+function buildEffectiveGeneratePrompt() {
+  const originalPrompt = refs.generatePromptInput.value.trim()
+  const recipe = selectedPromptRecipe()
+  const promptMode = state.promptMode === "recipe" && recipe ? "recipe" : "free"
+  const recipeText = promptMode === "recipe" ? promptRecipeAppendText(recipe) : ""
+  const effectivePrompt = [originalPrompt, recipeText].filter(Boolean).join("\n\n")
+  return {
+    originalPrompt,
+    effectivePrompt,
+    promptMode,
+    recipe,
+  }
+}
+
+function updatePromptModeUI() {
+  state.promptMode = refs.promptModeInputs.find((input) => input.checked)?.value || "free"
+  refs.recipeAssistPanel?.classList.toggle("hidden", state.promptMode !== "recipe")
+  updatePromptRecipeSummary()
+  updateEffectivePromptPreview()
+}
+
+function updatePromptRecipeSummary() {
+  const recipe = selectedPromptRecipe()
+  if (!refs.promptRecipeSummary) {
+    return
+  }
+  if (state.promptMode !== "recipe") {
+    refs.promptRecipeSummary.textContent = "精确提示词模式会把你写的提示词作为主输入原样发送。"
+    return
+  }
+  if (!recipe) {
+    refs.promptRecipeSummary.textContent = "选择一个配方后，可查看和追加最终发送提示词；配方不会自动覆盖你的意图。"
+    return
+  }
+  refs.promptRecipeSummary.textContent = `${recipe.summary || ""} ${recipe.guidance || ""}`.trim()
+}
+
+function updateEffectivePromptPreview() {
+  if (!refs.effectivePromptPreview) {
+    return
+  }
+  const { effectivePrompt, originalPrompt } = buildEffectiveGeneratePrompt()
+  refs.effectivePromptPreview.textContent = effectivePrompt || originalPrompt || "先输入提示词。"
+}
+
+function renderPromptRecipes() {
+  if (!refs.promptRecipeSelect) {
+    return
+  }
+  refs.promptRecipeSelect.replaceChildren()
+  const placeholder = document.createElement("option")
+  placeholder.value = ""
+  placeholder.textContent = "选择配方"
+  refs.promptRecipeSelect.append(placeholder)
+  state.promptRecipes
+    .filter((recipe) => recipe.mode === "generate")
+    .forEach((recipe) => {
+      const option = document.createElement("option")
+      option.value = recipe.id
+      option.textContent = recipe.title
+      refs.promptRecipeSelect.append(option)
+    })
+  if (state.selectedRecipeId) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
+  updatePromptRecipeSummary()
+  updateEffectivePromptPreview()
+  renderPromptRecipeCards()
+}
+
+async function loadPromptRecipes() {
+  try {
+    const { response, data } = await fetchJSON("api/recipes", { cache: "no-store" })
+    if (!response.ok) {
+      state.promptRecipes = []
+      renderPromptRecipes()
+      return
+    }
+    state.promptRecipes = Array.isArray(data.recipes) ? data.recipes : []
+    renderPromptRecipes()
+  } catch {
+    state.promptRecipes = []
+    renderPromptRecipes()
+  }
+}
+
+function renderPromptRecipeCards() {
+  if (!refs.promptRecipeCards) {
+    return
+  }
+  refs.promptRecipeCards.replaceChildren()
+  const recipes = state.promptRecipes.filter((recipe) => recipe.mode === "generate")
+  if (!recipes.length) {
+    const empty = document.createElement("p")
+    empty.className = "helper-text"
+    empty.textContent = "配方库暂时不可用；你仍然可以使用精确提示词生成。"
+    refs.promptRecipeCards.append(empty)
+    return
+  }
+  recipes.forEach((recipe) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "prompt-recipe-card"
+    button.classList.toggle("active", recipe.id === (refs.promptRecipeSelect?.value || state.selectedRecipeId))
+    button.dataset.recipeId = recipe.id
+
+    const title = document.createElement("strong")
+    title.textContent = recipe.title
+    const category = document.createElement("span")
+    category.textContent = recipe.category || "创作配方"
+    const summary = document.createElement("p")
+    summary.textContent = recipe.summary || recipe.guidance || ""
+    const keywords = document.createElement("small")
+    keywords.textContent = Array.isArray(recipe.recommended_keywords)
+      ? recipe.recommended_keywords.join(" / ")
+      : ""
+
+    button.append(title, category, summary, keywords)
+    button.addEventListener("click", () => selectPromptRecipe(recipe.id, { enableRecipeMode: true }))
+    refs.promptRecipeCards.append(button)
+  })
+}
+
+function selectPromptRecipe(recipeId, { enableRecipeMode = false } = {}) {
+  state.selectedRecipeId = recipeId || ""
+  if (refs.promptRecipeSelect) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
+  if (enableRecipeMode) {
+    state.promptMode = "recipe"
+    refs.promptModeInputs.forEach((input) => {
+      input.checked = input.value === "recipe"
+    })
+  }
+  updatePromptModeUI()
+  renderPromptRecipeCards()
+  scheduleWorkspacePersist()
+}
+
+function applyPromptRecipeToPrompt() {
+  const recipe = selectedPromptRecipe()
+  if (!recipe) {
+    setStatusMessage("请先选择一个创作配方。")
+    return
+  }
+  const snippet = promptRecipeAppendText(recipe)
+  const current = refs.generatePromptInput.value.trimEnd()
+  if (current.includes(`配方辅助（${recipe.title}`)) {
+    setStatusMessage("提示词里已经包含这个配方要求。")
+    return
+  }
+  refs.generatePromptInput.value = current ? `${current}\n\n${snippet}` : snippet
+  updatePromptCounters()
+  updateEffectivePromptPreview()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把配方要求追加到提示词。")
+  refs.generatePromptInput.focus()
+}
+
+function creativeBriefFields() {
+  return [
+    ["destination", refs.creativeBriefDestinationInput],
+    ["audience", refs.creativeBriefAudienceInput],
+    ["channel", refs.creativeBriefChannelInput],
+    ["mood", refs.creativeBriefMoodInput],
+    ["mustHave", refs.creativeBriefMustHaveInput],
+    ["avoid", refs.creativeBriefAvoidInput],
+  ]
+}
+
+function creativeBriefSnapshot() {
+  return Object.fromEntries(
+    creativeBriefFields().map(([key, input]) => [key, input?.value.trim() || ""])
+  )
+}
+
+function restoreCreativeBrief(snapshot = {}) {
+  creativeBriefFields().forEach(([key, input]) => {
+    if (input) {
+      input.value = snapshot?.[key] || ""
+    }
+  })
+}
+
+function buildCreativeBriefSnippet() {
+  const brief = creativeBriefSnapshot()
+  const lines = [
+    ["目的地/产品", brief.destination],
+    ["目标人群", brief.audience],
+    ["投放渠道", brief.channel],
+    ["气质方向", brief.mood],
+    ["必须保留", brief.mustHave],
+    ["避免出现", brief.avoid],
+  ].filter(([, value]) => value)
+
+  if (!lines.length) {
+    return ""
+  }
+
+  return [
+    "补充创作 brief（只作为辅助上下文，不要抹平原提示词的个性）：",
+    ...lines.map(([label, value]) => `${label}：${value}`),
+  ].join("\n")
+}
+
+function applyCreativeBriefToPrompt() {
+  const snippet = buildCreativeBriefSnippet()
+  if (!snippet) {
+    setStatusMessage("先填写至少一项创意辅助信息。")
+    return
+  }
+  const current = refs.generatePromptInput.value.trimEnd()
+  if (current.includes("补充创作 brief（只作为辅助上下文")) {
+    setStatusMessage("提示词里已经包含创意辅助 brief。")
+    return
+  }
+  refs.generatePromptInput.value = current ? `${current}\n\n${snippet}` : snippet
+  updatePromptCounters()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把创意辅助补充到提示词。")
+  refs.generatePromptInput.focus()
+}
+
+async function askBotWithCreativeBrief() {
+  const basePrompt = refs.generatePromptInput.value.trim()
+  const snippet = buildCreativeBriefSnippet()
+  if (!basePrompt && !snippet) {
+    setStatusMessage("先写提示词，或填写一点创意辅助信息。")
+    return
+  }
+  await openTeamChatModal()
+  const message = [
+    "@GPT-BOT 请从高端旅行视觉质量角度帮我审一下这次生图需求。",
+    "请给出：1）是否足够高级；2）构图/光影/质感建议；3）可直接追加到提示词的 3-5 条短句。",
+    "注意：不要把我的原提示词改成统一模板，只把可选 brief 作为补充上下文。",
+    basePrompt ? `\n原提示词：\n${basePrompt}` : "",
+    snippet ? `\n${snippet}` : "",
+  ].filter(Boolean).join("\n")
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.value = message.slice(0, TEAM_CHAT_MAX_MESSAGE_LENGTH)
+    refs.teamChatMessageInput.focus()
+  }
+}
+
+function parseItinerarySize() {
+  const [widthText, heightText] = (refs.itinerarySizeSelect?.value || "1792x1792").split("x")
+  const width = Number.parseInt(widthText, 10)
+  const height = Number.parseInt(heightText, 10)
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    throw new Error("行程地图尺寸无效。")
+  }
+  if (width % 16 !== 0 || height % 16 !== 0) {
+    throw new Error("行程地图尺寸的宽高都必须是 16 的倍数。")
+  }
+  return formatSizeValue(width, height)
+}
+
+function itineraryThemePrompt() {
+  const theme = refs.itineraryThemeSelect?.value || "comic"
+  if (theme === "comic") {
+    return "水彩漫画路线图：柔和浅蓝/浅黄水彩底、清晰地图轮廓、红色粗路线、白心红点或圆点站位、手写感中文标题、地标小插画、车辆/飞机/火车/脚印小图标；画面亲切有旅行手帐感，但漫画风格不能牺牲地理真实性，地点相对位置、路线顺序、日期、距离、交通方式、酒店和核心景区不能省略。"
+  }
+  if (theme === "dark") {
+    return "深色高级手绘地形地图，午夜蓝与暖金路线，低饱和、高对比，适合高端旅行海报；保留真实山脉、湖泊、沙漠和城市层级，路线像精品旅行地图而不是导航截图。"
+  }
+  if (theme === "classic") {
+    return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线、指南针和图例，保持现代高级旅行质感，地点落位仍必须服从真实地理。"
+  }
+  return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；使用红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
+}
+
+function drawItineraryLogoSafeArea() {
+  return "左上角预留干净白底 LOGO 安全区；不要让 AI 绘制或改造 6 人游 LOGO，最终由程序使用官方透明 PNG 原样贴入。"
+}
+
+function stripCodeFence(value) {
+  const text = String(value || "").trim()
+  const match = text.match(/^```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*```$/)
+  return (match ? match[1] : text).trim()
+}
+
+function isCompleteItineraryPrompt(value) {
+  const text = stripCodeFence(value)
+  // 用户粘贴完整行程地图 prompt 时不再二次包裹，避免重复标题和要求。
+  return text.includes("客户行程原文如下")
+    && text.includes("画面与信息要求")
+    && text.includes("地理正确性硬性要求")
+}
+
+function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
+  const normalizedTitle = String(title || "").trim() || "定制旅行行程地图"
+  const normalizedSubtitle = String(subtitle || "").trim() || "AI 路线图"
+  const normalizedDescription = stripCodeFence(description)
+  if (isCompleteItineraryPrompt(normalizedDescription)) {
+    return normalizedDescription
+  }
+  return [
+    "请生成一张漫画风格的高级定制旅行行程路线图海报，不是普通导航截图，也不是纯信息表格。",
+    `标题：${normalizedTitle}`,
+    `副标题：${normalizedSubtitle}`,
+    "",
+    "客户行程原文如下，请先理解日期、城市、景区、酒店、交通和活动关系，再转化为清晰的路线地图视觉：",
+    normalizedDescription,
+    "",
+    "画面与信息要求：",
+    "- 地理正确性硬性要求：所有地点落位、东西南北关系、前后路线顺序必须以真实地图为准；不能为了画面好看而调整地点相对位置，也不要把城市、景区顺序画反。",
+    "- 对任何目的地都要先按真实世界地图理解相对位置：城市、国家/地区边界、山脉、湖泊、海岸线、岛屿、沙漠、峡谷和主要交通走廊不能乱画。",
+    "- 必须展示行程原文里的每一个日期，不要漏掉中间日期；日期必须逐日出现，像 5/18 这样的中间日期也必须单独标出；日期标签用小金色日期牌或清晰日程标签呈现。",
+    "- 地点层级要有主次；酒店可作为小字备注，不要把所有酒店全文挤满画面，但不能删掉用户明确给出的核心城市、景区、日期和活动。",
+    "- 每两个连续地点之间必须有路线连接，并必须标注大致距离或飞行/转场说明；若无法确定精确距离，用“约 xx km”或“飞行转场”这类合理估算，不要空着。",
+    "- 自驾/包车路线用实线或柔和路线带，飞机/长距离转场用虚线或飞行弧线，避免路线互相缠绕。",
+    "- 在每段连接线中间放一个很小的交通工具图标：自驾/包车用小车图标，飞机转场用飞机图标，步行/活动可用小脚印或点线；图标要小而精致，不遮挡地点和日期。",
+    "- 画面需要像高级旅行定制海报，适合发给客户预览；采用水彩漫画路线图表达，地图轮廓清晰、地貌层次准确、地标小插画精致；不要像低质 PPT、不要像手机地图截图。",
+    "- 漫画路线图视觉语言：柔和水彩铺底、红色粗路线、圆点站位、手写感标题、地标小插画、海/湖/山地用轻松但清晰的插画表达；但信息密度和真实地理不能下降。",
+    `- 视觉风格：${theme || itineraryThemePrompt()}`,
+    `- ${drawItineraryLogoSafeArea()}`,
+    "- 不要出现 OpenAI、API、debug、水印、二维码、虚构品牌 LOGO。",
+  ].join("\n")
+}
+
+async function submitAIItineraryMap() {
+  try {
+    resetDebugLog("点击行程路线：AI 生成")
+    const startedAt = performance.now()
+    const title = refs.itineraryTitleInput?.value.trim() || "定制旅行行程地图"
+    const subtitle = refs.itinerarySubtitleInput?.value.trim() || ""
+    const description = refs.itineraryDescriptionInput?.value.trim() || ""
+    const settings = getSettings()
+    const model = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
+    const logoRequested = refs.itineraryLogoEnabled?.checked !== false
+
+    if (!description) {
+      setError("行程描述不能为空。")
+      refs.itineraryDescriptionInput?.focus()
+      return
+    }
+
+    if (!settings.generateUrl) {
+      appendDebugLine("参数校验失败：行程地图生成接口 URL 为空")
+      setError("请先填写生成接口 URL。")
+      refs.generateUrlInput.focus()
+      return
+    }
+
+    let size
+    let imageOptions
+    try {
+      size = parseItinerarySize()
+      imageOptions = getOpenAIImageOptions()
+    } catch (error) {
+      appendDebugLine("参数校验失败：行程地图参数无效", { error: error.message })
+      setError(error.message, error.details)
+      return
+    }
+
+    const aiPrompt = buildAIItineraryMapPrompt({
+      title,
+      subtitle,
+      description,
+      theme: itineraryThemePrompt(),
+    })
+    const requestPrompt = withLogoLayoutPrompt(aiPrompt, logoRequested)
+    const requestSnapshot = currentFormSnapshot()
+
+    saveSettings()
+    setError("")
+    closePreview()
+    setBusy(true, "行程路线生成中", {
+      progressLabel: "准备 AI 行程路线",
+      expectedCount: 1,
+      estimatedSecondsPerImage: 210,
+    })
+    previewPendingResult({
+      mode: "itinerary",
+      prompt: description,
+      model,
+      size,
+    })
+
+    const result = await postJSON("api/generate", {
+      api_key: settings.apiKey,
+      endpoint_url: settings.generateUrl,
+      prompt: requestPrompt,
+      model,
+      mode: "itinerary",
+      sample_count: 1,
+      logo_requested: logoRequested,
+      size,
+      ...imageOptions,
+    }, {
+      mode: "itinerary",
+      progressLabel: "提交 AI 行程路线",
+      waitingLabel: "等待 AI 绘制路线图",
+    })
+    await setResult({ ...result, mode: "itinerary", prompt: aiPrompt, size, transport: "images-generate", logo_requested: logoRequested }, performance.now() - startedAt)
+    rememberRegenerationRequest("itinerary", requestSnapshot)
+    pushHistory({
+      mode: "itinerary",
+      prompt: title,
+      itineraryTitle: title,
+      itinerarySubtitle: subtitle,
+      itineraryDescription: description,
+      itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+      model,
+      transport: "images-generate",
+      logoRequested,
+      sampleCount: 1,
+      size,
+      ...imageOptions,
+      createdAt: new Date().toISOString(),
+    })
+    document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+  } catch (error) {
+    appendDebugLine("AI 行程路线生成失败", { error: error.message })
+    setError(error.cancelled ? "已中断行程路线生成，可以修改行程后重新提交。" : error.message, error.details)
+  } finally {
+    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+    state.activeRequestCancelled = false
+  }
+}
+
+function resetItineraryMapExample() {
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = SANITIZED_ITINERARY_EXAMPLE_TITLE
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = SANITIZED_ITINERARY_EXAMPLE_SUBTITLE
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = AI_ITINERARY_EXAMPLE
+  }
+  scheduleWorkspacePersist()
+}
+
+async function copyDetailedItineraryTemplate() {
+  await navigator.clipboard.writeText(DETAILED_ITINERARY_TEMPLATE)
+  setStatusMessage("精细行程模板已复制。")
+}
+
+function applyDetailedItineraryTemplate() {
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = DETAILED_ITINERARY_TEMPLATE
+    refs.itineraryDescriptionInput.focus()
+  }
+  if (refs.itineraryTitleInput && !refs.itineraryTitleInput.value.trim()) {
+    refs.itineraryTitleInput.value = DEFAULT_ITINERARY_TITLE
+  }
+  if (refs.itinerarySubtitleInput && !refs.itinerarySubtitleInput.value.trim()) {
+    refs.itinerarySubtitleInput.value = DEFAULT_ITINERARY_SUBTITLE
+  }
+  scheduleWorkspacePersist()
+  setStatusMessage("已套用精细行程模板。")
+}
+
 function serverShareableImageUrl(candidate = {}) {
   const candidates = [
     candidate.saved_image_url,
@@ -908,6 +1933,39 @@ function serverShareableImageUrl(candidate = {}) {
     state.resultPreview?.src,
   ]
   return candidates.find((value) => value && !String(value).startsWith("data:")) || ""
+}
+
+async function saveCurrentResultToGroupAssets() {
+  const generatedImageId = selectedGeneratedImageId()
+  if (!generatedImageId) {
+    setStatusMessage("这张图还没有服务端记录，暂时不能存入部门群。")
+    return
+  }
+  if (refs.saveGroupAssetButton) {
+    refs.saveGroupAssetButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/group-assets", {
+      method: "POST",
+      body: JSON.stringify({
+        generated_image_id: generatedImageId,
+        title: state.lastResultPrompt ? state.lastResultPrompt.slice(0, 80) : "优秀作品",
+        note: "用户手动存入部门群优秀资产",
+      }),
+    })
+    if (!response.ok) {
+      setStatusMessage(data.error || "存入部门群失败。")
+      return
+    }
+    setStatusMessage("已存入部门群优秀资产。")
+    await Promise.all([refreshTeamChatGroupContext(), refreshAdminOrgContext()])
+  } catch {
+    setStatusMessage("存入部门群失败。")
+  } finally {
+    if (refs.saveGroupAssetButton) {
+      refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
+    }
+  }
 }
 
 function setFeedbackStatus(text) {
@@ -1143,10 +2201,362 @@ function openSharedResult(shareId) {
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
   refs.shareResultPanel?.classList.add("hidden")
+  setGalleryEditorMeta(null)
   renderResultCandidates()
   updatePreviewAvailability()
   scheduleWorkspacePersist()
   document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function galleryItemToAsset(item) {
+  if (!item?.saved_image_url) {
+    return null
+  }
+  return {
+    dataUrl: "",
+    file: null,
+    name: item.saved_image_name || `gallery-${item.id || Date.now()}.png`,
+    type: item.saved_image_mime || "image/png",
+    size: Number(item.saved_image_bytes || 0),
+    width: item.saved_image_width || null,
+    height: item.saved_image_height || null,
+    savedUrl: item.saved_image_url || "",
+    savedPath: item.saved_image_path || "",
+    fileUrl: item.saved_image_url || "",
+    src: item.saved_image_url || "",
+    generatedImageId: item.generated_image_id || item.id || null,
+    origin: "gallery",
+    description: `作品库 · ${item.username || "我的作品"}`,
+    logoOverlayApplied: Boolean(item.logo_overlay_applied),
+  }
+}
+
+function galleryTagsText(tags) {
+  return Array.isArray(tags) ? tags.filter(Boolean).join(", ") : ""
+}
+
+function setGalleryEditorMeta(item) {
+  const generatedImageId = item?.generated_image_id || item?.id || null
+  const isFavorite = Boolean(item?.is_favorite)
+  const tags = Array.isArray(item?.tags) ? item.tags : []
+  state.currentGalleryMeta = { generatedImageId, isFavorite, tags }
+  refs.galleryEditorPanel?.classList.toggle("hidden", !generatedImageId)
+  if (refs.galleryFavoriteInput) {
+    refs.galleryFavoriteInput.checked = isFavorite
+  }
+  if (refs.galleryTagsInput) {
+    refs.galleryTagsInput.value = galleryTagsText(tags)
+  }
+  if (refs.galleryEditorStatus) {
+    refs.galleryEditorStatus.textContent = isFavorite ? "已收藏" : "未收藏"
+  }
+}
+
+function renderGalleryItems(items = state.galleryItems) {
+  state.galleryItems = Array.isArray(items) ? items : []
+  if (!refs.galleryList || !refs.galleryEmpty) {
+    return
+  }
+  refs.galleryList.replaceChildren()
+  refs.galleryEmpty.classList.toggle("hidden", state.galleryItems.length > 0)
+  state.galleryItems.slice(0, 30).forEach((item) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "gallery-item"
+    button.dataset.galleryId = String(item.id || item.generated_image_id || "")
+
+    const image = document.createElement("img")
+    image.alt = ""
+    image.src = item.saved_image_url || ""
+
+    const copy = document.createElement("span")
+    copy.className = "gallery-item-copy"
+
+    const top = document.createElement("span")
+    top.className = "gallery-item-top"
+    const title = document.createElement("strong")
+    title.textContent = item.is_favorite ? "★ 收藏作品" : "作品"
+    const time = document.createElement("time")
+    time.textContent = formatTimestamp(item.created_at)
+    top.append(title, time)
+
+    const prompt = document.createElement("span")
+    prompt.className = "gallery-item-prompt"
+    prompt.textContent = item.prompt || "未记录提示词"
+
+    const meta = document.createElement("span")
+    meta.className = "gallery-item-meta"
+    const metaParts = [item.mode || "生成", item.model || "", item.logo_overlay_applied ? "LOGO" : ""]
+    meta.textContent = metaParts.filter(Boolean).join(" · ")
+
+    const tags = document.createElement("span")
+    tags.className = "gallery-item-tags"
+    tags.textContent = galleryTagsText(item.tags)
+
+    copy.append(top, prompt, meta)
+    if (tags.textContent) {
+      copy.append(tags)
+    }
+    button.append(image, copy)
+    button.addEventListener("click", () => openGalleryItem(item.id || item.generated_image_id))
+    refs.galleryList.appendChild(button)
+  })
+}
+
+function toggleRailSection(sectionName, forceExpanded = null) {
+  const section = document.querySelector(`[data-rail-section="${sectionName}"]`)
+  const toggle = document.querySelector(`[data-rail-toggle="${sectionName}"]`)
+  if (!section || !toggle) {
+    return
+  }
+  const shouldExpand = forceExpanded === null
+    ? section.classList.contains("collapsed")
+    : Boolean(forceExpanded)
+  section.classList.toggle("collapsed", !shouldExpand)
+  toggle.setAttribute("aria-expanded", String(shouldExpand))
+}
+
+function openTeamInspirationFeed() {
+  toggleRailSection("gallery", true)
+  refs.teamInspirationFeed?.classList.remove("hidden")
+  if (refs.galleryFavoriteOnlyInput) {
+    refs.galleryFavoriteOnlyInput.checked = true
+  }
+  state.galleryFavoriteOnly = true
+  void refreshGallery()
+  refs.gallerySearchInput?.focus()
+}
+
+function initializeRailDisclosure() {
+  if (!window.matchMedia("(max-width: 820px)").matches) {
+    return
+  }
+  refs.railToggleButtons.forEach((button) => {
+    toggleRailSection(button.dataset.railToggle || "", false)
+  })
+}
+
+async function refreshGallery() {
+  if (!state.currentUser || !refs.galleryList) {
+    return
+  }
+  const params = new URLSearchParams()
+  const query = refs.gallerySearchInput?.value.trim() || state.gallerySearch || ""
+  const favoriteOnly = Boolean(refs.galleryFavoriteOnlyInput?.checked || state.galleryFavoriteOnly)
+  state.gallerySearch = query
+  state.galleryFavoriteOnly = favoriteOnly
+  if (query) {
+    params.set("q", query)
+  }
+  if (favoriteOnly) {
+    params.set("favorite", "1")
+  }
+  const url = params.toString() ? `/api/gallery?${params}` : "/api/gallery"
+  try {
+    const { response, data } = await fetchJSON(url, { cache: "no-store" })
+    if (response.ok) {
+      renderGalleryItems(data.items)
+      return
+    }
+  } catch {
+    // handled below
+  }
+  refs.galleryList.innerHTML = '<p class="empty-history">作品库暂时不可用。</p>'
+  refs.galleryEmpty?.classList.add("hidden")
+}
+
+function jobStatusLabel(status) {
+  if (status === "succeeded") return "已完成"
+  if (status === "failed") return "失败"
+  if (status === "started") return "生成中"
+  return status || "未知"
+}
+
+function renderGenerationJobs(jobs = state.generationJobs) {
+  state.generationJobs = Array.isArray(jobs) ? jobs : []
+  if (!refs.jobCenterList || !refs.jobCenterEmpty) {
+    return
+  }
+  refs.jobCenterList.replaceChildren()
+  refs.jobCenterEmpty.classList.toggle("hidden", state.generationJobs.length > 0)
+  state.generationJobs.slice(0, 8).forEach((job) => {
+    const item = document.createElement("article")
+    item.className = `job-center-item ${job.status === "failed" ? "failed" : ""}`
+    const thumb = document.createElement("button")
+    thumb.type = "button"
+    thumb.className = "job-center-thumb"
+    thumb.disabled = !job.first_generated_image_id
+    if (job.first_saved_image_url) {
+      const image = document.createElement("img")
+      image.src = job.first_saved_image_url
+      image.alt = ""
+      thumb.append(image)
+    } else {
+      thumb.textContent = job.status === "failed" ? "!" : "…"
+    }
+    thumb.addEventListener("click", () => {
+      if (job.first_generated_image_id) {
+        void openGeneratedImageDetail(job.first_generated_image_id)
+      }
+    })
+
+    const copy = document.createElement("div")
+    copy.className = "job-center-copy"
+    const top = document.createElement("div")
+    top.className = "job-center-top"
+    const status = document.createElement("strong")
+    status.textContent = jobStatusLabel(job.status)
+    const time = document.createElement("time")
+    time.textContent = formatTimestamp(job.started_at)
+    top.append(status, time)
+    const prompt = document.createElement("p")
+    prompt.textContent = job.original_prompt || job.prompt || "未记录提示词"
+    const meta = document.createElement("span")
+    const modeLabel = job.prompt_mode === "recipe" ? "配方辅助" : "精确提示词"
+    meta.textContent = [
+      job.mode || "生成",
+      modeLabel,
+      job.recipe_id || "",
+      job.size || "",
+      `${Number(job.image_count || 0)} 张`,
+    ].filter(Boolean).join(" · ")
+    copy.append(top, prompt, meta)
+    if (job.error_message) {
+      const error = document.createElement("small")
+      error.textContent = job.error_message
+      copy.append(error)
+    }
+    item.append(thumb, copy)
+    refs.jobCenterList.append(item)
+  })
+}
+
+async function refreshGenerationJobs() {
+  if (!state.currentUser || !refs.jobCenterList) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/jobs?limit=20", { cache: "no-store" })
+    if (response.ok) {
+      renderGenerationJobs(data.jobs)
+      return
+    }
+  } catch {
+    // handled below
+  }
+  refs.jobCenterList.innerHTML = '<p class="empty-history">任务中心暂时不可用。</p>'
+  refs.jobCenterEmpty?.classList.add("hidden")
+}
+
+async function openGeneratedImageDetail(generatedImageId) {
+  if (!generatedImageId) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/generated-images/${encodeURIComponent(generatedImageId)}`, {
+      cache: "no-store",
+    })
+    if (!response.ok || !data.image) {
+      setError(data.error || "无法打开这张任务结果。")
+      return
+    }
+    openGalleryLikeImage(data.image, "任务结果")
+  } catch {
+    setError("打开任务结果时网络连接错误。")
+  }
+}
+
+function openGalleryLikeImage(item, label = "作品库") {
+  const asset = galleryItemToAsset(item)
+  if (!item || !asset) {
+    setError("这条记录没有可打开的图片。")
+    return
+  }
+  state.resultCandidates = [{
+    saved_image_url: item.saved_image_url || "",
+    saved_image_path: item.saved_image_path || "",
+    saved_image_name: item.saved_image_name || asset.name,
+    generated_image_id: item.generated_image_id || item.id || null,
+    image_url: item.saved_image_url || "",
+    logo_overlay_applied: Boolean(item.logo_overlay_applied),
+    asset,
+  }]
+  state.selectedCandidateIndex = 0
+  const lineage = item.lineage || {}
+  state.lastResultPrompt = lineage.original_prompt || item.prompt || ""
+  state.lastResultModel = item.model || lineage.model || ""
+  state.lastResultMode = item.mode || "gallery"
+  state.lastResultImage = cloneImageAsset(asset)
+  state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
+  refs.resultPreviewLabel.textContent = label
+  refs.resultImage.src = state.resultPreview.src
+  refs.resultImage.classList.add("visible")
+  refs.resultPreviewEmpty.classList.add("hidden")
+  refs.resultPrompt.textContent = state.lastResultPrompt || "未记录提示词"
+  const promptMode = lineage.prompt_mode === "recipe" ? "配方辅助" : ""
+  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", promptMode, item.username || ""].filter(Boolean).join(" · ")
+  refs.resultTiming.textContent = lineage.elapsed_ms ? `${(Number(lineage.elapsed_ms) / 1000).toFixed(1)}s` : ""
+  refs.resultStorage.textContent = item.saved_image_path ? `已落盘到 ${item.saved_image_path}` : ""
+  setDownloadAvailable(state.resultPreview.src, asset.name)
+  updateFeedbackSelection(null)
+  setFeedbackStatus("等待评价")
+  refs.shareResultPanel?.classList.add("hidden")
+  setGalleryEditorMeta(item)
+  renderResultCandidates()
+  updateFeedbackPanelVisibility()
+  updatePreviewAvailability()
+  scheduleWorkspacePersist()
+  document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function openGalleryItem(galleryId) {
+  const item = state.galleryItems.find((entry) => Number(entry.id || entry.generated_image_id) === Number(galleryId))
+  openGalleryLikeImage(item, "作品库")
+}
+
+function parseGalleryTagsInput() {
+  const raw = refs.galleryTagsInput?.value || ""
+  return raw
+    .split(/[,，]/)
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+async function saveGalleryMeta() {
+  const generatedImageId = state.currentGalleryMeta.generatedImageId
+  if (!generatedImageId) {
+    setStatusMessage("请先打开一张自己的作品。")
+    return
+  }
+  const payload = {
+    is_favorite: Boolean(refs.galleryFavoriteInput?.checked),
+    tags: parseGalleryTagsInput(),
+  }
+  if (refs.saveGalleryMetaButton) {
+    refs.saveGalleryMetaButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/gallery/${generatedImageId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      setError(data.error || "作品整理保存失败")
+      return
+    }
+    setGalleryEditorMeta(data.item)
+    state.galleryItems = state.galleryItems.map((item) => (
+      Number(item.id || item.generated_image_id) === Number(generatedImageId) ? data.item : item
+    ))
+    renderGalleryItems()
+    setStatusMessage("作品整理已保存。")
+  } catch {
+    setError("作品整理保存时网络连接错误")
+  } finally {
+    if (refs.saveGalleryMetaButton) {
+      refs.saveGalleryMetaButton.disabled = false
+    }
+  }
 }
 
 function openBugReportModal() {
@@ -1181,6 +2591,1181 @@ function closeChangePasswordModal() {
   refs.changePasswordModal?.classList.add("hidden")
   refs.changePasswordModal?.setAttribute("aria-hidden", "true")
   document.body.classList.remove("modal-open")
+}
+
+function fillProfileForm() {
+  const user = state.currentUser || {}
+  renderOrgUnitControls()
+  if (refs.profileUsernameInput) {
+    refs.profileUsernameInput.value = user.username || ""
+  }
+  if (refs.profileDisplayNameInput) {
+    refs.profileDisplayNameInput.value = user.display_name || ""
+  }
+  if (refs.profileWechatInput) {
+    refs.profileWechatInput.value = user.wechat || ""
+  }
+  if (refs.profileEmailInput) {
+    refs.profileEmailInput.value = user.email || ""
+  }
+  if (refs.profilePhoneCountryCodeInput) {
+    refs.profilePhoneCountryCodeInput.value = user.phone_country_code || "+86"
+  }
+  if (refs.profilePhoneInput) {
+    refs.profilePhoneInput.value = user.phone || ""
+  }
+  if (refs.profileCompanyInput) {
+    refs.profileCompanyInput.value = user.company || "6renyou"
+  }
+  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  if (refs.profileDepartmentInput) {
+    refs.profileDepartmentInput.value = user.department || "PD & OPS"
+  }
+  if (refs.profileTeamInput) {
+    refs.profileTeamInput.value = user.team || ""
+  }
+  if (refs.profileJobTitleInput) {
+    refs.profileJobTitleInput.value = user.job_title || ""
+  }
+  if (refs.profileNoteInput) {
+    refs.profileNoteInput.value = user.note || ""
+  }
+  if (refs.profileCurrentPasswordInput) {
+    refs.profileCurrentPasswordInput.value = ""
+  }
+  renderAvatarElement(refs.profileAvatarPreview, user, "profile-avatar-image")
+  updateProfileUsernamePasswordHint()
+}
+
+function updateProfileUsernamePasswordHint() {
+  const currentUsername = state.currentUser?.username || ""
+  const nextUsername = refs.profileUsernameInput?.value.trim() || ""
+  const changed = Boolean(nextUsername && currentUsername && nextUsername !== currentUsername)
+  refs.profileCurrentPasswordLabel?.classList.toggle("hidden", !changed)
+  if (!changed && refs.profileCurrentPasswordInput) {
+    refs.profileCurrentPasswordInput.value = ""
+  }
+}
+
+function openProfileModal() {
+  if (!state.currentUser) {
+    return
+  }
+  refs.profileModal?.classList.remove("hidden")
+  refs.profileModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  fillProfileForm()
+  if (refs.profileStatus) {
+    refs.profileStatus.textContent = ""
+    refs.profileStatus.classList.remove("is-error")
+  }
+  window.setTimeout(() => refs.profileDisplayNameInput?.focus(), 0)
+}
+
+function closeProfileModal() {
+  refs.profileModal?.classList.add("hidden")
+  refs.profileModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open")
+}
+
+async function submitProfile(event) {
+  event.preventDefault()
+  const username = refs.profileUsernameInput?.value.trim() || ""
+  const currentPassword = refs.profileCurrentPasswordInput?.value || ""
+  if (!username) {
+    refs.profileStatus.textContent = "请填写登录用户名。"
+    refs.profileStatus.classList.add("is-error")
+    return
+  }
+  if ((state.currentUser?.username || "") !== username && !currentPassword) {
+    refs.profileStatus.textContent = "修改登录用户名需要填写当前密码。"
+    refs.profileStatus.classList.add("is-error")
+    return
+  }
+  if (refs.submitProfileButton) {
+    refs.submitProfileButton.disabled = true
+  }
+  refs.profileStatus.textContent = "保存中"
+  refs.profileStatus.classList.remove("is-error")
+  try {
+    const { response, data } = await fetchJSON("/api/me/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        username,
+        current_password: currentPassword,
+        display_name: refs.profileDisplayNameInput?.value.trim() || "",
+        wechat: refs.profileWechatInput?.value.trim() || "",
+        email: refs.profileEmailInput?.value.trim() || "",
+        phone_country_code: refs.profilePhoneCountryCodeInput?.value || "+86",
+        phone: refs.profilePhoneInput?.value.trim() || "",
+        company: refs.profileCompanyInput?.value || "6renyou",
+        department: refs.profileDepartmentInput?.value || "PD & OPS",
+        team: refs.profileTeamInput?.value.trim() || "",
+        job_title: refs.profileJobTitleInput?.value.trim() || "",
+        note: refs.profileNoteInput?.value.trim() || "",
+      }),
+    })
+    if (!response.ok) {
+      refs.profileStatus.textContent = data.error || "资料保存失败"
+      refs.profileStatus.classList.add("is-error")
+      return
+    }
+    setCurrentUser(data.user || state.currentUser)
+    fillProfileForm()
+    refs.profileStatus.textContent = "资料已保存。"
+    refs.profileStatus.classList.remove("is-error")
+    setStatusMessage("个人资料已保存。")
+  } catch {
+    refs.profileStatus.textContent = "网络连接错误"
+    refs.profileStatus.classList.add("is-error")
+  } finally {
+    if (refs.submitProfileButton) {
+      refs.submitProfileButton.disabled = false
+    }
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ""))
+    reader.onerror = () => reject(reader.error || new Error("读取文件失败"))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function uploadProfileAvatar() {
+  const file = refs.profileAvatarInput?.files?.[0]
+  if (!file) {
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    refs.profileStatus.textContent = "头像文件不能超过 2 MB。"
+    refs.profileStatus.classList.add("is-error")
+    refs.profileAvatarInput.value = ""
+    return
+  }
+  refs.profileStatus.textContent = "上传头像中"
+  refs.profileStatus.classList.remove("is-error")
+  try {
+    const dataUrl = await readFileAsDataUrl(file)
+    const { response, data } = await fetchJSON("/api/me/avatar", {
+      method: "POST",
+      body: JSON.stringify({
+        image: {
+          name: file.name,
+          type: file.type,
+          data_url: dataUrl,
+        },
+      }),
+    })
+    if (!response.ok) {
+      refs.profileStatus.textContent = data.error || "头像上传失败"
+      refs.profileStatus.classList.add("is-error")
+      return
+    }
+    setCurrentUser(data.user || state.currentUser)
+    renderAvatarElement(refs.profileAvatarPreview, state.currentUser, "profile-avatar-image")
+    refs.profileStatus.textContent = "头像已更新。"
+    refs.profileStatus.classList.remove("is-error")
+  } catch {
+    refs.profileStatus.textContent = "头像上传失败"
+    refs.profileStatus.classList.add("is-error")
+  } finally {
+    refs.profileAvatarInput.value = ""
+  }
+}
+
+function teamChatRoomParams(room = state.teamChatRoom) {
+  const params = new URLSearchParams({ room_type: room.type || "team" })
+  if (room.recipientUserId) {
+    params.set("recipient_user_id", String(room.recipientUserId))
+  }
+  return params
+}
+
+function teamChatReadPayload(room = state.teamChatRoom, messageId = state.teamChatLastMessageId) {
+  return {
+    room_type: room.type || "team",
+    recipient_user_id: room.recipientUserId || null,
+    message_id: Number(messageId || 0),
+  }
+}
+
+function teamChatSendPayload(content) {
+  return {
+    room_type: state.teamChatRoom.type || "team",
+    recipient_user_id: state.teamChatRoom.recipientUserId || null,
+    content,
+  }
+}
+
+function teamChatDisplayName(member) {
+  return member?.display_name || member?.username || "用户"
+}
+
+function teamChatAvatarLabel(member) {
+  return teamChatDisplayName(member).slice(0, 1).toUpperCase() || "?"
+}
+
+function normalizeTeamChatGroup(group = {}) {
+  const company = group.company || "6renyou"
+  const department = group.department || "PD & OPS"
+  return {
+    company,
+    department,
+    roomKey: group.room_key || "",
+    title: group.title || department || "部门群",
+    subtitle: group.subtitle || `${company} · 部门群`,
+    memberCount: Number(group.member_count || 0),
+  }
+}
+
+function teamChatGroupDisplayTitle() {
+  return state.teamChatGroup.title || state.teamChatGroup.department || "部门群"
+}
+
+function teamChatGroupDisplayMeta() {
+  const count = Number(state.teamChatGroup.memberCount || state.teamChatHumanMembers.length || 0)
+  const base = state.teamChatGroup.subtitle || `${state.teamChatGroup.company || "6renyou"} · 部门群`
+  return count > 0 ? `${base} · ${count} 位成员` : base
+}
+
+function teamChatBotMember() {
+  return state.teamChatBot || state.teamChatMembers.find((member) => member.type === "bot") || {
+    id: "gpt-bot",
+    type: "bot",
+    username: "GPT-BOT",
+    display_name: "GPT-BOT",
+    avatar_url: "",
+  }
+}
+
+function findTeamChatHumanMember(userId) {
+  const targetId = Number(userId || 0)
+  return state.teamChatHumanMembers.find((member) => Number(member.id || 0) === targetId) || null
+}
+
+function hydrateTeamChatRecentDmsFromMembers() {
+  if (!state.teamChatRecentDms.length) {
+    return
+  }
+  state.teamChatRecentDms = state.teamChatRecentDms.map((item) => findTeamChatHumanMember(item.id) || item)
+}
+
+function normalizeTeamChatRecentDm(member) {
+  if (!member || member.type === "bot") {
+    return null
+  }
+  const id = Number(member.id || 0)
+  if (!id) {
+    return null
+  }
+  return {
+    id,
+    type: "user",
+    username: String(member.username || ""),
+    display_name: String(member.display_name || ""),
+    avatar_url: String(member.avatar_url || ""),
+  }
+}
+
+function loadTeamChatRecentDms() {
+  const rows = loadJSON(teamChatRecentDmStorageKey(), [])
+  state.teamChatRecentDms = Array.isArray(rows)
+    ? rows.map(normalizeTeamChatRecentDm).filter(Boolean).slice(0, TEAM_CHAT_MAX_RECENT_DMS)
+    : []
+}
+
+function saveTeamChatRecentDms() {
+  saveJSON(teamChatRecentDmStorageKey(), state.teamChatRecentDms.slice(0, TEAM_CHAT_MAX_RECENT_DMS))
+}
+
+function rememberTeamChatRecentDm(member, { persist = true } = {}) {
+  const normalized = normalizeTeamChatRecentDm(member)
+  if (!normalized) {
+    return
+  }
+  state.teamChatRecentDms = [
+    normalized,
+    ...state.teamChatRecentDms.filter((item) => Number(item.id || 0) !== normalized.id),
+  ].slice(0, TEAM_CHAT_MAX_RECENT_DMS)
+  if (persist) {
+    saveTeamChatRecentDms()
+  }
+}
+
+function updateTeamChatUnreadBadge(total = state.teamChatUnreadTotal) {
+  state.teamChatUnreadTotal = Number(total || 0)
+  const hasUnread = state.teamChatUnreadTotal > 0
+  refs.teamChatButton?.classList.toggle("has-unread", hasUnread)
+  refs.teamChatUnreadBadge?.classList.toggle("hidden", !hasUnread)
+  if (refs.teamChatUnreadBadge) {
+    refs.teamChatUnreadBadge.textContent = String(Math.min(state.teamChatUnreadTotal, 99))
+  }
+}
+
+function resetTeamChatState() {
+  stopTeamChatPolling()
+  state.teamChatMembers = []
+  state.teamChatHumanMembers = []
+  state.teamChatBot = null
+  state.teamChatMessages = []
+  state.teamChatRoom = {
+    type: "team",
+    recipientUserId: null,
+    title: "部门群",
+    meta: "部门群",
+  }
+  state.teamChatLastMessageId = 0
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  updateTeamChatUnreadBadge(0)
+  refs.teamChatModal?.classList.add("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("chat-open")
+}
+
+function renderTeamChatMemberAvatar(container, member) {
+  container.replaceChildren()
+  if (member?.avatar_url) {
+    const image = document.createElement("img")
+    image.src = member.avatar_url
+    image.alt = ""
+    container.append(image)
+    return
+  }
+  container.textContent = teamChatAvatarLabel(member)
+}
+
+function renderTeamChatMembers() {
+  if (!refs.teamChatMembers) {
+    return
+  }
+  if (refs.teamChatTeamRoomName) {
+    refs.teamChatTeamRoomName.textContent = teamChatGroupDisplayTitle()
+  }
+  if (refs.teamChatTeamRoomMeta) {
+    refs.teamChatTeamRoomMeta.textContent = teamChatGroupDisplayMeta()
+  }
+  refs.teamChatTeamRoomButton?.classList.toggle("active", state.teamChatRoom.type === "team")
+  refs.teamChatMembers.replaceChildren()
+  const bot = teamChatBotMember()
+  const directMember = state.teamChatRoom.type === "dm" ? findTeamChatHumanMember(state.teamChatRoom.recipientUserId) : null
+  const recentDms = [...state.teamChatRecentDms]
+  if (directMember && !recentDms.some((member) => Number(member.id || 0) === Number(directMember.id || 0))) {
+    recentDms.unshift(directMember)
+  }
+  const conversations = [bot, ...recentDms]
+  conversations.forEach((member, index) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "team-chat-member"
+    const isBot = member.type === "bot"
+    if (!isBot && index > 0) {
+      const hasRecentLabel = refs.teamChatMembers.querySelector(".team-chat-recent-dm-label")
+      if (!hasRecentLabel) {
+        const label = document.createElement("p")
+        label.className = "team-chat-conversation-label team-chat-current-dm-label team-chat-recent-dm-label"
+        label.textContent = "最近私聊"
+        refs.teamChatMembers.append(label)
+      }
+    }
+    const memberId = isBot ? "gpt-bot" : Number(member.id || 0)
+    const active = isBot
+      ? state.teamChatRoom.type === "bot"
+      : state.teamChatRoom.type === "dm" && Number(state.teamChatRoom.recipientUserId) === memberId
+    button.classList.toggle("active", active)
+    button.classList.toggle("team-chat-current-dm", Boolean(!isBot && active))
+    button.dataset.memberType = member.type || "user"
+    button.dataset.memberId = String(memberId)
+    const avatar = document.createElement("span")
+    avatar.className = isBot ? "team-chat-avatar bot" : "team-chat-avatar"
+    renderTeamChatMemberAvatar(avatar, member)
+    const copy = document.createElement("span")
+    const name = document.createElement("strong")
+    name.textContent = teamChatDisplayName(member)
+    const subtitle = document.createElement("small")
+    subtitle.textContent = isBot ? "AI Chat" : `私聊 @${member.username || ""}`
+    copy.append(name, subtitle)
+    button.append(avatar, copy)
+    button.addEventListener("click", () => {
+      if (isBot) {
+        void switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "AI 创意与图片质量助手。" })
+        return
+      }
+      void switchTeamChatDirectMember(member)
+    })
+    refs.teamChatMembers.append(button)
+  })
+}
+
+function renderTeamChatGroupMembers() {
+  if (!refs.teamChatGroupMembers) {
+    return
+  }
+  const members = state.teamChatHumanMembers
+  refs.teamChatGroupMembers.replaceChildren()
+  if (refs.teamChatGroupMemberCount) {
+    refs.teamChatGroupMemberCount.textContent = members.length ? `${members.length} 位` : "暂无成员"
+  }
+  if (!members.length) {
+    const empty = document.createElement("p")
+    empty.className = "team-chat-empty"
+    empty.textContent = "当前部门暂时没有其他成员。"
+    refs.teamChatGroupMembers.append(empty)
+    return
+  }
+  members.forEach((member) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "team-chat-group-member"
+    const avatar = document.createElement("span")
+    avatar.className = "team-chat-avatar"
+    renderTeamChatMemberAvatar(avatar, member)
+    const copy = document.createElement("span")
+    const name = document.createElement("strong")
+    name.textContent = teamChatDisplayName(member)
+    const subtitle = document.createElement("small")
+    subtitle.textContent = `@${member.username || ""}`
+    copy.append(name, subtitle)
+    button.append(avatar, copy)
+    button.addEventListener("click", () => {
+      void switchTeamChatDirectMember(member)
+    })
+    refs.teamChatGroupMembers.append(button)
+  })
+}
+
+function renderTeamChatAnnouncement(announcement) {
+  if (!refs.teamChatAnnouncement) {
+    return
+  }
+  const content = announcement?.content || ""
+  refs.teamChatAnnouncement.classList.toggle("hidden", !content)
+  refs.teamChatAnnouncement.textContent = content ? `公告：${content}` : ""
+}
+
+function renderTeamChatGroupContextDisclosure() {
+  const expanded = state.teamChatRoom.type === "team" && state.teamChatGroupContextExpanded
+  refs.teamChatGroupContext?.classList.toggle("is-collapsed", !expanded)
+  refs.teamChatGroupContextToggle?.setAttribute("aria-expanded", String(expanded))
+  refs.teamChatGroupContextBody?.classList.toggle("hidden", !expanded)
+}
+
+function renderTeamChatGroupStats(stats) {
+  if (!refs.teamChatGroupStats) {
+    return
+  }
+  if (!stats) {
+    refs.teamChatGroupStats.innerHTML = '<p>统计暂时不可用。</p>'
+    return
+  }
+  refs.teamChatGroupStats.innerHTML = `
+    <h4>部门群统计</h4>
+    <p>${Number(stats.users?.member_count || 0)} 位成员 · ${Number(stats.usage?.generated_image_count || 0)} 张图 · ${Number(stats.assets?.asset_count || 0)} 个优秀资产</p>
+    <p>满意 ${Number(stats.feedback?.totals?.good || 0)} · 一般 ${Number(stats.feedback?.totals?.ok || 0)} · 不好 ${Number(stats.feedback?.totals?.bad || 0)}</p>
+  `
+}
+
+function renderTeamChatGroupSummary(summary) {
+  if (!refs.teamChatGroupSummary) {
+    return
+  }
+  const text = summary?.text || "暂无周报。"
+  refs.teamChatGroupSummary.innerHTML = `
+    <h4>部门群周报</h4>
+    <p>${escapeHTML(text)}</p>
+  `
+}
+
+function renderTeamChatGroupAssets(assets) {
+  if (!refs.teamChatGroupAssets) {
+    return
+  }
+  const rows = Array.isArray(assets) ? assets.slice(0, 4) : []
+  if (!rows.length) {
+    refs.teamChatGroupAssets.innerHTML = '<h4>优秀资产</h4><p>满意作品会自动沉淀到这里，仅作可选参考，不会强制融入新提示词。</p>'
+    return
+  }
+  refs.teamChatGroupAssets.innerHTML = `
+    <h4>优秀资产</h4>
+    <div class="team-chat-asset-list">
+      ${rows.map((asset, index) => `
+        <article class="team-chat-asset-card" data-asset-index="${index}">
+          ${asset.saved_image_url ? `<img src="${escapeHTML(asset.saved_image_url)}" alt="">` : ""}
+          <div>
+            <strong>${escapeHTML(asset.title || "满意作品")}</strong>
+            <p>${escapeHTML(asset.prompt || "未记录提示词")}</p>
+            <span>${escapeHTML(asset.username || "")}</span>
+            <button class="text-button team-chat-use-asset-button" type="button" data-asset-index="${index}">作为参考</button>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `
+  refs.teamChatGroupAssets.querySelectorAll(".team-chat-use-asset-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const asset = rows[Number(button.dataset.assetIndex || 0)]
+      useGroupAssetAsReference(asset)
+    })
+  })
+}
+
+function useGroupAssetAsReference(asset) {
+  if (!asset) {
+    return
+  }
+  setMode("generate", { autoLoadLatest: false })
+  setGenerateIntent("fresh")
+  if (asset.prompt && !refs.generatePromptInput.value.trim()) {
+    refs.generatePromptInput.value = asset.prompt
+  }
+  if (asset.saved_image_url) {
+    const description = `部门群优秀资产 · 仅作可选参考 · ${asset.title || "满意作品"}`
+    state.generateReferenceImage = null
+    state.materialReferenceImage = null
+    state.styleReferenceImage = {
+      dataUrl: asset.saved_image_url,
+      file: null,
+      name: asset.title || "group-asset.png",
+      type: "image/png",
+      size: 0,
+      description,
+      savedUrl: asset.saved_image_url,
+      savedPath: asset.saved_image_path || "",
+      origin: "group-asset",
+    }
+    updateGenerateReferenceUI()
+  }
+  updatePromptCounters()
+  scheduleWorkspacePersist()
+  setStatusMessage("已把部门群优秀资产作为可选参考。")
+  closeTeamChatModal()
+  refs.generatePromptInput.focus()
+}
+
+async function refreshTeamChatGroupContext() {
+  refs.teamChatGroupContext?.classList.toggle("hidden", state.teamChatRoom.type !== "team")
+  if (!state.currentUser || !refs.teamChatGroupContext || state.teamChatRoom.type !== "team") {
+    renderTeamChatAnnouncement(null)
+    renderTeamChatGroupMembers()
+    return
+  }
+  renderTeamChatGroupMembers()
+  try {
+    const [announcementResponse, statsResponse, summaryResponse, assetsResponse] = await Promise.all([
+      fetchJSON("/api/team-chat/group-announcement", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-stats", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-summary?days=7", { cache: "no-store" }),
+      fetchJSON("/api/team-chat/group-assets", { cache: "no-store" }),
+    ])
+    renderTeamChatAnnouncement(
+      announcementResponse.response.ok ? announcementResponse.data.announcement : null
+    )
+    renderTeamChatGroupStats(statsResponse.response.ok ? statsResponse.data.stats : null)
+    renderTeamChatGroupSummary(summaryResponse.response.ok ? summaryResponse.data.summary : null)
+    renderTeamChatGroupAssets(assetsResponse.response.ok ? assetsResponse.data.assets : [])
+  } catch {
+    renderTeamChatAnnouncement(null)
+    renderTeamChatGroupStats(null)
+    renderTeamChatGroupSummary(null)
+    renderTeamChatGroupAssets([])
+  }
+}
+
+function updateTeamChatLastMessageId() {
+  state.teamChatLastMessageId = state.teamChatMessages.reduce((latest, message) => {
+    return Math.max(latest, Number(message.id || 0))
+  }, 0)
+}
+
+function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) {
+  const source = replace ? [] : state.teamChatMessages
+  const byId = new Map()
+  const byClientId = new Map()
+  source.forEach((message) => {
+    const messageId = Number(message.id || 0)
+    if (messageId > 0) {
+      byId.set(messageId, message)
+    } else if (message.client_id) {
+      byClientId.set(message.client_id, message)
+    }
+  })
+  incomingMessages.forEach((message) => {
+    const messageId = Number(message.id || 0)
+    if (messageId > 0) {
+      if (message.client_id) {
+        byClientId.delete(message.client_id)
+      }
+      byId.set(messageId, message)
+    } else if (message.client_id) {
+      byClientId.set(message.client_id, message)
+    }
+  })
+  state.teamChatMessages = [...Array.from(byId.values()), ...Array.from(byClientId.values())].sort((left, right) => {
+    const leftId = Number(left.id || 0)
+    const rightId = Number(right.id || 0)
+    if (leftId > 0 && rightId > 0) {
+      return leftId - rightId
+    }
+    return String(left.created_at || "").localeCompare(String(right.created_at || ""))
+  })
+  updateTeamChatLastMessageId()
+}
+
+function isOwnTeamChatMessage(message) {
+  return Number(message?.sender_user_id || 0) === Number(state.currentUser?.id || 0)
+}
+
+function parseTeamChatQuotedContent(content = "") {
+  const text = String(content || "")
+  const match = text.match(/^引用 ([^：:\n]{1,80})[：:](.*?)(?:\n{2,}([\s\S]*))$/)
+  if (!match) {
+    return { quoteAuthor: "", quoteText: "", body: text }
+  }
+  return {
+    quoteAuthor: match[1].trim(),
+    quoteText: match[2].trim(),
+    body: (match[3] || "").trim(),
+  }
+}
+
+function renderTeamChatBubbleContent(container, message) {
+  container.replaceChildren()
+  const parsed = parseTeamChatQuotedContent(message.content || "")
+  if (parsed.quoteAuthor || parsed.quoteText) {
+    const quote = document.createElement("blockquote")
+    quote.className = "team-chat-message-quote"
+    const author = document.createElement("strong")
+    author.textContent = parsed.quoteAuthor ? `引用 ${parsed.quoteAuthor}` : "引用消息"
+    const text = document.createElement("span")
+    text.textContent = parsed.quoteText || "原消息"
+    quote.append(author, text)
+    container.append(quote)
+  }
+  const bodyText = document.createElement("span")
+  bodyText.className = "team-chat-message-text"
+  bodyText.textContent = parsed.body || message.content || ""
+  container.append(bodyText)
+}
+
+function renderTeamChatMessages({ scrollToBottom = true } = {}) {
+  if (!refs.teamChatMessages) {
+    return
+  }
+  refs.teamChatMessages.replaceChildren()
+  if (!state.teamChatMessages.length) {
+    const empty = document.createElement("p")
+    empty.className = "team-chat-empty"
+    empty.textContent = "还没有消息。"
+    refs.teamChatMessages.append(empty)
+    return
+  }
+  state.teamChatMessages.forEach((message) => {
+    const item = document.createElement("article")
+    item.className = "team-chat-message"
+    item.classList.toggle("mine", Number(message.sender_user_id || 0) === Number(state.currentUser?.id || 0))
+    item.classList.toggle("bot", message.sender_type === "bot")
+    item.classList.toggle("pending", Boolean(message.pending))
+    const meta = document.createElement("div")
+    meta.className = "team-chat-message-meta"
+    const sender = document.createElement("strong")
+    sender.textContent = message.sender_name || (message.sender_type === "bot" ? "GPT-BOT" : "用户")
+    const time = document.createElement("span")
+    time.textContent = formatTeamChatTime(message.created_at)
+    meta.append(sender, time)
+    const body = document.createElement("div")
+    body.className = "team-chat-message-body"
+    const bubble = document.createElement("div")
+    bubble.className = "team-chat-message-bubble"
+    renderTeamChatBubbleContent(bubble, message)
+    const actions = document.createElement("div")
+    actions.className = "team-chat-message-actions"
+    const moreButton = document.createElement("button")
+    moreButton.className = "team-chat-message-more"
+    moreButton.type = "button"
+    moreButton.setAttribute("aria-haspopup", "menu")
+    moreButton.setAttribute("aria-expanded", String(String(state.teamChatOpenMenuId) === String(message.id)))
+    moreButton.setAttribute("aria-label", "更多操作")
+    moreButton.textContent = "⋯"
+    moreButton.addEventListener("click", (event) => {
+      event.stopPropagation()
+      openTeamChatMessageMenu(message.id)
+    })
+    actions.append(moreButton)
+    if (String(state.teamChatOpenMenuId) === String(message.id)) {
+      actions.append(createTeamChatMessageMenu(message))
+    }
+    body.append(bubble, actions)
+    item.append(meta, body)
+    refs.teamChatMessages.append(item)
+  })
+  if (scrollToBottom) {
+    refs.teamChatMessages.scrollTop = refs.teamChatMessages.scrollHeight
+  }
+}
+
+function createOptimisticTeamChatMessage(content) {
+  const displayName = state.currentUser?.display_name || state.currentUser?.username || "我"
+  state.teamChatLocalMessageSeq += 1
+  return {
+    id: -state.teamChatLocalMessageSeq,
+    client_id: `local-${Date.now()}-${state.teamChatLocalMessageSeq}`,
+    room_key: currentTeamChatRoomKey(),
+    room_type: state.teamChatRoom.type,
+    sender_user_id: state.currentUser?.id || 0,
+    sender_type: "user",
+    sender_name: displayName,
+    content,
+    mentions: [],
+    created_at: new Date().toISOString(),
+    pending: true,
+  }
+}
+
+function replaceOptimisticTeamChatMessage(clientId, serverMessages = []) {
+  if (!clientId) {
+    mergeTeamChatMessages(serverMessages)
+    return
+  }
+  const withoutPending = state.teamChatMessages.filter((message) => message.client_id !== clientId)
+  state.teamChatMessages = withoutPending
+  mergeTeamChatMessages(serverMessages.map((message) => ({ ...message, client_id: clientId })))
+}
+
+function currentTeamChatRoomKey() {
+  if (state.teamChatRoom.type === "team") {
+    return state.teamChatGroup.roomKey || ""
+  }
+  if (state.teamChatRoom.type === "bot") {
+    return `bot:${state.currentUser?.id || 0}`
+  }
+  const currentUserId = Number(state.currentUser?.id || 0)
+  const recipientId = Number(state.teamChatRoom.recipientUserId || 0)
+  const [low, high] = [currentUserId, recipientId].sort((left, right) => left - right)
+  return low && high ? `dm:${low}:${high}` : ""
+}
+
+function scheduleTeamChatFastPolling() {
+  state.teamChatFastPollRemaining = TEAM_CHAT_FAST_POLL_LIMIT
+}
+
+function getTeamChatMessageById(messageId) {
+  return state.teamChatMessages.find((message) => String(message.id) === String(messageId)) || null
+}
+
+function createTeamChatMessageMenu(message) {
+  const menu = document.createElement("div")
+  menu.className = "team-chat-message-menu"
+  menu.setAttribute("role", "menu")
+  const actions = [
+    ["copy", "复制", () => copyTeamChatMessage(message)],
+    ["quote", "引用", () => quoteTeamChatMessage(message)],
+  ]
+  if (isOwnTeamChatMessage(message)) {
+    actions.push(["recall", "撤回", jokeRecallTeamChatMessage])
+  }
+  actions.forEach(([action, label, handler]) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.setAttribute("role", "menuitem")
+    button.dataset.action = action
+    button.textContent = label
+    button.addEventListener("click", (event) => {
+      event.stopPropagation()
+      closeTeamChatMessageMenu()
+      handler()
+    })
+    menu.append(button)
+  })
+  return menu
+}
+
+function openTeamChatMessageMenu(messageId) {
+  if (!getTeamChatMessageById(messageId)) {
+    return
+  }
+  state.teamChatOpenMenuId = String(state.teamChatOpenMenuId) === String(messageId) ? null : messageId
+  renderTeamChatMessages({ scrollToBottom: false })
+}
+
+function closeTeamChatMessageMenu() {
+  if (!state.teamChatOpenMenuId) {
+    return
+  }
+  state.teamChatOpenMenuId = null
+  renderTeamChatMessages({ scrollToBottom: false })
+}
+
+async function copyTeamChatMessage(message) {
+  const content = message?.content || ""
+  if (!content) {
+    setStatusMessage("这条消息没有可复制的内容。")
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(content)
+    setStatusMessage("消息已复制。")
+  } catch {
+    setTeamChatStatus("浏览器不允许复制到剪贴板。", true)
+  }
+}
+
+function summarizeTeamChatQuote(message) {
+  const text = String(message?.content || "").replace(/\s+/g, " ").trim()
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text
+}
+
+function quoteTeamChatMessage(message) {
+  if (!message) {
+    return
+  }
+  state.teamChatQuotedMessage = {
+    id: message.id,
+    senderName: message.sender_name || (message.sender_type === "bot" ? "GPT-BOT" : "用户"),
+    content: summarizeTeamChatQuote(message),
+  }
+  renderTeamChatQuotePreview()
+  setStatusMessage("已引用这条消息。")
+  refs.teamChatMessageInput?.focus()
+}
+
+function clearTeamChatQuote() {
+  state.teamChatQuotedMessage = null
+  renderTeamChatQuotePreview()
+}
+
+function renderTeamChatQuotePreview() {
+  const quoted = state.teamChatQuotedMessage
+  refs.teamChatQuotePreview?.classList.toggle("hidden", !quoted)
+  if (refs.teamChatQuoteAuthor) {
+    refs.teamChatQuoteAuthor.textContent = quoted ? `引用 ${quoted.senderName}` : ""
+  }
+  if (refs.teamChatQuoteText) {
+    refs.teamChatQuoteText.textContent = quoted?.content || ""
+  }
+}
+
+function formatTeamChatOutgoingContent(content) {
+  const quoted = state.teamChatQuotedMessage
+  if (!quoted) {
+    return content
+  }
+  return `引用 ${quoted.senderName}：${quoted.content}\n\n${content}`.slice(0, TEAM_CHAT_MAX_MESSAGE_LENGTH)
+}
+
+function jokeRecallTeamChatMessage() {
+  setTeamChatStatus("逗你的，撤回不了。")
+}
+
+function formatTeamChatTime(value) {
+  if (!value) {
+    return ""
+  }
+  const normalized = String(value).endsWith("Z") ? value : `${value}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) {
+    return ""
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+function teamChatInputPlaceholder() {
+  if (state.teamChatRoom.type === "bot") {
+    return "向 GPT-BOT 提问，例如：这张海报怎么优化？"
+  }
+  if (state.teamChatRoom.type === "dm") {
+    return `发给 ${state.teamChatRoom.title || "对方"}`
+  }
+  return "输入群消息，可以 @GPT-BOT"
+}
+
+function updateTeamChatRoomHeader() {
+  const fallbackTitle = state.teamChatRoom.type === "team" ? teamChatGroupDisplayTitle() : "部门群"
+  const fallbackMeta = state.teamChatRoom.type === "team" ? teamChatGroupDisplayMeta() : state.teamChatGroup.subtitle
+  if (refs.teamChatRoomTitle) {
+    refs.teamChatRoomTitle.textContent = state.teamChatRoom.title || fallbackTitle
+  }
+  if (refs.teamChatRoomMeta) {
+    refs.teamChatRoomMeta.textContent = state.teamChatRoom.meta || fallbackMeta || "部门群"
+  }
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.placeholder = teamChatInputPlaceholder()
+  }
+  renderTeamChatMembers()
+  renderTeamChatGroupMembers()
+  refs.teamChatGroupMemberPanel?.classList.toggle("hidden", state.teamChatRoom.type !== "team")
+  refs.teamChatMain?.classList.toggle("without-member-panel", state.teamChatRoom.type !== "team")
+  renderTeamChatGroupContextDisclosure()
+}
+
+function setTeamChatStatus(message = "", isError = false) {
+  if (!refs.teamChatStatus) {
+    return
+  }
+  refs.teamChatStatus.textContent = message
+  refs.teamChatStatus.classList.toggle("is-error", Boolean(isError))
+}
+
+function setTeamChatSending(isSending) {
+  state.teamChatSending = Boolean(isSending)
+  if (refs.sendTeamChatButton) {
+    refs.sendTeamChatButton.disabled = isSending
+    refs.sendTeamChatButton.textContent = isSending ? "发送中" : "发送"
+  }
+}
+
+function restoreTeamChatDraft(draftContent, draftQuote) {
+  if (refs.teamChatMessageInput && !refs.teamChatMessageInput.value.trim()) {
+    refs.teamChatMessageInput.value = draftContent
+  }
+  if (!state.teamChatQuotedMessage && draftQuote) {
+    state.teamChatQuotedMessage = draftQuote
+    renderTeamChatQuotePreview()
+  }
+}
+
+async function refreshTeamChatMembers() {
+  if (!state.currentUser || !refs.teamChatMembers) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/members", { cache: "no-store" })
+    if (!response.ok) {
+      setTeamChatStatus(data.error || "成员列表读取失败", true)
+      return
+    }
+    state.teamChatGroup = normalizeTeamChatGroup(data.group || state.teamChatGroup)
+    const allMembers = Array.isArray(data.members) ? data.members : []
+    state.teamChatBot = data.bot || allMembers.find((member) => member.type === "bot") || null
+    state.teamChatHumanMembers = Array.isArray(data.human_members)
+      ? data.human_members
+      : allMembers.filter((member) => member.type !== "bot")
+    state.teamChatMembers = allMembers.length ? allMembers : [state.teamChatBot, ...state.teamChatHumanMembers].filter(Boolean)
+    state.teamChatGroup = {
+      ...state.teamChatGroup,
+      memberCount: Number(data.group?.member_count || state.teamChatHumanMembers.length || 0),
+    }
+    hydrateTeamChatRecentDmsFromMembers()
+    saveTeamChatRecentDms()
+    if (state.teamChatRoom.type === "team") {
+      state.teamChatRoom = {
+        ...state.teamChatRoom,
+        title: teamChatGroupDisplayTitle(),
+        meta: teamChatGroupDisplayMeta(),
+      }
+    }
+    renderTeamChatMembers()
+    renderTeamChatGroupMembers()
+  } catch {
+    setTeamChatStatus("成员列表暂时不可用", true)
+  }
+}
+
+async function refreshTeamChatMessages({ append = false } = {}) {
+  if (!state.currentUser || !refs.teamChatMessages) {
+    return
+  }
+  const params = teamChatRoomParams()
+  if (append && state.teamChatLastMessageId) {
+    params.set("after_id", String(state.teamChatLastMessageId))
+  }
+  try {
+    const { response, data } = await fetchJSON(`/api/team-chat/messages?${params.toString()}`, { cache: "no-store" })
+    if (!response.ok) {
+      setTeamChatStatus(data.error || "消息读取失败", true)
+      return
+    }
+    const messages = Array.isArray(data.messages) ? data.messages : []
+    mergeTeamChatMessages(messages, { replace: !append })
+    renderTeamChatMessages({ scrollToBottom: messages.length > 0 || !append })
+    if (!refs.teamChatModal?.classList.contains("hidden")) {
+      await markCurrentTeamChatRead()
+    }
+  } catch {
+    setTeamChatStatus("消息读取失败", true)
+  }
+}
+
+async function markCurrentTeamChatRead() {
+  if (!state.currentUser || !state.teamChatLastMessageId) {
+    return
+  }
+  try {
+    await fetchJSON("/api/team-chat/read", {
+      method: "POST",
+      body: JSON.stringify(teamChatReadPayload()),
+    })
+    await refreshTeamChatUnread()
+  } catch {
+    // Best effort only; unread can recover on next poll.
+  }
+}
+
+async function refreshTeamChatUnread() {
+  if (!state.currentUser || !refs.teamChatButton) {
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/unread", { cache: "no-store" })
+    if (response.ok) {
+      updateTeamChatUnreadBadge(data.unread?.total || 0)
+    }
+  } catch {
+    // Keep the previous badge state.
+  }
+}
+
+function startTeamChatPolling() {
+  stopTeamChatPolling()
+  state.teamChatUnreadTimer = window.setInterval(refreshTeamChatUnread, 15000)
+  let regularPollTicks = 0
+  state.teamChatPollTimer = window.setInterval(() => {
+    if (!refs.teamChatModal?.classList.contains("hidden")) {
+      if (state.teamChatFastPollRemaining > 0) {
+        state.teamChatFastPollRemaining -= 1
+        void refreshTeamChatMessages({ append: true })
+        return
+      }
+      regularPollTicks += 1
+      if (regularPollTicks >= 5) {
+        regularPollTicks = 0
+        void refreshTeamChatMessages({ append: true })
+      }
+    }
+  }, 1500)
+}
+
+function stopTeamChatPolling() {
+  if (state.teamChatUnreadTimer) {
+    window.clearInterval(state.teamChatUnreadTimer)
+    state.teamChatUnreadTimer = null
+  }
+  if (state.teamChatPollTimer) {
+    window.clearInterval(state.teamChatPollTimer)
+    state.teamChatPollTimer = null
+  }
+}
+
+async function switchTeamChatRoom(nextRoom) {
+  state.teamChatRoom = {
+    type: nextRoom.type || "team",
+    recipientUserId: nextRoom.recipientUserId || null,
+    title: nextRoom.title || (nextRoom.type === "team" ? teamChatGroupDisplayTitle() : "部门群"),
+    meta: nextRoom.meta || (nextRoom.type === "team" ? teamChatGroupDisplayMeta() : state.teamChatGroup.subtitle) || "部门群",
+  }
+  state.teamChatMessages = []
+  state.teamChatLastMessageId = 0
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  updateTeamChatRoomHeader()
+  renderTeamChatMessages()
+  await refreshTeamChatGroupContext()
+  setTeamChatStatus("读取消息中")
+  await refreshTeamChatMessages()
+  setTeamChatStatus("")
+  refs.teamChatMessageInput?.focus()
+}
+
+function switchTeamChatDirectMember(member) {
+  if (!member || member.type === "bot") {
+    return switchTeamChatRoom({ type: "bot", recipientUserId: null, title: "GPT-BOT", meta: "AI 创意与图片质量助手。" })
+  }
+  rememberTeamChatRecentDm(member)
+  renderTeamChatMembers()
+  return switchTeamChatRoom({
+    type: "dm",
+    recipientUserId: Number(member.id || 0),
+    title: teamChatDisplayName(member),
+    meta: `私聊 @${member.username || teamChatDisplayName(member)}`,
+  })
+}
+
+async function openTeamChatModal() {
+  if (!state.currentUser) {
+    return
+  }
+  refs.teamChatModal?.classList.remove("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open", "chat-open")
+  setTeamChatStatus("读取中")
+  await refreshTeamChatMembers()
+  updateTeamChatRoomHeader()
+  await refreshTeamChatGroupContext()
+  await refreshTeamChatMessages()
+  setTeamChatStatus("")
+  refs.teamChatMessageInput?.focus()
+}
+
+function closeTeamChatModal() {
+  clearTeamChatQuote()
+  state.teamChatOpenMenuId = null
+  refs.teamChatModal?.classList.add("hidden")
+  refs.teamChatModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open", "chat-open")
+  void refreshTeamChatUnread()
+}
+
+async function submitTeamChatMessage(event) {
+  event.preventDefault()
+  if (state.teamChatSending) {
+    return
+  }
+  const content = refs.teamChatMessageInput?.value.trim() || ""
+  if (!content) {
+    setTeamChatStatus("请输入消息", true)
+    return
+  }
+  const outgoingContent = formatTeamChatOutgoingContent(content)
+  const draftContent = refs.teamChatMessageInput?.value || ""
+  const draftQuote = state.teamChatQuotedMessage
+  if (refs.teamChatMessageInput) {
+    refs.teamChatMessageInput.value = ""
+  }
+  clearTeamChatQuote()
+  const optimistic = createOptimisticTeamChatMessage(outgoingContent)
+  mergeTeamChatMessages([optimistic])
+  renderTeamChatMessages()
+  setTeamChatSending(true)
+  setTeamChatStatus("发送中")
+  try {
+    const { response, data } = await fetchJSON("/api/team-chat/messages", {
+      method: "POST",
+      body: JSON.stringify(teamChatSendPayload(outgoingContent)),
+    })
+    if (!response.ok) {
+      state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
+      renderTeamChatMessages()
+      restoreTeamChatDraft(draftContent, draftQuote)
+      setTeamChatStatus(data.error || "发送失败", true)
+      return
+    }
+    const messages = Array.isArray(data.messages) ? data.messages : []
+    replaceOptimisticTeamChatMessage(optimistic.client_id, messages)
+    renderTeamChatMessages()
+    await markCurrentTeamChatRead()
+    if (data.bot_reply_pending) {
+      scheduleTeamChatFastPolling()
+      void refreshTeamChatMessages({ append: true })
+      setTeamChatStatus("已发送，GPT-BOT 正在思考")
+    } else {
+      setTeamChatStatus("已发送")
+    }
+  } catch {
+    state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
+    renderTeamChatMessages()
+    restoreTeamChatDraft(draftContent, draftQuote)
+    setTeamChatStatus("网络连接错误", true)
+  } finally {
+    setTeamChatSending(false)
+    refs.teamChatMessageInput?.focus()
+  }
 }
 
 async function submitChangePassword(event) {
@@ -1336,6 +3921,11 @@ async function submitAuthForm(event) {
   const username = refs.authUsernameInput.value.trim()
   const password = refs.authPasswordInput.value
   const endpoint = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login"
+  const authPayload = { username, password }
+  if (state.authMode === "register") {
+    authPayload.company = refs.authCompanyInput?.value || "6renyou"
+    authPayload.department = refs.authDepartmentInput?.value || "PD & OPS"
+  }
   refs.authError.textContent = ""
   refs.loginAuthButton.disabled = true
   if (refs.registerAuthButton) {
@@ -1344,7 +3934,7 @@ async function submitAuthForm(event) {
   try {
     const { response, data } = await fetchJSON(endpoint, {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(authPayload),
     })
     if (!response.ok) {
       refs.authError.textContent = data.error || "认证失败"
@@ -1394,7 +3984,7 @@ async function submitPasswordResetRequest(event) {
       return
     }
     if (refs.passwordResetRequestStatus) {
-      refs.passwordResetRequestStatus.textContent = data.message || "申请已提交，请联系管理员。"
+      refs.passwordResetRequestStatus.textContent = data.message || "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到申请。"
       refs.passwordResetRequestStatus.classList.remove("is-error")
     }
   } catch {
@@ -1405,6 +3995,71 @@ async function submitPasswordResetRequest(event) {
   } finally {
     if (refs.submitPasswordResetRequestButton) {
       refs.submitPasswordResetRequestButton.disabled = false
+    }
+  }
+}
+
+async function submitPasswordResetConfirm(event) {
+  event.preventDefault()
+  const password = refs.passwordResetNewPasswordInput?.value || ""
+  const confirmed = refs.passwordResetConfirmPasswordInput?.value || ""
+  if (!state.passwordResetToken) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "重置链接无效，请重新申请。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (!password || password.length < 8) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "新密码至少需要 8 位。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (password !== confirmed) {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "两次输入的新密码不一致。"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+    return
+  }
+  if (refs.passwordResetConfirmStatus) {
+    refs.passwordResetConfirmStatus.textContent = ""
+    refs.passwordResetConfirmStatus.classList.remove("is-error")
+  }
+  if (refs.submitPasswordResetConfirmButton) {
+    refs.submitPasswordResetConfirmButton.disabled = true
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token: state.passwordResetToken, password }),
+    })
+    if (!response.ok) {
+      if (refs.passwordResetConfirmStatus) {
+        refs.passwordResetConfirmStatus.textContent = data.error || "重置链接无效或已过期，请重新申请。"
+        refs.passwordResetConfirmStatus.classList.add("is-error")
+      }
+      return
+    }
+    state.passwordResetToken = ""
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = data.message || "密码已重置，请使用新密码登录。"
+      refs.passwordResetConfirmStatus.classList.remove("is-error")
+    }
+    const cleanUrl = new URL(window.location.href)
+    cleanUrl.searchParams.delete("reset_token")
+    window.history.replaceState(null, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`)
+    window.setTimeout(() => enterAuthGate("login", "密码已重置，请使用新密码登录。"), 900)
+  } catch {
+    if (refs.passwordResetConfirmStatus) {
+      refs.passwordResetConfirmStatus.textContent = "网络连接错误"
+      refs.passwordResetConfirmStatus.classList.add("is-error")
+    }
+  } finally {
+    if (refs.submitPasswordResetConfirmButton) {
+      refs.submitPasswordResetConfirmButton.disabled = false
     }
   }
 }
@@ -1574,6 +4229,13 @@ function createWorkspaceSnapshot() {
       outputCompression: refs.outputCompressionInput.value,
       moderation: refs.moderationSelect.value,
       generateSampleCount: refs.generateSampleCountInput.value,
+      creativeBrief: creativeBriefSnapshot(),
+      itineraryTitle: refs.itineraryTitleInput?.value || "",
+      itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
+      itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
+      itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+      itineraryDescription: refs.itineraryDescriptionInput?.value || "",
+      itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
@@ -1649,6 +4311,25 @@ async function restoreWorkspaceState() {
   refs.outputCompressionInput.value = forms.outputCompression || "100"
   refs.moderationSelect.value = forms.moderation || "auto"
   refs.generateSampleCountInput.value = forms.generateSampleCount || ""
+  restoreCreativeBrief(forms.creativeBrief || {})
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = forms.itineraryTitle || refs.itineraryTitleInput.value
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = forms.itinerarySubtitle || refs.itinerarySubtitleInput.value
+  }
+  if (refs.itinerarySizeSelect) {
+    refs.itinerarySizeSelect.value = forms.itinerarySize || "1792x1792"
+  }
+  if (refs.itineraryThemeSelect) {
+    refs.itineraryThemeSelect.value = forms.itineraryTheme || "comic"
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = forms.itineraryDescription || forms.itineraryStops || refs.itineraryDescriptionInput.value || AI_ITINERARY_EXAMPLE
+  }
+  if (refs.itineraryLogoEnabled) {
+    refs.itineraryLogoEnabled.checked = forms.itineraryLogoEnabled !== false
+  }
   syncSizePresetFromInputs()
 
   if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
@@ -1871,7 +4552,7 @@ function updateGenerateIntentUI() {
     ? "基于当前结果延展"
     : hasReference
       ? "参考图生成"
-      : "开始生成"
+      : "开始海报生成"
   updateGenerateSampleCountUI()
 }
 
@@ -1901,8 +4582,10 @@ function updateWorkflowStatus() {
   const hasResult = Boolean(state.resultPreview?.src)
   const hasSource = Boolean(getAssetDisplaySrc(state.displayedSourceImage))
   refs.resultActions?.classList.toggle("hidden", !hasResult)
+  refs.resultHoverActions?.classList.toggle("hidden", !hasResult)
   refs.comparisonGrid?.classList.toggle("single-result", !hasSource)
   refs.sourcePreviewCard?.classList.toggle("hidden", !hasSource)
+  updateResultActionSurface()
 }
 
 function appendPromptSnippet(target, snippet) {
@@ -2064,7 +4747,7 @@ function updateImageTransportUI() {
   if (refs.imageTransportHint) {
     refs.imageTransportHint.textContent = isResponses
       ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.5），用于对接不支持 Images Edit 的兼容代理。"
-      : "编辑、参考图、延展默认走 OpenAI Images API + gpt-image-2，更稳定也更便宜。"
+      : "编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。"
   }
   const editFieldset = refs.responsesUrlInput?.closest("label")
   const modelFieldset = refs.responsesModelInput?.closest("label")
@@ -2113,6 +4796,12 @@ function shouldUseCompanyLogo() {
 function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
   const basePrompt = String(prompt || "").trim()
   return logoRequested ? `${basePrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : basePrompt
+}
+
+function withEditPreservePrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+  const basePrompt = String(prompt || "").trim()
+  const logoInstruction = logoRequested ? COMPANY_LOGO_LAYOUT_PROMPT : ""
+  return [basePrompt, EDIT_PRESERVE_PROMPT, logoInstruction].filter(Boolean).join("\n\n")
 }
 
 function updateGenerateSampleCountUI() {
@@ -2307,6 +4996,8 @@ function currentFormSnapshot() {
     activeMode: state.activeMode,
     generateIntent: state.generateIntent,
     imageTransport: getImageTransport(),
+    promptMode: state.promptMode,
+    promptRecipeId: refs.promptRecipeSelect?.value || state.selectedRecipeId || "",
     generatePrompt: refs.generatePromptInput.value,
     generateModel: refs.generateModelInput.value,
     generateSize: getSizeSnapshotValue(),
@@ -2316,6 +5007,13 @@ function currentFormSnapshot() {
     outputCompression: refs.outputCompressionInput.value,
     moderation: refs.moderationSelect.value,
     generateSampleCount: refs.generateSampleCountInput.value,
+    creativeBrief: creativeBriefSnapshot(),
+    itineraryTitle: refs.itineraryTitleInput?.value || "",
+    itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
+    itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
+    itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
+    itineraryDescription: refs.itineraryDescriptionInput?.value || "",
+    itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
     logoOverlayEnabled: refs.logoOverlayEnabled.checked,
     editPrompt: refs.editPromptInput.value,
     editModel: refs.editModelInput.value,
@@ -2337,6 +5035,14 @@ function applyFormSnapshot(snapshot) {
     return
   }
   setImageTransport(snapshot.imageTransport || "images")
+  state.promptMode = snapshot.promptMode || "free"
+  refs.promptModeInputs.forEach((input) => {
+    input.checked = input.value === state.promptMode
+  })
+  state.selectedRecipeId = snapshot.promptRecipeId || ""
+  if (refs.promptRecipeSelect) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
   refs.generatePromptInput.value = snapshot.generatePrompt || ""
   refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
   setGenerateSize(snapshot.generateSize || "auto")
@@ -2346,6 +5052,25 @@ function applyFormSnapshot(snapshot) {
   refs.outputCompressionInput.value = snapshot.outputCompression || "100"
   refs.moderationSelect.value = snapshot.moderation || "auto"
   refs.generateSampleCountInput.value = snapshot.generateSampleCount || ""
+  restoreCreativeBrief(snapshot.creativeBrief || {})
+  if (refs.itineraryTitleInput) {
+    refs.itineraryTitleInput.value = snapshot.itineraryTitle || refs.itineraryTitleInput.value
+  }
+  if (refs.itinerarySubtitleInput) {
+    refs.itinerarySubtitleInput.value = snapshot.itinerarySubtitle || refs.itinerarySubtitleInput.value
+  }
+  if (refs.itinerarySizeSelect) {
+    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "1792x1792"
+  }
+  if (refs.itineraryThemeSelect) {
+    refs.itineraryThemeSelect.value = snapshot.itineraryTheme || "comic"
+  }
+  if (refs.itineraryDescriptionInput) {
+    refs.itineraryDescriptionInput.value = snapshot.itineraryDescription || snapshot.itineraryStops || refs.itineraryDescriptionInput.value || AI_ITINERARY_EXAMPLE
+  }
+  if (refs.itineraryLogoEnabled) {
+    refs.itineraryLogoEnabled.checked = snapshot.itineraryLogoEnabled !== false
+  }
   refs.logoOverlayEnabled.checked = snapshot.logoOverlayEnabled !== false
   refs.editPromptInput.value = snapshot.editPrompt || ""
   refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
@@ -2353,6 +5078,7 @@ function applyFormSnapshot(snapshot) {
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateLogoControlUI()
   updatePromptCounters()
+  updatePromptModeUI()
 }
 
 function rememberRegenerationRequest(kind, snapshot) {
@@ -2373,6 +5099,8 @@ async function rerunLastGeneration() {
     applyFormSnapshot(snapshot)
     if (kind === "edit") {
       await submitEdit()
+    } else if (kind === "itinerary") {
+      await submitAIItineraryMap()
     } else {
       await submitGenerate()
     }
@@ -2451,7 +5179,7 @@ function progressHintForPhase(phase, label) {
     return "请求已交给本地代理，正在连接上游接口。"
   }
   if (phase === "waiting") {
-    return "上游正在生成图像，较大尺寸通常需要更久。"
+    return UPSTREAM_RETRY_HINT
   }
   if (phase === "receiving") {
     return "上游已响应，正在解析结果并保存到本地。"
@@ -2482,10 +5210,35 @@ function renderProgress() {
   refs.resultTiming.textContent = `请求进行中 ${(elapsedMs / 1000).toFixed(1)}s`
   refs.progressStageLabel.textContent = state.progressLabel || "处理中"
   refs.progressHint.textContent = hint
+  if (state.progressPhase === "waiting") {
+    refs.resultPreviewEmpty.textContent = hint
+  }
   refs.generationOverlayTitle.textContent = state.progressLabel || "处理中"
   refs.generationOverlaySubtitle.textContent = hint
+  renderGenerationOverlaySteps(state.progressPhase)
   refs.generationOrbit?.style.setProperty("--progress-degrees", `${(progress * 3.6).toFixed(1)}deg`)
   refs.generationOrbit?.setAttribute("data-progress", `${Math.round(progress)}%`)
+}
+
+function renderGenerationOverlaySteps(activePhase = state.progressPhase) {
+  const order = ["preparing", "uploading", "waiting", "receiving"]
+  const activeIndex = Math.max(0, order.indexOf(activePhase))
+  refs.generationOverlaySteps?.querySelectorAll("[data-progress-step]").forEach((item) => {
+    const step = item.dataset.progressStep || ""
+    const stepIndex = order.indexOf(step)
+    item.classList.toggle("active", stepIndex === activeIndex || (step === "waiting" && activePhase === "uploading"))
+    item.classList.toggle("done", stepIndex >= 0 && stepIndex < activeIndex)
+  })
+}
+
+function updateGenerationOverlay(title, subtitle, phase = state.progressPhase) {
+  if (refs.generationOverlayTitle) {
+    refs.generationOverlayTitle.textContent = title
+  }
+  if (refs.generationOverlaySubtitle) {
+    refs.generationOverlaySubtitle.textContent = subtitle
+  }
+  renderGenerationOverlaySteps(phase)
 }
 
 function setProgressPhase(phase, label) {
@@ -2494,8 +5247,7 @@ function setProgressPhase(phase, label) {
   }
   state.progressPhase = phase
   state.progressLabel = label
-  refs.generationOverlayTitle.textContent = label
-  refs.generationOverlaySubtitle.textContent = progressHintForPhase(phase, label)
+  updateGenerationOverlay(label, progressHintForPhase(phase, label), phase)
   renderProgress()
 }
 
@@ -2515,9 +5267,25 @@ function startProgress(label, options = {}) {
   refs.progressElapsed.textContent = "0.0s"
   refs.progressStageLabel.textContent = label
   refs.progressHint.textContent = progressHintForPhase("preparing", label)
-  refs.generationOverlayTitle.textContent = label
-  refs.generationOverlaySubtitle.textContent = progressHintForPhase("preparing", label)
+  updateGenerationOverlay(label, progressHintForPhase("preparing", label), "preparing")
   state.progressTimer = window.setInterval(renderProgress, 100)
+}
+
+function setPendingResultFailure(message, details = "") {
+  const safeMessage = String(message || "生成失败，请稍后再试。").trim()
+  const safeDetails = String(details || "").trim()
+  refs.resultPreviewLabel.textContent = "生成失败"
+  refs.resultImage.removeAttribute("src")
+  refs.resultImage.classList.remove("visible")
+  refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.add("failure")
+  refs.resultPreviewEmpty.textContent = safeMessage
+  refs.resultTiming.textContent = "已多次尝试仍未成功"
+  refs.resultStorage.textContent = safeDetails ? "可展开错误详情查看技术信息。" : ""
+  updateGenerationOverlay("生成失败", safeMessage, "receiving")
+  refs.requestProgressFill.style.width = "100%"
+  refs.generationOrbit?.style.setProperty("--progress-degrees", "360deg")
+  refs.generationOrbit?.setAttribute("data-progress", "失败")
 }
 
 function stopProgress({ cancelled = false } = {}) {
@@ -2539,6 +5307,7 @@ function stopProgress({ cancelled = false } = {}) {
     refs.requestProgressFill.style.width = "0%"
     refs.generationOrbit?.style.setProperty("--progress-degrees", "0deg")
     refs.generationOrbit?.setAttribute("data-progress", "0%")
+    renderGenerationOverlaySteps("idle")
   }, 420)
 }
 
@@ -2552,6 +5321,12 @@ function setBusy(isBusy, label, options = {}) {
   refs.editButton.disabled = isBusy
   refs.generateTab.disabled = isBusy
   refs.editTab.disabled = isBusy
+  if (refs.itineraryTab) {
+    refs.itineraryTab.disabled = isBusy
+  }
+  if (refs.renderItineraryMapButton) {
+    refs.renderItineraryMapButton.disabled = isBusy
+  }
   refs.cancelRequestButton?.classList.toggle("hidden", !isBusy)
   refs.cancelRequestButton.disabled = !isBusy
   refs.requestStatus.textContent = label
@@ -2845,6 +5620,18 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
     refs.editModelInput.value = state.lastResultModel
   }
 
+  if (focus && !refs.editPromptInput.value.trim()) {
+    refs.editPromptInput.value = [
+      "请基于当前图做精细修改：",
+      "- 只修改我接下来明确说明的部分；",
+      "- 保留现有构图、路线、地点、日期、距离标注、交通工具图标、文字层级和整体风格；",
+      "- 保留 6 人游 LOGO 安全区，最终 LOGO 由程序使用官方 PNG 原样贴入，不要重绘或改造 LOGO。",
+      "",
+      "需要修改：",
+    ].join("\n")
+    updatePromptCounters()
+  }
+
   if (focus) {
     refs.editPromptInput.focus()
   }
@@ -2859,11 +5646,13 @@ function setMode(mode, options = {}) {
 
   refs.generateTab.classList.toggle("active", mode === "generate")
   refs.editTab.classList.toggle("active", mode === "edit")
+  refs.itineraryTab?.classList.toggle("active", mode === "itinerary")
   refs.navModeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === mode)
   })
   refs.generatePanel.classList.toggle("hidden", mode !== "generate")
   refs.editPanel.classList.toggle("hidden", mode !== "edit")
+  refs.itineraryPanel?.classList.toggle("hidden", mode !== "itinerary")
   refs.sourcePreviewCard.classList.toggle("subtle", mode !== "edit")
 
   if (mode === "edit" && previousMode !== "edit" && options.autoLoadLatest !== false && state.lastResultImage) {
@@ -2877,7 +5666,6 @@ function setMode(mode, options = {}) {
   if (mode === "edit" && !state.displayedSourceImage && getAssetDisplaySrc(state.editImage)) {
     applySourcePreview(state.editImage, "输入图")
   }
-
   updateGenerateIntentUI()
   updateEditSourceUI()
   updatePreviewAvailability()
@@ -2901,9 +5689,9 @@ function updatePreviewAvailability() {
   refs.resultPreviewTrigger.classList.toggle("preview-frame-clickable", hasResult)
   refs.previewCompareButton.disabled = !canComparePreviews()
   refs.previewCompareModeButton.disabled = !canComparePreviews()
-  refs.openResultPreviewButton.disabled = !hasResult
   refs.continueEditButton.disabled = !state.lastResultImage
   refs.startVariantButton.disabled = !state.lastResultImage
+  refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
   updateFeedbackPanelVisibility()
   updateWorkflowStatus()
 }
@@ -2938,6 +5726,16 @@ function applyPreviewZoom() {
   refs.previewSingleImage.classList.toggle("is-zoomed", zoom.scale > 1.01)
   refs.previewZoomOutButton.disabled = zoom.scale <= 1.01
   refs.previewZoomResetButton.disabled = zoom.scale <= 1.01 && zoom.x === 0 && zoom.y === 0
+}
+
+function isLikelyLongImageAsset(asset = state.lastResultImage) {
+  const width = Number(asset?.width || asset?.saved_image_width || 0)
+  const height = Number(asset?.height || asset?.saved_image_height || 0)
+  if (width > 0 && height > 0) {
+    return height / width >= 1.45 || width / height >= 1.45
+  }
+  const name = String(asset?.name || asset?.saved_image_name || "")
+  return name.includes("1088x2240") || name.includes("2160x3840")
 }
 
 function changePreviewZoom(delta) {
@@ -3025,8 +5823,10 @@ function renderPreviewModal() {
   refs.previewComparePane.classList.toggle("hidden", previewMode !== "compare")
 
   if (previewMode === "single" && singleItem) {
-    refs.previewModalTitle.textContent = `${singleItem.label}预览`
-    refs.previewModalMeta.textContent = singleItem.meta
+    refs.previewModalTitle.textContent = state.preview.mode === "cinema" ? "长图检查" : `${singleItem.label}预览`
+    refs.previewModalMeta.textContent = state.preview.mode === "cinema"
+      ? `${singleItem.meta || "输出图"} · 可放大、拖拽检查人物、文字和 LOGO 拼接。`
+      : singleItem.meta
     refs.previewSingleImage.src = singleItem.src
     applyPreviewZoom()
     return
@@ -3047,10 +5847,14 @@ function openPreview(target = "result", mode = "single") {
   state.preview.target = target
   state.preview.mode = mode
   resetPreviewZoom()
+  if (mode === "cinema") {
+    state.previewZoom.scale = isLikelyLongImageAsset() ? 1.35 : 1.2
+  }
   renderPreviewModal()
   refs.previewModal.classList.remove("hidden")
   refs.previewModal.setAttribute("aria-hidden", "false")
   document.body.classList.add("modal-open")
+  applyPreviewZoom()
 }
 
 function clearResult() {
@@ -3058,6 +5862,7 @@ function clearResult() {
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
   refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.remove("failure")
   refs.resultPreviewEmpty.textContent = "生成或编辑成功后，这里会显示输出结果。"
   refs.resultPrompt.textContent = "还没有结果。"
   refs.resultMeta.textContent = ""
@@ -3068,7 +5873,6 @@ function clearResult() {
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
   setDownloadDisabled()
-  refs.openResultPreviewButton.disabled = true
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
     refs.feedbackReasonInput.value = ""
@@ -3093,6 +5897,8 @@ function clearResult() {
   state.lastFeedbackRating = null
   state.debugLines = []
   state.generateIntent = "fresh"
+  setGalleryEditorMeta(null)
+  updateOriginalDownloadButton(null)
 
   closePreview()
   renderRawResponsePreview()
@@ -3110,8 +5916,18 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
       ? "编辑中"
       : mode === "reference"
         ? "参考生成中"
-        : "生成中"
-  const metaLabel = mode === "variant" ? "延展" : mode === "edit" ? "编辑" : mode === "reference" ? "参考生成" : "生成"
+        : mode === "itinerary"
+          ? "行程路线生成中"
+          : "生成中"
+  const metaLabel = mode === "variant"
+    ? "延展"
+    : mode === "edit"
+      ? "编辑"
+      : mode === "reference"
+        ? "参考生成"
+        : mode === "itinerary"
+          ? "行程路线"
+          : "生成"
   const metaParts = [metaLabel, model]
 
   if (size) {
@@ -3125,6 +5941,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
   refs.resultPreviewEmpty.classList.remove("hidden")
+  refs.resultPreviewEmpty.classList.remove("failure")
   refs.resultPreviewEmpty.textContent = "请求已提交，正在等待上游返回新图。"
   refs.resultPrompt.textContent = prompt || "本次请求已提交。"
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
@@ -3160,15 +5977,41 @@ function candidateAsset(candidate, payload, index) {
   }
 }
 
-function setDownloadAvailable(href, filename) {
+function selectedResultCandidate() {
+  return state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0] || null
+}
+
+function originalCandidateDownloadSource(candidate = selectedResultCandidate()) {
+  const asset = candidate?.asset || {}
+  return {
+    href: asset.originalSavedUrl || asset.originalFileUrl || asset.originalDataUrl || candidate?.saved_image_url || candidateImageSource(candidate),
+    filename: imageDataUrlName(asset.name || candidate?.saved_image_name || "picgen-original.png", "original"),
+  }
+}
+
+function updateOriginalDownloadButton(candidate = selectedResultCandidate()) {
+  if (!refs.downloadOriginalButton) {
+    return
+  }
+  const source = originalCandidateDownloadSource(candidate)
+  refs.downloadOriginalButton.disabled = !source.href
+  refs.downloadOriginalButton.dataset.href = source.href || ""
+  refs.downloadOriginalButton.dataset.filename = source.filename || "picgen-original.png"
+}
+
+function setDownloadAvailable(href, filename, options = {}) {
   if (!refs.downloadButton) {
     return
   }
   refs.downloadButton.href = href
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
-  refs.downloadButton.textContent = "下载图像"
+  refs.downloadButton.classList.toggle("download-ready-logo", Boolean(options.logoReady))
+  refs.downloadButton.textContent = options.logoReady
+    ? "下载带 6 人游 LOGO 成品"
+    : "下载图像"
   refs.downloadButton.download = filename
+  updateOriginalDownloadButton(options.candidate)
 }
 
 function setDownloadDisabled(label = "下载图像") {
@@ -3179,11 +6022,24 @@ function setDownloadDisabled(label = "下载图像") {
   refs.downloadButton.setAttribute("aria-disabled", "true")
   refs.downloadButton.removeAttribute("href")
   refs.downloadButton.removeAttribute("download")
+  refs.downloadButton.classList.remove("download-ready-logo")
   refs.downloadButton.textContent = label
 }
 
 function setDownloadPendingLogo() {
-  setDownloadDisabled("成品保存中")
+  setDownloadDisabled("LOGO 成品保存中")
+}
+
+function updateResultActionSurface() {
+  const hasResult = Boolean(state.resultPreview?.src)
+  const hasImage = Boolean(state.lastResultImage)
+  refs.continueEditButton.disabled = !hasImage
+  refs.startVariantButton.disabled = !hasImage
+  refs.hoverContinueEditButton && (refs.hoverContinueEditButton.disabled = !hasImage)
+  refs.hoverVariantButton && (refs.hoverVariantButton.disabled = !hasImage)
+  refs.inspectLongImageButton && (refs.inspectLongImageButton.disabled = !hasResult)
+  refs.hoverShareButton && (refs.hoverShareButton.disabled = !selectedGeneratedImageId())
+  updateOriginalDownloadButton()
 }
 
 function selectResultCandidate(index, { persist = true } = {}) {
@@ -3205,6 +6061,10 @@ function selectResultCandidate(index, { persist = true } = {}) {
   setDownloadAvailable(
     candidate.saved_image_url || imageSource,
     candidate.saved_image_name || `picgen-${state.lastResultMode || "result"}-${index + 1}.png`,
+    {
+      candidate,
+      logoReady: Boolean(candidate.logo_overlay_applied || candidate.logo_final_persisted),
+    },
   )
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
@@ -3212,9 +6072,11 @@ function selectResultCandidate(index, { persist = true } = {}) {
   }
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
+  setGalleryEditorMeta(candidate)
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   updatePreviewAvailability()
+  updateResultActionSurface()
   if (persist) {
     scheduleWorkspacePersist()
   }
@@ -3273,6 +6135,10 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
   setDownloadAvailable(
     firstCandidate.saved_image_url || imageSource,
     firstCandidate.saved_image_name || `picgen-${payload.mode}-${Date.now()}.png`,
+    {
+      candidate: firstCandidate,
+      logoReady: Boolean(firstCandidate.logo_overlay_applied || firstCandidate.logo_final_persisted),
+    },
   )
 }
 
@@ -3292,6 +6158,7 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs) {
     applyPrimaryResultCandidate(selectedCandidate, payload, imageSource, durationMs)
     renderResultCandidates()
     updatePreviewAvailability()
+    updateResultActionSurface()
     refs.logoComposeStatus.textContent = selectedCandidate.logo_final_persisted ? "成品已保存" : "本地已贴图"
     scheduleWorkspacePersist()
   } catch (error) {
@@ -3333,7 +6200,9 @@ async function setResult(payload, durationMs, requestSource = null) {
       ? "编辑后"
       : payload.mode === "reference"
         ? "参考生成"
-        : "输出"
+        : payload.mode === "itinerary"
+          ? "行程路线"
+          : "输出"
   const displayedPrompt = payload.prompt || "结果已生成"
   state.lastResultPrompt = displayedPrompt
   refs.resultPrompt.textContent = displayedPrompt
@@ -3365,7 +6234,15 @@ async function setResult(payload, durationMs, requestSource = null) {
     }
   }
 
-  const metaLabel = payload.mode === "variant" ? "延展" : payload.mode === "edit" ? "编辑" : payload.mode === "reference" ? "参考生成" : "生成"
+  const metaLabel = payload.mode === "variant"
+    ? "延展"
+    : payload.mode === "edit"
+      ? "编辑"
+      : payload.mode === "reference"
+        ? "参考生成"
+        : payload.mode === "itinerary"
+          ? "行程路线"
+          : "生成"
   const metaParts = [metaLabel, payload.model]
   if (payload.transport === "responses-image") {
     metaParts.push("Responses")
@@ -3417,6 +6294,8 @@ async function setResult(payload, durationMs, requestSource = null) {
   }
   void checkCopyrightRisk(payload)
   void refreshUsageSummary()
+  void refreshGallery()
+  void refreshGenerationJobs()
 
   updateEditSourceUI()
   updateGenerateIntentUI()
@@ -3461,7 +6340,15 @@ function renderHistory() {
     top.className = "history-item-top"
 
     const mode = document.createElement("strong")
-    mode.textContent = item.mode === "variant" ? "延展" : item.mode === "edit" ? "编辑" : item.mode === "reference" ? "参考生成" : "生成"
+    mode.textContent = item.mode === "variant"
+      ? "延展"
+      : item.mode === "edit"
+        ? "编辑"
+        : item.mode === "reference"
+          ? "参考生成"
+          : item.mode === "itinerary"
+            ? "行程路线"
+            : "生成"
 
     const time = document.createElement("time")
     time.textContent = formatTimestamp(item.createdAt)
@@ -3477,7 +6364,17 @@ function renderHistory() {
     top.append(mode, time)
     button.append(top, prompt, meta)
     button.addEventListener("click", () => {
-      if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
+      if (item.mode === "itinerary") {
+        setMode("itinerary")
+        refs.itineraryTitleInput.value = item.itineraryTitle || item.prompt || refs.itineraryTitleInput.value
+        refs.itinerarySubtitleInput.value = item.itinerarySubtitle || refs.itinerarySubtitleInput.value
+        refs.itinerarySizeSelect.value = item.size || refs.itinerarySizeSelect.value
+        refs.itineraryThemeSelect.value = item.itineraryTheme || refs.itineraryThemeSelect.value
+        refs.itineraryDescriptionInput.value = item.itineraryDescription || item.prompt
+        refs.itineraryLogoEnabled.checked = item.logoRequested !== false
+        refs.generateModelInput.value = item.model || refs.generateModelInput.value
+        refs.itineraryDescriptionInput.focus()
+      } else if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
@@ -3609,6 +6506,7 @@ async function postJSON(url, payload, options = {}) {
     }
     const requestError = new Error(data.error || "请求失败")
     requestError.details = errorDetailsWithRequestId(data)
+    setPendingResultFailure(requestError.message, requestError.details)
     throw requestError
   }
 
@@ -4202,14 +7100,16 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   if (resetLog) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
-  const prompt = refs.generatePromptInput.value
+  const promptPlan = buildEffectiveGeneratePrompt()
+  const prompt = promptPlan.originalPrompt
+  const effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
+  const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
   let imageOptions
   let size
 
@@ -4337,7 +7237,9 @@ async function submitGenerate() {
 
   resetDebugLog("点击生成按钮：生成图片")
 
-  const prompt = refs.generatePromptInput.value
+  const promptPlan = buildEffectiveGeneratePrompt()
+  const prompt = promptPlan.originalPrompt
+  const effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
@@ -4345,7 +7247,7 @@ async function submitGenerate() {
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
   const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
-  const baseRequestPrompt = dualReference ? styleTransferPrompt(prompt) : prompt
+  const baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
   const requestPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
   const requiresReferenceTransport = referenceImages.length > 0
 
@@ -4431,6 +7333,10 @@ async function submitGenerate() {
           api_key: settings.apiKey,
           endpoint_url: settings.responsesUrl,
           prompt: requestPrompt,
+          original_prompt: prompt,
+          prompt_mode: promptPlan.promptMode,
+          recipe_id: promptPlan.recipe?.id || "",
+          recipe_version: promptPlan.recipe?.version || "",
           model: settings.responsesModel,
           mode: "reference",
           transport: "responses-image",
@@ -4450,6 +7356,10 @@ async function submitGenerate() {
           api_key: settings.apiKey,
           endpoint_url: settings.editUrl,
           prompt: requestPrompt,
+          original_prompt: prompt,
+          prompt_mode: promptPlan.promptMode,
+          recipe_id: promptPlan.recipe?.id || "",
+          recipe_version: promptPlan.recipe?.version || "",
           model: imageModel,
           mode: "reference",
           sample_count: referenceSampleCount,
@@ -4483,6 +7393,10 @@ async function submitGenerate() {
       api_key: settings.apiKey,
       endpoint_url: settings.generateUrl,
       prompt: requestPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
       model,
       sample_count: sampleCount,
       size,
@@ -4522,7 +7436,7 @@ async function submitEdit() {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
-  const requestPrompt = withLogoLayoutPrompt(prompt, logoRequested)
+  const requestPrompt = withEditPreservePrompt(prompt, logoRequested)
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -4646,6 +7560,7 @@ async function submitEdit() {
 function clearGenerateForm() {
   refs.generatePromptInput.value = ""
   refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
+  restoreCreativeBrief({})
   clearGenerateReferenceImage()
   setGenerateSize(state.serverConfig.default_size || "auto")
   refs.qualitySelect.value = "auto"
@@ -4794,12 +7709,21 @@ function bindEvents() {
   refs.registerAuthButton?.addEventListener("click", () => {
     enterAuthGate(state.authMode === "register" ? "login" : "register")
   })
+  refs.authCompanyInput?.addEventListener("change", () => {
+    renderDepartmentSelect(refs.authDepartmentInput, state.orgUnits, refs.authCompanyInput?.value || "6renyou")
+  })
   refs.forgotPasswordButton?.addEventListener("click", enterPasswordResetRequest)
   refs.passwordResetRequestForm?.addEventListener("submit", submitPasswordResetRequest)
   refs.cancelPasswordResetRequestButton?.addEventListener("click", leavePasswordResetRequest)
+  refs.passwordResetConfirmForm?.addEventListener("submit", submitPasswordResetConfirm)
+  refs.cancelPasswordResetConfirmButton?.addEventListener("click", () => enterAuthGate("login"))
   refs.logoutButton?.addEventListener("click", logout)
   refs.adminCreateUserForm?.addEventListener("submit", submitAdminCreateUser)
   refs.refreshAdminUsersButton?.addEventListener("click", refreshAdminUsers)
+  refs.adminOrgCreateForm?.addEventListener("submit", submitAdminOrgUnit)
+  refs.adminUserOrgForm?.addEventListener("submit", submitAdminUserOrg)
+  refs.adminGroupAnnouncementForm?.addEventListener("submit", submitAdminGroupAnnouncement)
+  refs.refreshAdminOrgButton?.addEventListener("click", refreshAdminOrgContext)
   refs.refreshFeedbackSummaryButton?.addEventListener("click", refreshFeedbackSummary)
   refs.refreshPasswordResetRequestsButton?.addEventListener("click", refreshPasswordResetRequests)
   refs.adminUsersList?.addEventListener("click", (event) => {
@@ -4823,6 +7747,7 @@ function bindEvents() {
     clearResult()
     clearGenerateForm()
     clearEditForm()
+    resetItineraryMapExample()
     setMode("generate", { autoLoadLatest: false })
     refs.generatePromptInput.focus()
     setError("")
@@ -4842,11 +7767,14 @@ function bindEvents() {
 
   refs.generateTab.addEventListener("click", () => setMode("generate"))
   refs.editTab.addEventListener("click", () => setMode("edit"))
+  refs.itineraryTab?.addEventListener("click", () => setMode("itinerary"))
   refs.navModeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setMode(button.dataset.mode || "generate")
       if (button.dataset.mode === "edit") {
         refs.editPromptInput.focus()
+      } else if (button.dataset.mode === "itinerary") {
+        refs.itineraryDescriptionInput?.focus()
       } else {
         refs.generatePromptInput.focus()
       }
@@ -4866,8 +7794,36 @@ function bindEvents() {
   refs.clearEditButton.addEventListener("click", clearEditForm)
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
-  refs.openResultPreviewButton.addEventListener("click", () => openPreview("result", "single"))
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
+  refs.saveGroupAssetButton?.addEventListener("click", saveCurrentResultToGroupAssets)
+  refs.hoverContinueEditButton?.addEventListener("click", continueEditingFromResult)
+  refs.hoverVariantButton?.addEventListener("click", startVariantFromResult)
+  refs.inspectLongImageButton?.addEventListener("click", () => openPreview("result", "cinema"))
+  refs.hoverShareButton?.addEventListener("click", () => {
+    if (selectedGeneratedImageId()) {
+      showSharePanel()
+      refs.shareRecipientSearchInput?.focus()
+    }
+  })
+  refs.downloadOriginalButton?.addEventListener("click", () => {
+    const href = refs.downloadOriginalButton.dataset.href || ""
+    if (!href) {
+      setStatusMessage("当前没有可下载的原始底图。")
+      return
+    }
+    const link = document.createElement("a")
+    link.href = href
+    link.download = refs.downloadOriginalButton.dataset.filename || "picgen-original.png"
+    document.body.append(link)
+    link.click()
+    link.remove()
+  })
+  refs.teamInspirationFeedButton?.addEventListener("click", openTeamInspirationFeed)
+  refs.railToggleButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleRailSection(button.dataset.railToggle || "")
+    })
+  })
   refs.feedbackRatingButtons.forEach((button) => {
     button.addEventListener("click", () => {
       void submitResultFeedback(button.dataset.rating)
@@ -4885,10 +7841,70 @@ function bindEvents() {
     }
     openSharedResult(button.dataset.shareId)
   })
+  refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
+  refs.refreshJobsButton?.addEventListener("click", refreshGenerationJobs)
+  refs.gallerySearchInput?.addEventListener("input", () => {
+    window.clearTimeout(state.gallerySearchTimer)
+    state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
+  })
+  refs.galleryFavoriteOnlyInput?.addEventListener("change", refreshGallery)
+  refs.clearGalleryFiltersButton?.addEventListener("click", () => {
+    if (refs.gallerySearchInput) {
+      refs.gallerySearchInput.value = ""
+    }
+    if (refs.galleryFavoriteOnlyInput) {
+      refs.galleryFavoriteOnlyInput.checked = false
+    }
+    state.gallerySearch = ""
+    state.galleryFavoriteOnly = false
+    void refreshGallery()
+  })
+  refs.saveGalleryMetaButton?.addEventListener("click", saveGalleryMeta)
   refs.changePasswordButton?.addEventListener("click", openChangePasswordModal)
   refs.closeChangePasswordButton?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordBackdrop?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordForm?.addEventListener("submit", submitChangePassword)
+  refs.openProfileButton?.addEventListener("click", openProfileModal)
+  refs.closeProfileButton?.addEventListener("click", closeProfileModal)
+  refs.profileBackdrop?.addEventListener("click", closeProfileModal)
+  refs.profileForm?.addEventListener("submit", submitProfile)
+  refs.profileUsernameInput?.addEventListener("input", updateProfileUsernamePasswordHint)
+  refs.profileCompanyInput?.addEventListener("change", () => {
+    renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
+  })
+  refs.profileAvatarInput?.addEventListener("change", uploadProfileAvatar)
+  refs.teamChatButton?.addEventListener("click", openTeamChatModal)
+  refs.closeTeamChatButton?.addEventListener("click", closeTeamChatModal)
+  refs.teamChatBackdrop?.addEventListener("click", closeTeamChatModal)
+  refs.teamChatTeamRoomButton?.addEventListener("click", () => {
+    void switchTeamChatRoom({
+      type: "team",
+      recipientUserId: null,
+      title: teamChatGroupDisplayTitle(),
+      meta: teamChatGroupDisplayMeta(),
+    })
+  })
+  refs.refreshTeamChatButton?.addEventListener("click", () => {
+    void refreshTeamChatGroupContext()
+    void refreshTeamChatMessages()
+  })
+  refs.teamChatGroupContextToggle?.addEventListener("click", () => {
+    state.teamChatGroupContextExpanded = !state.teamChatGroupContextExpanded
+    renderTeamChatGroupContextDisclosure()
+  })
+  refs.teamChatForm?.addEventListener("submit", submitTeamChatMessage)
+  refs.clearTeamChatQuoteButton?.addEventListener("click", clearTeamChatQuote)
+  refs.teamChatMessageInput?.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault()
+      refs.teamChatForm?.requestSubmit()
+    }
+  })
+  refs.teamChatMessages?.addEventListener("click", (event) => {
+    if (!event.target.closest(".team-chat-message-actions")) {
+      closeTeamChatMessageMenu()
+    }
+  })
   refs.bugReportButton?.addEventListener("click", openBugReportModal)
   refs.closeBugReportButton?.addEventListener("click", closeBugReportModal)
   refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
@@ -4948,6 +7964,7 @@ function bindEvents() {
   ].forEach((input) => {
     input.addEventListener("input", () => {
       updatePromptCounters()
+      updateEffectivePromptPreview()
       updateWorkflowStatus()
       updateGenerateIntentUI()
       updateOpenAIOptionUI()
@@ -4993,6 +8010,46 @@ function bindEvents() {
       appendPromptSnippet(chip.dataset.target || state.activeMode, chip.dataset.snippet || "")
     })
   })
+
+  refs.applyCreativeBriefButton?.addEventListener("click", applyCreativeBriefToPrompt)
+  refs.askBotCreativeBriefButton?.addEventListener("click", () => {
+    void askBotWithCreativeBrief()
+  })
+  refs.promptModeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      updatePromptModeUI()
+      scheduleWorkspacePersist()
+    })
+  })
+  refs.promptRecipeSelect?.addEventListener("change", () => {
+    selectPromptRecipe(refs.promptRecipeSelect.value)
+  })
+  refs.applyPromptRecipeButton?.addEventListener("click", applyPromptRecipeToPrompt)
+  creativeBriefFields().forEach(([, input]) => {
+    input?.addEventListener("input", () => {
+      updateEffectivePromptPreview()
+      scheduleWorkspacePersist()
+    })
+  })
+  ;[
+    refs.itineraryTitleInput,
+    refs.itinerarySubtitleInput,
+    refs.itinerarySizeSelect,
+    refs.itineraryThemeSelect,
+    refs.itineraryDescriptionInput,
+    refs.itineraryLogoEnabled,
+  ].forEach((input) => {
+    input?.addEventListener("input", scheduleWorkspacePersist)
+    input?.addEventListener("change", scheduleWorkspacePersist)
+  })
+  refs.renderItineraryMapButton?.addEventListener("click", () => {
+    void submitAIItineraryMap()
+  })
+  refs.clearItineraryMapButton?.addEventListener("click", resetItineraryMapExample)
+  refs.copyItineraryTemplateButton?.addEventListener("click", () => {
+    void copyDetailedItineraryTemplate()
+  })
+  refs.applyItineraryTemplateButton?.addEventListener("click", applyDetailedItineraryTemplate)
 
   refs.generatePromptInput.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -5164,6 +8221,25 @@ function bindEvents() {
   })
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && refs.profileModal && !refs.profileModal.classList.contains("hidden")) {
+      closeProfileModal()
+      return
+    }
+
+    if (event.key === "Escape" && refs.teamChatModal && !refs.teamChatModal.classList.contains("hidden")) {
+      if (state.teamChatOpenMenuId) {
+        closeTeamChatMessageMenu()
+        return
+      }
+      closeTeamChatModal()
+      return
+    }
+
+    if (event.key === "Escape" && refs.changePasswordModal && !refs.changePasswordModal.classList.contains("hidden")) {
+      closeChangePasswordModal()
+      return
+    }
+
     if (event.key === "Escape" && refs.bugReportModal && !refs.bugReportModal.classList.contains("hidden")) {
       closeBugReportModal()
       return
@@ -5185,6 +8261,13 @@ function bindEvents() {
       event.preventDefault()
       setMode("edit")
       refs.editPromptInput.focus()
+      return
+    }
+
+    if (event.altKey && event.key === "3") {
+      event.preventDefault()
+      setMode("itinerary")
+      refs.itineraryDescriptionInput?.focus()
       return
     }
 
@@ -5236,6 +8319,13 @@ async function init() {
   }
 
   bindEvents()
+  initializeRailDisclosure()
+  await refreshOrgUnits()
+  const resetToken = getPasswordResetTokenFromUrl()
+  if (resetToken) {
+    enterPasswordResetConfirm(resetToken)
+    return
+  }
   const authenticated = await checkAuthSession()
   if (!authenticated) {
     return
@@ -5247,15 +8337,21 @@ async function init() {
 async function startAuthenticatedApp() {
   if (state.appReady) {
     await refreshUsageSummary()
+    await refreshGenerationJobs()
+    startTeamChatPolling()
+    await refreshTeamChatUnread()
     return
   }
 
   state.history = loadJSON(historyStorageKey(), [])
+  loadTeamChatRecentDms()
   renderHistory()
   await loadUserPreferences()
   loadSettings()
+  await loadPromptRecipes()
   updateLogoControlUI()
   updatePromptCounters()
+  updatePromptModeUI()
   updateGenerateIntentUI()
   const restored = await restoreWorkspaceState()
 
@@ -5271,7 +8367,10 @@ async function startAuthenticatedApp() {
   state.persistenceReady = true
   state.appReady = true
   updateWorkflowStatus()
+  startTeamChatPolling()
+  await refreshTeamChatUnread()
   await refreshUsageSummary()
+  await refreshGenerationJobs()
   scheduleWorkspacePersist()
 }
 

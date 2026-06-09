@@ -80,6 +80,19 @@ def _print_config(settings: Settings) -> None:
             settings.error_alert_telegram_bot_token and settings.error_alert_telegram_chat_id
         ),
         "error_alert_telegram_chat_id": _mask_secret(settings.error_alert_telegram_chat_id),
+        "password_reset_email_enabled": bool(
+            settings.smtp_host and settings.smtp_from_email and settings.smtp_username and settings.smtp_password
+        ),
+        "public_base_url": settings.public_base_url,
+        "smtp_host": settings.smtp_host,
+        "smtp_port": settings.smtp_port,
+        "smtp_username": _mask_secret(settings.smtp_username),
+        "smtp_password": _mask_secret(settings.smtp_password),
+        "smtp_from_email": settings.smtp_from_email,
+        "smtp_from_name": settings.smtp_from_name,
+        "smtp_use_tls": settings.smtp_use_tls,
+        "smtp_starttls": settings.smtp_starttls,
+        "password_reset_token_minutes": settings.password_reset_token_minutes,
         "auth_enabled": settings.auth_enabled,
         "auth_db_path": str(settings.resolved_auth_db_path),
         "auth_cookie_name": settings.auth_cookie_name,

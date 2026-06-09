@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import smtplib
+import ssl
 from dataclasses import dataclass
+from email.message import EmailMessage
 from typing import Any
 
 import httpx
@@ -117,6 +120,76 @@ async def send_generation_success_notification(
     return await _send_telegram_message(settings=settings, content=build_generation_success_alert_text(alert))
 
 
+def smtp_notifications_enabled(settings: Settings) -> bool:
+    return bool(
+        settings.smtp_host.strip()
+        and settings.smtp_from_email.strip()
+        and settings.smtp_username.strip()
+        and settings.smtp_password.strip()
+    )
+
+
+def send_password_reset_email(
+    *,
+    settings: Settings,
+    to_email: str,
+    username: str,
+    reset_url: str,
+    expires_minutes: int,
+) -> NotificationResult:
+    if not smtp_notifications_enabled(settings):
+        return NotificationResult(configured=False, sent=False, status="not_configured")
+    recipient = to_email.strip()
+    if not recipient:
+        return NotificationResult(configured=True, sent=False, status="missing_recipient")
+
+    message = EmailMessage()
+    from_name = settings.smtp_from_name.strip() or "PicGen"
+    from_email = settings.smtp_from_email.strip()
+    message["From"] = f"{from_name} <{from_email}>"
+    message["To"] = recipient
+    message["Subject"] = "PicGen 密码重置"
+    message.set_content(
+        "\n".join(
+            [
+                f"{username or '用户'}，你好：",
+                "",
+                "你刚刚申请重置 PicGen 登录密码。请打开下面的链接设置新密码：",
+                reset_url,
+                "",
+                f"这个链接 {expires_minutes} 分钟内有效，且只能使用一次。",
+                "如果不是你本人操作，可以忽略这封邮件。",
+                "",
+                "PicGen",
+            ]
+        )
+    )
+    try:
+        if settings.smtp_use_tls:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(
+                settings.smtp_host.strip(),
+                settings.smtp_port,
+                timeout=settings.smtp_timeout_seconds,
+                context=context,
+            ) as smtp:
+                smtp.login(settings.smtp_username.strip(), settings.smtp_password.strip())
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(
+                settings.smtp_host.strip(),
+                settings.smtp_port,
+                timeout=settings.smtp_timeout_seconds,
+            ) as smtp:
+                if settings.smtp_starttls:
+                    smtp.starttls(context=ssl.create_default_context())
+                smtp.login(settings.smtp_username.strip(), settings.smtp_password.strip())
+                smtp.send_message(message)
+    except Exception as exc:  # pragma: no cover - network and provider failures vary
+        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+    return NotificationResult(configured=True, sent=True, status="sent")
+
+
 def build_error_alert_text(alert: ErrorAlert) -> str:
     detail_text = redact_sensitive_text(alert.details, limit=1800)
     technical_message = redact_sensitive_text(alert.technical_message, limit=900)
@@ -139,8 +212,9 @@ def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
     prompt = redact_sensitive_text(alert.prompt, limit=600)
     urls = [redact_sensitive_text(url, limit=300) for url in alert.saved_image_urls[:5] if url]
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
+    title = "LOGO 成品已保存" if alert.path == "/api/final-images" else "生图成功"
     lines = [
-        f"【PicGen｜生图成功】{alert.username or '-'} #{alert.job_id}",
+        f"【PicGen｜{title}】{alert.username or '-'} #{alert.job_id}",
         f"用户：{alert.username or '-'} (#{alert.user_id})",
         f"任务：#{alert.job_id} / {alert.request_id or '-'}",
         f"接口：{alert.method} {alert.path}",

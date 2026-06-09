@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
 from .auth import (
+    TEAM_CHAT_BOT_NAME,
     AccountLockedError,
     AuthStore,
     AuthUser,
@@ -32,13 +36,18 @@ from .notifications import (
     error_alert_notifications_enabled,
     send_bug_report_notification,
     send_generation_success_notification,
+    send_password_reset_email,
     send_password_reset_request_notification,
+    smtp_notifications_enabled,
 )
+from .recipes import list_prompt_recipes, recipe_public_dict
 from .redaction import redact_sensitive_text
 from .schemas import (
     AdminCreateUserRequest,
     AdminResetPasswordRequest,
+    AdminUpdateUserOrgRequest,
     AuthRequest,
+    AvatarUploadRequest,
     BugReportRequest,
     ChangePasswordRequest,
     ConfigResponse,
@@ -47,20 +56,31 @@ from .schemas import (
     FeedbackRequest,
     FilePayload,
     FinalImageRequest,
+    GalleryUpdateRequest,
     GenerateRequest,
+    GroupAnnouncementRequest,
+    GroupSavedItemRequest,
     HealthResponse,
     ImageResultResponse,
+    OrganizationUnitRequest,
+    PasswordResetConfirmRequest,
     PasswordResetRequest,
     ReadinessResponse,
     ResponsesImageRequest,
     ShareResultRequest,
+    TeamChatMessageRequest,
+    TeamChatReadRequest,
     UserPreferencesRequest,
+    UserProfileRequest,
 )
 from .storage import (
     detect_image_mime,
+    extension_for_mime,
     resolve_storage_path,
     sanitize_filename,
+    sanitize_filename_prefix,
     save_derived_output_image,
+    storage_url_for_path,
 )
 from .upstream import (
     compact_raw_response,
@@ -73,9 +93,10 @@ from .upstream import (
 from .upstream.client import UpstreamClient
 
 logger = get_logger("picgen.routes")
+_TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
 
 JSON_BODY = Body(...)
-PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在，管理员会看到找回申请。请联系管理员获取新密码。"
+PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。"
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
@@ -91,6 +112,17 @@ def get_auth_store(request: Request) -> AuthStore:
 
 def _get_session_token(request: Request, settings: Settings) -> str:
     return request.cookies.get(settings.auth_cookie_name, "").strip()
+
+
+def _password_reset_expires_at(settings: Settings) -> str:
+    return (datetime.now(tz=UTC) + timedelta(minutes=settings.password_reset_token_minutes)).isoformat()
+
+
+def _password_reset_url(request: Request, settings: Settings, token: str) -> str:
+    base = settings.public_base_url.strip().rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/?reset_token={token}"
 
 
 async def _current_user_or_none(request: Request, settings: Settings, auth_store: AuthStore) -> AuthUser | None:
@@ -149,19 +181,55 @@ def _clear_auth_cookie(response: JSONResponse, settings: Settings) -> None:
     )
 
 
-def _resolve_output_file(settings: Settings, relative_path: str) -> Path:
+def _resolve_served_file(settings: Settings, relative_path: str) -> Path:
     cleaned = relative_path.strip().lstrip("/")
-    output_prefix = "outputs/"
-    if not cleaned.startswith(output_prefix):
+    allowed_roots: dict[str, tuple[Path, set[str]]] = {
+        "outputs/": (settings.outputs_dir, {".png", ".jpg", ".jpeg", ".webp", ".gif", ".json"}),
+        "avatars/": (settings.data_dir / "avatars", {".png", ".jpg", ".jpeg", ".webp"}),
+    }
+    matched_prefix = ""
+    matched_root: Path | None = None
+    matched_suffixes: set[str] = set()
+    for prefix, (root, suffixes) in allowed_roots.items():
+        if cleaned.startswith(prefix):
+            matched_prefix = prefix
+            matched_root = root
+            matched_suffixes = suffixes
+            break
+    if matched_root is None:
         raise APIError(HTTPStatus.FORBIDDEN, "非法文件路径", code="forbidden")
-    output_relative_path = cleaned[len(output_prefix) :]
-    if not output_relative_path:
+    served_relative_path = cleaned[len(matched_prefix) :]
+    if not served_relative_path:
         raise APIError(HTTPStatus.FORBIDDEN, "非法文件路径", code="forbidden")
-    target_path = resolve_storage_path(settings.outputs_dir, output_relative_path)
-    allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".json"}
-    if target_path.suffix.lower() not in allowed_suffixes:
+    target_path = resolve_storage_path(matched_root, served_relative_path)
+    if target_path.suffix.lower() not in matched_suffixes:
         raise APIError(HTTPStatus.FORBIDDEN, "非法文件类型", code="forbidden")
     return target_path
+
+
+def _save_user_avatar(
+    *,
+    settings: Settings,
+    user: AuthUser,
+    image_bytes: bytes,
+    image_mime: str,
+) -> tuple[Path, str]:
+    avatar_dir = settings.data_dir / "avatars"
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    prefix = sanitize_filename_prefix(user.username) or f"user-{user.id}"
+    avatar_path = avatar_dir / f"{prefix}-{user.id}{extension_for_mime(image_mime)}"
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=avatar_path.suffix, dir=str(avatar_dir))
+    temporary_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(image_bytes)
+            fh.flush()
+            os.fsync(fh.fileno())
+        temporary_path.replace(avatar_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return avatar_path, storage_url_for_path(settings.data_dir, avatar_path)
 
 
 async def _ensure_admin_bootstrap(request: Request, settings: Settings, auth_store: AuthStore) -> None:
@@ -400,6 +468,7 @@ def create_router() -> APIRouter:
             auth_enabled=settings.auth_enabled,
             bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
+            password_reset_email_enabled=smtp_notifications_enabled(settings),
         )
 
     @router.get("/api/health", response_model=HealthResponse)
@@ -426,6 +495,12 @@ def create_router() -> APIRouter:
             version=__version__,
         )
 
+    @router.get("/api/recipes")
+    async def recipes(user: AuthUser | None = Depends(require_current_user)) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        return {"recipes": list_prompt_recipes()}
+
     @router.get("/files/{relative_path:path}")
     async def files(
         relative_path: str,
@@ -434,10 +509,10 @@ def create_router() -> APIRouter:
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> FileResponse:
         settings = get_settings(request)
-        target_path = _resolve_output_file(settings, relative_path)
+        target_path = _resolve_served_file(settings, relative_path)
         if not target_path.is_file():
             raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
-        if settings.auth_enabled and target_path.suffix.lower() != ".json":
+        if settings.auth_enabled and relative_path.startswith("outputs/") and target_path.suffix.lower() != ".json":
             await anyio.to_thread.run_sync(
                 lambda: auth_store.record_image_delivery(
                     relative_path=relative_path,
@@ -462,7 +537,14 @@ def create_router() -> APIRouter:
         parsed = _validate_request(AuthRequest, payload)
         try:
             normalize_username(parsed.username)
-            user = await anyio.to_thread.run_sync(auth_store.create_user, parsed.username, parsed.password)
+            user = await anyio.to_thread.run_sync(
+                lambda: auth_store.create_user(
+                    parsed.username,
+                    parsed.password,
+                    company=parsed.company,
+                    department=parsed.department,
+                )
+            )
         except UserExistsError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, "用户名已存在", code="user_exists") from exc
         except ValueError as exc:
@@ -511,22 +593,67 @@ def create_router() -> APIRouter:
                     parsed.username,
                     client_host=request.client.host if request.client else "",
                     user_agent=request.headers.get("user-agent", ""),
+                    token_expires_at=_password_reset_expires_at(settings),
                 )
             )
         if reset_request is not None:
-            notification = await send_password_reset_request_notification(
-                settings=settings,
-                request_info=reset_request,
-            )
-            if notification.configured and not notification.sent:
-                log_event(
-                    logger,
-                    logging.WARNING,
-                    "password_reset_notification_failed",
-                    status=notification.status,
-                    error=notification.error,
+            email_sent = False
+            if reset_request.get("email_available") and reset_request.get("reset_token"):
+                reset_url = _password_reset_url(request, settings, str(reset_request["reset_token"]))
+                email_result = await anyio.to_thread.run_sync(
+                    lambda: send_password_reset_email(
+                        settings=settings,
+                        to_email=str(reset_request.get("email") or ""),
+                        username=str(reset_request.get("username") or ""),
+                        reset_url=reset_url,
+                        expires_minutes=settings.password_reset_token_minutes,
+                    )
                 )
+                if email_result.sent:
+                    email_sent = True
+                    await anyio.to_thread.run_sync(
+                        lambda: auth_store.mark_password_reset_email_sent(int(reset_request["id"]))
+                    )
+                elif email_result.configured:
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "password_reset_email_failed",
+                        status=email_result.status,
+                        error=email_result.error,
+                    )
+            if not email_sent:
+                notification = await send_password_reset_request_notification(
+                    settings=settings,
+                    request_info=reset_request,
+                )
+                if notification.configured and not notification.sent:
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "password_reset_notification_failed",
+                        status=notification.status,
+                        error=notification.error,
+                    )
         return {"status": "ok", "message": PASSWORD_RESET_REQUEST_MESSAGE}
+
+    @router.post("/api/password-reset/confirm")
+    async def confirm_password_reset(
+        body: Any = JSON_BODY,
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        payload = _ensure_dict(body)
+        parsed = _validate_request(PasswordResetConfirmRequest, payload)
+        updated_user = await anyio.to_thread.run_sync(
+            lambda: auth_store.reset_password_with_token(token=parsed.token, password=parsed.password)
+        )
+        if updated_user is None:
+            raise APIError(
+                HTTPStatus.BAD_REQUEST,
+                "重置链接无效或已过期，请重新申请。",
+                code="invalid_reset_token",
+            )
+        return {"status": "ok", "message": "密码已重置，请使用新密码登录。"}
 
     @router.post("/api/auth/logout")
     async def logout(
@@ -567,6 +694,92 @@ def create_router() -> APIRouter:
             )
         except InvalidCredentialsError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, "当前密码不正确", code="invalid_credentials") from exc
+        return {"status": "ok", "user": updated_user.public_dict()}
+
+    @router.put("/api/me/profile")
+    async def update_my_profile(
+        request: Request,
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(UserProfileRequest, payload)
+        normalized_current = normalize_username(user.username)
+        normalized_next = normalize_username(parsed.username)
+        if normalized_next != normalized_current and not parsed.current_password:
+            raise APIError(
+                HTTPStatus.BAD_REQUEST,
+                "修改登录用户名需要填写当前密码",
+                code="current_password_required",
+            )
+        try:
+            updated_user = await anyio.to_thread.run_sync(
+                lambda: auth_store.update_user_profile(
+                    user_id=user.id,
+                    username=parsed.username,
+                    current_password=parsed.current_password,
+                    display_name=parsed.display_name,
+                    wechat=parsed.wechat,
+                    phone_country_code=parsed.phone_country_code,
+                    phone=parsed.phone,
+                    email=parsed.email,
+                    company=parsed.company,
+                    department=parsed.department,
+                    team=parsed.team,
+                    job_title=parsed.job_title,
+                    note=parsed.note,
+                    current_session_token=_get_session_token(request, settings),
+                )
+            )
+        except UserExistsError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, "用户名已存在", code="user_exists") from exc
+        except InvalidCredentialsError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, "当前密码不正确", code="invalid_credentials") from exc
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        return {"status": "ok", "user": updated_user.public_dict()}
+
+    @router.post("/api/me/avatar")
+    async def update_my_avatar(
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(AvatarUploadRequest, payload)
+        image_bytes = parsed.image.decoded_bytes()
+        if not image_bytes:
+            raise APIError(HTTPStatus.BAD_REQUEST, "头像文件不能为空", code="bad_request")
+        max_avatar_bytes = 2 * 1024 * 1024
+        if len(image_bytes) > max_avatar_bytes:
+            raise APIError(HTTPStatus.BAD_REQUEST, "头像文件不能超过 2 MB", code="bad_request")
+        image_mime = detect_image_mime(image_bytes)
+        if image_mime not in {"image/png", "image/jpeg", "image/webp"}:
+            raise APIError(HTTPStatus.BAD_REQUEST, "头像仅支持 PNG、JPG 或 WebP", code="bad_request")
+        avatar_path, avatar_url = await anyio.to_thread.run_sync(
+            lambda: _save_user_avatar(
+                settings=settings,
+                user=user,
+                image_bytes=image_bytes,
+                image_mime=image_mime,
+            )
+        )
+        updated_user = await anyio.to_thread.run_sync(
+            lambda: auth_store.update_user_avatar(
+                user_id=user.id,
+                avatar_path=str(avatar_path),
+                avatar_url=avatar_url,
+            )
+        )
+        if updated_user is None:
+            raise APIError(HTTPStatus.NOT_FOUND, "用户不存在", code="not_found")
         return {"status": "ok", "user": updated_user.public_dict()}
 
     @router.get("/api/preferences")
@@ -619,10 +832,351 @@ def create_router() -> APIRouter:
                 {
                     "id": listed_user["id"],
                     "username": listed_user["username"],
+                    "display_name": listed_user.get("display_name", ""),
+                    "avatar_url": listed_user.get("avatar_url", ""),
                 }
                 for listed_user in users
             ]
         }
+
+    @router.get("/api/org-units")
+    async def public_org_units(
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        org_units = await anyio.to_thread.run_sync(auth_store.list_organization_units)
+        return {"org_units": org_units}
+
+    @router.get("/api/team-chat/members")
+    async def team_chat_members(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        members = await anyio.to_thread.run_sync(
+            lambda: auth_store.list_team_chat_members(current_user_id=user.id)
+        )
+        group = await anyio.to_thread.run_sync(lambda: auth_store.team_chat_group_for_user(user.id))
+        bot = next((member for member in members if member.get("type") == "bot"), None)
+        human_members = [member for member in members if member.get("type") != "bot"]
+        return {
+            "members": members,
+            "human_members": human_members,
+            "bot": bot,
+            "group": {
+                "company": group["company"],
+                "department": group["department"],
+                "room_key": group["room_key"],
+                "title": team_chat_group_title(group["company"], group["department"]),
+                "subtitle": team_chat_group_subtitle(group["company"]),
+                "member_count": len(human_members),
+            },
+        }
+
+    @router.get("/api/team-chat/messages")
+    async def team_chat_messages(
+        room_type: str = "team",
+        recipient_user_id: int | None = None,
+        after_id: int = 0,
+        limit: int = 100,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        try:
+            room_key = await anyio.to_thread.run_sync(
+                lambda: auth_store.team_chat_room_key(
+                    current_user_id=user.id,
+                    room_type=room_type,
+                    recipient_user_id=recipient_user_id,
+                )
+            )
+            messages = await anyio.to_thread.run_sync(
+                lambda: auth_store.list_team_chat_messages(
+                    room_key=room_key,
+                    limit=limit,
+                    after_id=after_id,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        return {"room_key": room_key, "messages": messages}
+
+    @router.post("/api/team-chat/messages")
+    async def create_team_chat_message(
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        client: UpstreamClient = Depends(get_client),
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(TeamChatMessageRequest, payload)
+        try:
+            room_key = await anyio.to_thread.run_sync(
+                lambda: auth_store.team_chat_room_key(
+                    current_user_id=user.id,
+                    room_type=parsed.room_type,
+                    recipient_user_id=parsed.recipient_user_id,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        mentions = _parse_team_chat_mentions(parsed.content)
+        created = await anyio.to_thread.run_sync(
+            lambda: auth_store.create_team_chat_message(
+                room_key=room_key,
+                room_type=parsed.room_type,
+                sender_user_id=user.id,
+                sender_type="user",
+                sender_name=_team_chat_display_name(user),
+                content=parsed.content,
+                mentions=mentions,
+            )
+        )
+        await anyio.to_thread.run_sync(
+            lambda: auth_store.mark_team_chat_read(
+                user_id=user.id,
+                room_key=room_key,
+                message_id=int(created["id"]),
+            )
+        )
+        messages = [created]
+        should_reply = parsed.room_type == "bot" or (
+            parsed.room_type == "team" and _team_chat_bot_was_mentioned(parsed.content, mentions)
+        )
+        if should_reply:
+            recent_messages = await anyio.to_thread.run_sync(
+                lambda: auth_store.list_team_chat_messages(room_key=room_key, limit=40)
+            )
+            _schedule_team_chat_bot_reply(
+                auth_store=auth_store,
+                settings=settings,
+                client=client,
+                user=user,
+                room_key=room_key,
+                room_type=parsed.room_type,
+                content=parsed.content,
+                recent_messages=recent_messages,
+            )
+        return {
+            "status": "ok",
+            "room_key": room_key,
+            "messages": messages,
+            "bot_reply_pending": should_reply,
+        }
+
+    @router.post("/api/team-chat/read")
+    async def mark_team_chat_read(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(TeamChatReadRequest, payload)
+        try:
+            room_key = await anyio.to_thread.run_sync(
+                lambda: auth_store.team_chat_room_key(
+                    current_user_id=user.id,
+                    room_type=parsed.room_type,
+                    recipient_user_id=parsed.recipient_user_id,
+                )
+            )
+            read = await anyio.to_thread.run_sync(
+                lambda: auth_store.mark_team_chat_read(
+                    user_id=user.id,
+                    room_key=room_key,
+                    message_id=parsed.message_id,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        return {"status": "ok", "read": read}
+
+    @router.get("/api/team-chat/unread")
+    async def team_chat_unread(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        unread = await anyio.to_thread.run_sync(lambda: auth_store.team_chat_unread_summary(user_id=user.id))
+        return {"unread": unread}
+
+    @router.get("/api/team-chat/group-announcement")
+    async def team_chat_group_announcement(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        announcement = await anyio.to_thread.run_sync(lambda: auth_store.get_group_announcement(user_id=user.id))
+        return {"announcement": announcement}
+
+    @router.put("/api/team-chat/group-announcement")
+    async def update_team_chat_group_announcement(
+        body: Any = JSON_BODY,
+        admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        payload = _ensure_dict(body)
+        parsed = _validate_request(GroupAnnouncementRequest, payload)
+        try:
+            announcement = await anyio.to_thread.run_sync(
+                lambda: auth_store.upsert_group_announcement(
+                    company=parsed.company,
+                    department=parsed.department,
+                    content=parsed.content,
+                    actor_user_id=admin.id,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        return {"status": "ok", "announcement": announcement}
+
+    @router.get("/api/team-chat/group-assets")
+    async def team_chat_group_assets(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        assets = await anyio.to_thread.run_sync(lambda: auth_store.list_group_saved_items(user_id=user.id))
+        return {"assets": assets}
+
+    @router.post("/api/team-chat/group-assets")
+    async def save_team_chat_group_asset(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(GroupSavedItemRequest, payload)
+        try:
+            asset = await anyio.to_thread.run_sync(
+                lambda: auth_store.save_group_item(
+                    user_id=user.id,
+                    generated_image_id=parsed.generated_image_id,
+                    title=parsed.title,
+                    note=parsed.note,
+                )
+            )
+        except PermissionError as exc:
+            raise APIError(HTTPStatus.FORBIDDEN, str(exc), code="forbidden") from exc
+        return {"status": "ok", "asset": asset}
+
+    @router.get("/api/team-chat/group-stats")
+    async def team_chat_group_stats(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        stats = await anyio.to_thread.run_sync(lambda: auth_store.group_stats(user_id=user.id))
+        return {"stats": stats}
+
+    @router.get("/api/team-chat/group-summary")
+    async def team_chat_group_summary(
+        days: int = 7,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        summary = await anyio.to_thread.run_sync(lambda: auth_store.group_summary(user_id=user.id, days=days))
+        return {"summary": summary}
+
+    @router.get("/api/gallery")
+    async def gallery(
+        q: str = "",
+        tag: str = "",
+        favorite: bool = False,
+        scope: str = "self",
+        limit: int = 60,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        clean_scope = scope.strip().lower()
+        target_user_id = None if user.is_admin and clean_scope == "all" else user.id
+        items = await anyio.to_thread.run_sync(
+            lambda: auth_store.list_gallery_items(
+                viewer_user_id=user.id,
+                target_user_id=target_user_id,
+                query=q,
+                tag=tag,
+                favorite_only=favorite,
+                limit=limit,
+            )
+        )
+        return {
+            "scope": "all" if target_user_id is None else "self",
+            "count": len(items),
+            "items": items,
+        }
+
+    @router.get("/api/jobs")
+    async def generation_jobs(
+        limit: int = 30,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        jobs = await anyio.to_thread.run_sync(
+            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit)
+        )
+        return {"scope": "self", "count": len(jobs), "jobs": jobs}
+
+    @router.get("/api/generated-images/{generated_image_id}")
+    async def generated_image_detail(
+        generated_image_id: int,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        image = await anyio.to_thread.run_sync(
+            lambda: auth_store.generated_image_detail_for_user(
+                generated_image_id=generated_image_id,
+                user_id=user.id,
+            )
+        )
+        if image is None:
+            raise APIError(HTTPStatus.NOT_FOUND, "图片不存在或无权查看", code="not_found")
+        return {"image": image}
+
+    @router.put("/api/gallery/{generated_image_id}")
+    async def update_gallery_item(
+        generated_image_id: int,
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(GalleryUpdateRequest, payload)
+        try:
+            item = await anyio.to_thread.run_sync(
+                lambda: auth_store.update_gallery_item(
+                    user_id=user.id,
+                    generated_image_id=generated_image_id,
+                    is_favorite=parsed.is_favorite,
+                    tags=parsed.tags,
+                )
+            )
+        except PermissionError as exc:
+            raise APIError(HTTPStatus.FORBIDDEN, str(exc), code="forbidden") from exc
+        return {"status": "ok", "item": item}
 
     @router.get("/api/usage")
     async def usage(
@@ -644,6 +1198,74 @@ def create_router() -> APIRouter:
     ) -> dict[str, Any]:
         users = await anyio.to_thread.run_sync(auth_store.usage_summary)
         return {"users": users}
+
+    @router.get("/api/admin/org-units")
+    async def admin_org_units(
+        _admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        org_units = await anyio.to_thread.run_sync(auth_store.list_organization_units)
+        return {"org_units": org_units}
+
+    @router.post("/api/admin/org-units")
+    async def admin_create_org_unit(
+        body: Any = JSON_BODY,
+        _admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        payload = _ensure_dict(body)
+        parsed = _validate_request(OrganizationUnitRequest, payload)
+        try:
+            org_unit = await anyio.to_thread.run_sync(
+                lambda: auth_store.create_organization_unit(
+                    company=parsed.company,
+                    department=parsed.department,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        return {"status": "ok", "org_unit": org_unit}
+
+    @router.put("/api/admin/users/{user_id}/org")
+    async def admin_update_user_org(
+        user_id: int,
+        body: Any = JSON_BODY,
+        admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        payload = _ensure_dict(body)
+        parsed = _validate_request(AdminUpdateUserOrgRequest, payload)
+        try:
+            updated = await anyio.to_thread.run_sync(
+                lambda: auth_store.update_user_org(
+                    user_id=user_id,
+                    company=parsed.company,
+                    department=parsed.department,
+                    actor_user_id=admin.id,
+                    reason=parsed.reason,
+                )
+            )
+        except ValueError as exc:
+            raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        if updated is None:
+            raise APIError(HTTPStatus.NOT_FOUND, "用户不存在", code="not_found")
+        return {"status": "ok", "user": updated.public_dict()}
+
+    @router.get("/api/admin/org-audit")
+    async def admin_org_audit(
+        _admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        events = await anyio.to_thread.run_sync(auth_store.list_organization_audit_events)
+        return {"events": events}
+
+    @router.get("/api/admin/org-stats")
+    async def admin_org_stats(
+        _admin: AuthUser = Depends(require_admin_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        org_stats = await anyio.to_thread.run_sync(auth_store.organization_stats)
+        return {"org_stats": org_stats}
 
     @router.get("/api/admin/password-reset-requests")
     async def admin_password_reset_requests(
@@ -831,6 +1453,7 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(FinalImageRequest, payload)
+        started_at = time.perf_counter()
         try:
             source_record = await anyio.to_thread.run_sync(
                 lambda: auth_store.generated_image_for_user(
@@ -882,6 +1505,15 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.FORBIDDEN, str(exc), code="forbidden") from exc
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
+        if parsed.logo_overlay_applied:
+            await _send_generation_success_alert(
+                settings,
+                _build_final_image_success_alert(
+                    image=updated,
+                    user=user,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                ),
+            )
         return {
             "status": "ok",
             "image": {
@@ -983,6 +1615,195 @@ def _copyright_risk_prompt(parsed: CopyrightRiskRequest) -> str:
         f"用户提示词：{prompt or '未提供'}\n"
         f"生成上下文：{context or '未提供'}"
     )
+
+
+def _parse_team_chat_mentions(content: str) -> list[str]:
+    mentions: list[str] = []
+    for token in content.replace("\u3000", " ").split():
+        if not token.startswith("@"):
+            continue
+        name = token[1:].strip("，,。.!！?？:：;；()（）[]【】")
+        if name:
+            mentions.append(name[:80])
+    return list(dict.fromkeys(mentions))
+
+
+def team_chat_group_title(company: str, department: str) -> str:
+    clean_department = department.strip() or "未分配部门"
+    return clean_department
+
+
+def team_chat_group_subtitle(company: str) -> str:
+    clean_company = company.strip() or "未分配公司"
+    return f"{clean_company} · 部门群"
+
+
+def _team_chat_display_name(user: AuthUser) -> str:
+    return (user.display_name or user.username).strip()
+
+
+def _team_chat_bot_was_mentioned(content: str, mentions: list[str]) -> bool:
+    lowered = content.casefold()
+    return any(item.casefold() in {"gpt-bot", "gptbot", "bot"} for item in mentions) or "@gpt-bot" in lowered
+
+
+def _team_chat_bot_prompt(
+    *,
+    user: AuthUser,
+    content: str,
+    room_type: str,
+    recent_messages: list[dict[str, Any]],
+) -> str:
+    recent_lines: list[str] = []
+    for message in recent_messages[-20:]:
+        sender = str(message.get("sender_name") or "")
+        text = str(message.get("content") or "").strip()
+        if not text:
+            continue
+        recent_lines.append(f"{sender}: {text[:500]}")
+    context = "\n".join(recent_lines) or "暂无上下文"
+    return (
+        "你是 PicGen 团队聊天里的 GPT-BOT，也是这个工作台的全局图片质量助手、创意总监和高端定制旅行顾问。"
+        "你熟悉全球大量冷门小众但高质量的目的地、酒店、步道、海岛、酒庄、观景点、在地体验、"
+        "最佳季节、抵达方式、签证/安全/预算/人群匹配，以及把这些方案转成高级旅行海报和图片提示词的方法。"
+        "请用中文回复，语气专业、简洁、可信，不讲空泛鸡汤，优先给可执行建议。"
+        "你可以帮助用户审视图片需求是否高级、是否符合旅行产品气质、是否适合 6 人游品牌、是否有构图/光影/质感/排版风险。"
+        "平台默认尊重用户自由提示词和个性创意；Creative Brief、历史满意作品、Group 优秀资产都只能作为可选参考，"
+        "不要把所有用户的提示词改成统一模板，也不要强制套用历史风格。"
+        "当用户询问旅行方案时，给出清晰的目的地/体验组合、适合人群、亮点、避坑和落地建议；"
+        "当用户询问制图、提示词、排版、审美、运营文案时，把旅行专业判断转成可直接使用的提示词、构图和文案建议。"
+        "如果用户要求你优化提示词，请优先给“可追加短句”和“风险提醒”，保留原文个性。"
+        "如果信息不足，请只提出 1-2 个关键追问，并先给一个稳妥默认方案。"
+        "不要声称自己能直接操作系统或查看用户没有提供的图片。"
+        "群聊中回复时要艾特提问者；私聊中可以直接回复。\n\n"
+        f"房间类型：{room_type}\n"
+        f"提问用户：{_team_chat_display_name(user)}（登录用户名：{user.username}）\n"
+        f"最近聊天：\n{context}\n\n"
+        f"用户最新消息：{content.strip()}"
+    )
+
+
+async def _create_team_chat_bot_reply(
+    *,
+    auth_store: AuthStore,
+    settings: Settings,
+    client: UpstreamClient,
+    user: AuthUser,
+    room_key: str,
+    room_type: str,
+    content: str,
+    recent_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prefix = "" if room_type == "bot" else f"@{_team_chat_display_name(user)} "
+    endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
+    api_key = settings.default_api_key.strip()
+    if not api_key:
+        return await anyio.to_thread.run_sync(
+            lambda: auth_store.create_team_chat_message(
+                room_key=room_key,
+                room_type=room_type,
+                sender_user_id=None,
+                sender_type="bot",
+                sender_name=TEAM_CHAT_BOT_NAME,
+                content=f"{prefix}AI 服务暂时没有配置好，我已经看到你的消息了。",
+                mentions=[user.username],
+            )
+        )
+    model = settings.default_responses_model.strip() or "gpt-5.5"
+    upstream_payload = {
+        "model": model,
+        "reasoning": {"effort": "high"},
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _team_chat_bot_prompt(
+                            user=user,
+                            content=content,
+                            room_type=room_type,
+                            recent_messages=recent_messages,
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+    try:
+        upstream_response = await client.run_responses(
+            endpoint_url,
+            api_key,
+            upstream_payload,
+            settings.upstream_user_agent,
+        )
+        reply_text = _extract_text_output(upstream_response) or "我收到了，但暂时没有组织出可靠回复。"
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "team_chat_bot_failed",
+            error=redact_sensitive_text(str(exc)),
+            user_id=user.id,
+            username=user.username,
+        )
+        reply_text = "AI 服务暂时连接不上，先把问题记下来了，请稍后再试。"
+    return await anyio.to_thread.run_sync(
+        lambda: auth_store.create_team_chat_message(
+            room_key=room_key,
+            room_type=room_type,
+            sender_user_id=None,
+            sender_type="bot",
+            sender_name=TEAM_CHAT_BOT_NAME,
+            content=f"{prefix}{reply_text.strip()[:3800]}",
+            mentions=[user.username],
+        )
+    )
+
+
+def _schedule_team_chat_bot_reply(
+    *,
+    auth_store: AuthStore,
+    settings: Settings,
+    client: UpstreamClient,
+    user: AuthUser,
+    room_key: str,
+    room_type: str,
+    content: str,
+    recent_messages: list[dict[str, Any]],
+) -> None:
+    task = _create_team_chat_bot_reply(
+        auth_store=auth_store,
+        settings=settings,
+        client=client,
+        user=user,
+        room_key=room_key,
+        room_type=room_type,
+        content=content,
+        recent_messages=recent_messages,
+    )
+    try:
+        scheduled = asyncio.create_task(task)
+    except RuntimeError:
+        asyncio.run(task)
+        return
+    _TEAM_CHAT_BOT_TASKS.add(scheduled)
+
+    def _forget(done_task: asyncio.Task[dict[str, Any]]) -> None:
+        _TEAM_CHAT_BOT_TASKS.discard(done_task)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "team_chat_bot_task_error",
+                error=redact_sensitive_text(str(exc), limit=300),
+            )
+
+    scheduled.add_done_callback(_forget)
 
 
 def _extract_text_output(payload: dict[str, Any]) -> str:
@@ -1103,9 +1924,16 @@ def _job_sample_count(payload: dict[str, Any]) -> int:
     return max(1, min(parsed, 3))
 
 
+def _generate_mode(value: Any) -> str:
+    mode = str(value or "").strip()
+    if mode == "itinerary":
+        return "itinerary"
+    return "generate"
+
+
 def _job_mode(path: str, payload: dict[str, Any]) -> str:
     if path == "/api/generate":
-        return "generate"
+        return _generate_mode(payload.get("mode"))
     if path == "/api/edit":
         return str(payload.get("mode") or "edit")
     if path == "/api/responses-image":
@@ -1124,6 +1952,11 @@ def _job_transport(path: str) -> str:
 
 def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
     payload = body if isinstance(body, dict) else {}
+    prompt_mode = str(payload.get("prompt_mode") or "free")
+    raw_recipe_id = str(payload.get("recipe_id") or "").strip()
+    recipe = recipe_public_dict(raw_recipe_id) if raw_recipe_id else None
+    recipe_id = raw_recipe_id if prompt_mode == "recipe" and recipe is not None else ""
+    recipe_version = str(payload.get("recipe_version") or "").strip() if recipe_id else ""
     return {
         "request_id": get_request_id(),
         "user_id": user.id,
@@ -1132,6 +1965,10 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "mode": _job_mode(path, payload),
         "transport": _job_transport(path),
         "prompt": str(payload.get("prompt") or ""),
+        "original_prompt": str(payload.get("original_prompt") or payload.get("prompt") or ""),
+        "prompt_mode": prompt_mode,
+        "recipe_id": recipe_id,
+        "recipe_version": recipe_version,
         "model": str(payload.get("model") or ""),
         "size": str(payload.get("size") or ""),
         "sample_count": _job_sample_count(payload),
@@ -1220,6 +2057,34 @@ def _build_generation_success_alert(
         logo_overlay_applied=_result_logo_overlay_applied(result),
         saved_image_urls=_result_saved_image_urls(result),
         generated_image_ids=_result_generated_image_ids(result, image_records),
+    )
+
+
+def _build_final_image_success_alert(
+    *,
+    image: dict[str, Any],
+    user: AuthUser,
+    elapsed_ms: float,
+) -> GenerationSuccessAlert:
+    return GenerationSuccessAlert(
+        request_id=get_request_id(),
+        job_id=int(image.get("job_id") or 0),
+        user_id=user.id,
+        username=user.username,
+        method="POST",
+        path="/api/final-images",
+        mode=str(image.get("mode") or ""),
+        model=str(image.get("model") or ""),
+        size="",
+        prompt=str(image.get("prompt") or ""),
+        image_count=1 if image.get("saved_image_url") else 0,
+        candidate_count=1 if image.get("saved_image_url") else 0,
+        saved_bytes=max(0, int(image.get("saved_image_bytes") or 0)),
+        elapsed_ms=elapsed_ms,
+        logo_requested=bool(image.get("logo_requested") or image.get("logo_overlay_applied")),
+        logo_overlay_applied=bool(image.get("logo_overlay_applied")),
+        saved_image_urls=[str(image.get("saved_image_url") or "")] if image.get("saved_image_url") else [],
+        generated_image_ids=[int(image.get("id") or 0)] if image.get("id") else [],
     )
 
 
@@ -1436,9 +2301,20 @@ async def handle_generate(
     size = (parsed.size or settings.default_size).strip() or settings.default_size
     api_key = (parsed.api_key or settings.default_api_key).strip()
     image_options = openai_image_options(payload)
+    mode = _generate_mode(parsed.mode)
+    original_prompt = (parsed.original_prompt or parsed.prompt).strip()
+    prompt_mode = parsed.prompt_mode
+    recipe_id = parsed.recipe_id or ""
+    recipe_version = parsed.recipe_version or ""
+    recipe = recipe_public_dict(recipe_id) if recipe_id else None
 
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
+    if prompt_mode == "recipe" and recipe is None:
+        raise APIError(HTTPStatus.BAD_REQUEST, "请选择有效的创作配方", code="validation_error")
+    if prompt_mode != "recipe":
+        recipe_id = ""
+        recipe_version = ""
 
     upstream_payload: dict[str, Any] = {
         "model": model,
@@ -1459,25 +2335,40 @@ async def handle_generate(
         sample_count=parsed.sample_count,
     )
     metadata = request_metadata({**payload, **image_options}, size=size)
+    lineage_metadata: dict[str, Any] = {
+        "original_prompt": original_prompt,
+        "effective_prompt": parsed.prompt,
+        "prompt_mode": prompt_mode,
+    }
+    if recipe_id:
+        lineage_metadata["recipe_id"] = recipe_id
+    if recipe_version:
+        lineage_metadata["recipe_version"] = recipe_version
+    if recipe is not None:
+        lineage_metadata["recipe_title"] = recipe["title"]
+    metadata.update(lineage_metadata)
 
     return await _finalize_image_response(
         upstream_response=upstream_response,
         settings=settings,
         client=client,
         save_context={
-            "mode": "generate",
+            "mode": mode,
             "prompt": parsed.prompt,
             "model": model,
             "endpoint_url": endpoint_url,
             "transport": "images-generate",
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
+            **lineage_metadata,
             **_user_metadata(user),
             **metadata,
         },
         extra={
-            "mode": "generate",
+            "mode": mode,
             "prompt": parsed.prompt,
+            **lineage_metadata,
+            **({"recipe": recipe} if recipe is not None else {}),
             "model": model,
             "logo_requested": parsed.logo_requested,
             "sample_count": parsed.sample_count,

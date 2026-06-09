@@ -53,6 +53,26 @@ async def test_run_json_raises_after_max_retries() -> None:
         await client.aclose()
 
 
+async def test_run_json_reports_retry_exhaustion_to_user() -> None:
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            502,
+            text='{"error":{"message":"An error occurred while processing your request."}}',
+        )
+    )
+    client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.run_json(
+                "https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA"
+            )
+        assert info.value.status == 502
+        assert "已自动尝试 3 次" in info.value.message
+        assert "上游连续返回 502" in (info.value.details or "")
+    finally:
+        await client.aclose()
+
+
 async def test_run_json_translates_timeout() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectTimeout("timeout", request=request)

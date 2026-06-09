@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import anyio
@@ -29,10 +30,13 @@ def test_ready_endpoint_reports_dependencies(make_client):
     response = client.get("/api/ready")
     assert response.status_code == 200
     payload = response.json()
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    version_line = next(line for line in pyproject.splitlines() if line.startswith("version = "))
+    expected_version = version_line.split('"', 2)[1]
     assert payload["ok"] is True
     assert payload["storage_writable"] is True
     assert payload["upstream_client_ready"] is True
-    assert "version" in payload
+    assert payload["version"] == expected_version
 
 
 def test_config_reports_api_key_presence_without_leaking_value(make_client, settings_factory):
@@ -40,6 +44,10 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
         default_api_key="sk-secret",
         error_alert_telegram_bot_token="123:abc",
         error_alert_telegram_chat_id="-100123456",
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
     )
     client, _, _ = make_client(settings=settings)
     response = client.get("/api/config")
@@ -56,6 +64,8 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["upstream_timeout_seconds"] > 0
     assert payload["error_alert_notifications_enabled"] is True
     assert payload["bug_report_notifications_enabled"] is True
+    assert payload["password_reset_email_enabled"] is True
+    assert "mail-secret" not in response.text
 
 
 def test_config_reports_custom_responses_url(make_client, settings_factory):
@@ -64,6 +74,33 @@ def test_config_reports_custom_responses_url(make_client, settings_factory):
     response = client.get("/api/config")
     assert response.status_code == 200
     assert response.json()["responses_url"] == "https://sub.tidba.com/v1/responses"
+
+
+def test_recipes_endpoint_requires_login_and_lists_prompt_recipes(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin")
+    client, _, _ = make_client(settings=settings)
+
+    anonymous = client.get("/api/recipes")
+    assert anonymous.status_code == 401
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    response = client.get("/api/recipes")
+
+    assert response.status_code == 200
+    recipes = response.json()["recipes"]
+    assert {recipe["id"] for recipe in recipes} >= {
+        "travel-poster-premium",
+        "hotel-texture",
+        "route-map-comic",
+    }
+    travel_recipe = next(recipe for recipe in recipes if recipe["id"] == "travel-poster-premium")
+    assert travel_recipe["mode"] == "generate"
+    assert travel_recipe["prompt_suffix"]
+    assert "recommended_keywords" in travel_recipe
 
 
 def test_request_id_is_round_tripped(make_client):
@@ -126,6 +163,275 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "n" not in upstream_payload
 
 
+def test_generate_records_free_prompt_lineage_without_rewriting(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    prompt = "一张完全由专业用户自己控制的精确提示词，不要套模板"
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": prompt,
+            "model": "gpt-image-2",
+            "prompt_mode": "free",
+            "original_prompt": prompt,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["prompt"] == prompt
+    assert payload["prompt_mode"] == "free"
+    assert payload["original_prompt"] == prompt
+    assert payload["effective_prompt"] == prompt
+    upstream_payload = fake.run_json.await_args.args[2]
+    assert upstream_payload["prompt"] == prompt
+
+    detail_response = client.get(f"/api/generated-images/{payload['generated_image_id']}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["image"]
+    assert detail["lineage"]["prompt_mode"] == "free"
+    assert detail["lineage"]["original_prompt"] == prompt
+    assert detail["lineage"]["effective_prompt"] == prompt
+    assert detail["metadata"]["prompt_mode"] == "free"
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT prompt, original_prompt, prompt_mode, recipe_id
+            FROM generation_jobs
+            WHERE id = ?
+            """,
+            (payload["generation_job_id"],),
+        ).fetchone()
+    assert row["prompt"] == prompt
+    assert row["original_prompt"] == prompt
+    assert row["prompt_mode"] == "free"
+    assert row["recipe_id"] == ""
+
+
+def test_generate_records_recipe_lineage_and_detail_is_owner_scoped(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    first_register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert first_register.status_code == 200
+
+    original_prompt = "京都高端红叶私家团，面向家庭客户，真实目的地质感"
+    effective_prompt = (
+        f"{original_prompt}\n\n"
+        "配方辅助：高级旅行商业海报；真实目的地氛围；色彩克制。"
+    )
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": effective_prompt,
+            "original_prompt": original_prompt,
+            "prompt_mode": "recipe",
+            "recipe_id": "travel-poster-premium",
+            "recipe_version": "2026-06-08",
+            "model": "gpt-image-2",
+        },
+    )
+    assert response.status_code == 200
+    generated = response.json()
+    assert generated["prompt_mode"] == "recipe"
+    assert generated["original_prompt"] == original_prompt
+    assert generated["effective_prompt"] == effective_prompt
+    assert generated["recipe"]["id"] == "travel-poster-premium"
+
+    client.post("/api/auth/logout")
+    second_register = client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": "correct horse battery"},
+    )
+    assert second_register.status_code == 200
+    forbidden = client.get(f"/api/generated-images/{generated['generated_image_id']}")
+    assert forbidden.status_code == 404
+
+    client.post("/api/auth/logout")
+    login = client.post("/api/auth/login", json={"username": "alice", "password": "correct horse battery"})
+    assert login.status_code == 200
+    detail_response = client.get(f"/api/generated-images/{generated['generated_image_id']}")
+    assert detail_response.status_code == 200
+    lineage = detail_response.json()["image"]["lineage"]
+    assert lineage["prompt_mode"] == "recipe"
+    assert lineage["recipe_id"] == "travel-poster-premium"
+    assert lineage["recipe_version"] == "2026-06-08"
+    assert lineage["original_prompt"] == original_prompt
+    assert lineage["effective_prompt"] == effective_prompt
+
+
+def test_generate_rejects_unknown_prompt_recipe_without_upstream_call(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "高级旅行海报",
+            "original_prompt": "高级旅行海报",
+            "prompt_mode": "recipe",
+            "recipe_id": "not-a-real-recipe",
+            "recipe_version": "2026-06-08",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    fake.run_json.assert_not_awaited()
+
+    jobs_response = client.get("/api/jobs")
+    assert jobs_response.status_code == 200
+    job = jobs_response.json()["jobs"][0]
+    assert job["status"] == "failed"
+    assert job["prompt_mode"] == "recipe"
+    assert job["recipe_id"] == ""
+
+
+def test_generation_jobs_endpoint_lists_current_user_jobs_only(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    alice_register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert alice_register.status_code == 200
+    alice_generate = client.post(
+        "/api/generate",
+        json={
+            "prompt": "京都红叶高级海报",
+            "original_prompt": "京都红叶高级海报",
+            "prompt_mode": "recipe",
+            "recipe_id": "travel-poster-premium",
+            "recipe_version": "2026-06-08",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+        },
+    )
+    assert alice_generate.status_code == 200
+
+    jobs_response = client.get("/api/jobs")
+    assert jobs_response.status_code == 200
+    jobs = jobs_response.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["prompt_mode"] == "recipe"
+    assert jobs[0]["recipe_id"] == "travel-poster-premium"
+    assert jobs[0]["first_generated_image_id"] == alice_generate.json()["generated_image_id"]
+    assert jobs[0]["first_saved_image_url"].startswith("files/outputs/")
+
+    client.post("/api/auth/logout")
+    bob_register = client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": "correct horse battery"},
+    )
+    assert bob_register.status_code == 200
+    bob_jobs = client.get("/api/jobs")
+    assert bob_jobs.status_code == 200
+    assert bob_jobs.json()["jobs"] == []
+
+
+def test_generate_preserves_itinerary_mode_in_response_and_database(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成新疆行程地图，必须保持地点真实相对位置",
+            "model": "gpt-image-2",
+            "mode": "itinerary",
+            "size": "1792x1792",
+            "logo_requested": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "itinerary"
+    assert payload["saved_image_name"].startswith("routeplanner-itinerary-")
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        job = conn.execute("SELECT * FROM generation_jobs").fetchone()
+        image = conn.execute("SELECT * FROM generated_images").fetchone()
+
+    assert job["mode"] == "itinerary"
+    assert job["transport"] == "images-generate"
+    assert job["logo_requested"] == 1
+    assert image["mode"] == "itinerary"
+    assert image["saved_image_name"].startswith("routeplanner-itinerary-")
+
+
+def test_generate_ignores_unrecognized_client_mode(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "posteruser", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+            "mode": "unexpected-mode",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "generate"
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        job = conn.execute("SELECT * FROM generation_jobs").fetchone()
+        image = conn.execute("SELECT * FROM generated_images").fetchone()
+    assert job["mode"] == "generate"
+    assert image["mode"] == "generate"
+
+
 def test_authenticated_generation_sends_success_telegram_alert(
     make_client,
     settings_factory,
@@ -177,6 +483,56 @@ def test_authenticated_generation_sends_success_telegram_alert(
     assert alert.saved_image_urls == [payload["saved_image_url"]]
     assert alert.logo_requested is True
     assert alert.image_count == 1
+
+
+def test_itinerary_generation_sends_logo_requested_telegram_alert(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    alerts = []
+
+    async def _fake_send_generation_success_notification(**kwargs):
+        alerts.append(kwargs["alert"])
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.routes.send_generation_success_notification",
+        _fake_send_generation_success_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        default_api_key="sk-test",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, fake, _ = make_client(settings=settings)
+    register = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register.status_code == 200
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成全球旅行路线图，地点相对位置必须真实",
+            "model": "gpt-image-2",
+            "mode": "itinerary",
+            "size": "1792x1792",
+            "logo_requested": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert alerts
+    alert = alerts[0]
+    assert alert.mode == "itinerary"
+    assert alert.path == "/api/generate"
+    assert alert.size == "1792x1792"
+    assert alert.logo_requested is True
+    assert alert.logo_overlay_applied is False
 
 
 def test_generate_accepts_three_candidates(make_client, settings_factory):

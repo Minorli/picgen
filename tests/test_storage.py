@@ -113,6 +113,16 @@ def test_save_output_image_atomic(tmp_path: Path) -> None:
     saved_image = Path(payload["saved_image_path"])
     assert saved_image.is_file()
     assert saved_image.read_bytes() == png_bytes
+    assert payload["saved_metadata_path"] == ""
+    assert payload["saved_metadata_url"] == ""
+    assert payload["metadata"] == {
+        "mode": "generate",
+        "prompt": "hi",
+        "saved_image_width": 2,
+        "saved_image_height": 3,
+        "saved_image_bytes": len(png_bytes),
+    }
+    assert not list(saved_image.parent.glob("*.json"))
     # No temp files should be left behind
     assert not any(p.name.startswith(".tmp-") for p in saved_image.parent.iterdir())
 
