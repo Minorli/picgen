@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import math
 import sqlite3
 from pathlib import Path
 
@@ -8,14 +10,13 @@ import pytest
 from starlette.types import Scope
 
 from picgen.errors import APIError
+from picgen.itinerary_map import build_itinerary_map_plan, project_itinerary_points, render_itinerary_map_svg
 from picgen.middleware import BodySizeLimitMiddleware
 from picgen.notifications import NotificationResult
 from picgen.routes import _with_timing
 from picgen.upstream import parse_sse_json_events, stream_events_to_image_payload
 
-TINY_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
-)
+TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
 
 def test_health_endpoint_reports_ok(make_client):
@@ -48,6 +49,8 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
         smtp_username="noreply@example.com",
         smtp_password="mail-secret",
         smtp_from_email="noreply@example.com",
+        map_provider="mapbox",
+        mapbox_token="map-secret-token",
     )
     client, _, _ = make_client(settings=settings)
     response = client.get("/api/config")
@@ -65,7 +68,19 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["error_alert_notifications_enabled"] is True
     assert payload["bug_report_notifications_enabled"] is True
     assert payload["password_reset_email_enabled"] is True
+    assert payload["map_provider"] == "mapbox"
+    assert payload["map_geocoding_enabled"] is True
     assert "mail-secret" not in response.text
+    assert "map-secret-token" not in response.text
+
+
+def test_config_reports_default_geocoder_enabled(make_client):
+    client, _, _ = make_client()
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["map_provider"] == "nominatim"
+    assert payload["map_geocoding_enabled"] is True
 
 
 def test_config_reports_custom_responses_url(make_client, settings_factory):
@@ -236,10 +251,7 @@ def test_generate_records_recipe_lineage_and_detail_is_owner_scoped(make_client,
     assert first_register.status_code == 200
 
     original_prompt = "京都高端红叶私家团，面向家庭客户，真实目的地质感"
-    effective_prompt = (
-        f"{original_prompt}\n\n"
-        "配方辅助：高级旅行商业海报；真实目的地氛围；色彩克制。"
-    )
+    effective_prompt = f"{original_prompt}\n\n配方辅助：高级旅行商业海报；真实目的地氛围；色彩克制。"
     response = client.post(
         "/api/generate",
         json={
@@ -401,6 +413,688 @@ def test_generate_preserves_itinerary_mode_in_response_and_database(make_client,
     assert job["logo_requested"] == 1
     assert image["mode"] == "itinerary"
     assert image["saved_image_name"].startswith("routeplanner-itinerary-")
+
+
+def test_itinerary_map_plan_requires_coordinates_before_rendering(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        nominatim_url="",
+    )
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/plan",
+        json={
+            "title": "多彩新疆游",
+            "subtitle": "5/12 - 5/24",
+            "stops": [
+                {"date": "5/12", "name": "乌鲁木齐", "lat": 43.8256, "lng": 87.6168},
+                {"date": "5/13", "name": "赛里木湖"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "needs_confirmation"
+    assert payload["stops"][1]["status"] == "needs_coordinates"
+    assert "缺少坐标" in payload["warnings"][0]
+
+
+def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "日本纵贯路线",
+            "subtitle": "9/5 - 9/19",
+            "size": "1792x1792",
+            "model": "gpt-image-2",
+            "stops": [
+                {"date": "9/5", "name": "札幌", "lat": 43.0618, "lng": 141.3545, "transport": "抵达"},
+                {"date": "9/12", "name": "东京", "lat": 35.6762, "lng": 139.6503, "transport": "火车"},
+                {"date": "9/17", "name": "鹿儿岛", "lat": 31.5966, "lng": 130.5571, "transport": "火车"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "itinerary"
+    assert payload["transport"] == "responses-itinerary-artwork"
+    assert payload["generated_image_id"] > 0
+    assert payload["saved_image_url"].startswith("files/outputs/")
+    assert payload["saved_image_mime"] == "image/svg+xml"
+    assert payload["logo_requested"] is True
+    assert payload["logo_overlay_applied"] is False
+    assert payload["artwork"]["generated"] is True
+    assert payload["artwork"]["mode"] == "ai_background_program_overlay"
+    assert payload["size"] == "1792x1792"
+    assert payload["requested_size"] == "1792x1792"
+    assert payload["composition"]["orientation"] == "square"
+    assert payload["composition"]["adjusted"] is False
+    assert "手动选择" in payload["composition"]["message"]
+    saved = Path(payload["saved_image_path"])
+    assert saved.is_file()
+    assert saved.is_relative_to(resolved.outputs_dir)
+    svg = saved.read_text(encoding="utf-8")
+    assert 'data-layer="ai-stylized-map-background"' in svg
+    assert 'data-layer="program-route"' in svg
+    assert 'data-layer="program-labels"' in svg
+    assert "data:image/png;base64," in svg
+    assert "札幌" in svg
+    assert "东京" in svg
+    assert "鹿儿岛" in svg
+    fake.run_file_upload.assert_awaited_once()
+    assert fake.run_file_upload.await_args.args[2]["filename"] == "itinerary-geometry-control.png"
+    assert fake.run_file_upload.await_args.args[2]["content_type"] == "image/png"
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["size"] == "1792x1792"
+    content = upstream_payload["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert "高级漫画旅行路线图底图" in content[0]["text"]
+    assert "古典欧洲航海羊皮纸地图" in content[0]["text"]
+    assert "不要复刻任何游戏或影视 IP" in content[0]["text"]
+    assert "最终路线、编号圆点、日期牌和地点文字会由程序覆盖" in content[0]["text"]
+    assert "几何位置锁定" in content[0]["text"]
+    assert "像描图纸一样" in content[0]["text"]
+    assert "锁定像素坐标" in content[0]["text"]
+    assert "编号与站点对应如下" in content[0]["text"]
+    assert "01. 9/5｜札幌" in content[0]["text"]
+    assert "02. 9/12｜东京" in content[0]["text"]
+    assert "03. 9/17｜鹿儿岛" in content[0]["text"]
+    assert "不要绘制任何编号圆点" in content[0]["text"]
+    assert "不要绘制 LOGO" in content[0]["text"]
+    assert "不要生成路线图例" in content[0]["text"]
+    assert "Legend" in content[0]["text"]
+    assert "线型说明框" in content[0]["text"]
+    assert content[1] == {"type": "input_image", "file_id": "file_itinerary_control"}
+
+    with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        job = conn.execute(
+            "SELECT * FROM generation_jobs WHERE endpoint_path = ?",
+            ("/api/itinerary-map/render",),
+        ).fetchone()
+        image = conn.execute("SELECT * FROM generated_images WHERE id = ?", (payload["generated_image_id"],)).fetchone()
+    assert job is not None
+    assert job["transport"] == "responses-itinerary-artwork"
+    assert job["mode"] == "itinerary"
+    assert image is not None
+    assert image["saved_image_mime"] == "image/svg+xml"
+
+    file_response = client.get(payload["saved_image_url"])
+    assert file_response.status_code == 200
+    assert file_response.text.startswith("<svg")
+
+
+def test_itinerary_map_render_reports_error_when_artwork_returns_text_without_image(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    fake.run_responses.return_value = {
+        "output_text": "I cannot generate the final image in this response.",
+        "stream_events": [{"type": "response.output_text.delta", "delta": "no image"}],
+    }
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "欧洲漫画路线",
+            "subtitle": "6/1 - 6/8",
+            "size": "1792x1792",
+            "stops": [
+                {"date": "D1", "name": "巴黎", "lat": 48.8566, "lng": 2.3522, "transport": "火车"},
+                {"date": "D2", "name": "罗马", "lat": 41.9028, "lng": 12.4964, "transport": "飞机"},
+            ],
+        },
+    )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["code"] == "upstream_no_image"
+    assert "路线图 AI 底图这次没有生成成功" in payload["error"]
+    assert "I cannot generate" not in response.text
+    assert fake.run_responses.await_count == 1
+    assert not list(resolved.outputs_dir.rglob("*.svg"))
+
+
+def test_itinerary_map_render_manual_portrait_size_is_not_overridden_by_auto_square(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "均衡路线手动竖版",
+            "subtitle": "8/1 - 8/3",
+            "size": "1088x2240",
+            "stops": [
+                {"date": "8/1", "name": "A", "lat": 30.0, "lng": 120.0, "transport": "抵达"},
+                {"date": "8/2", "name": "B", "lat": 32.0, "lng": 122.0, "transport": "自驾"},
+                {"date": "8/3", "name": "C", "lat": 31.0, "lng": 121.0, "transport": "活动"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["size"] == "1088x2240"
+    assert payload["requested_size"] == "1088x2240"
+    assert payload["composition"]["orientation"] == "portrait"
+    assert payload["composition"]["adjusted"] is False
+    assert "手动选择" in payload["composition"]["message"]
+    assert "不会自动改写手动尺寸" in payload["composition"]["message"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["size"] == "1088x2240"
+
+
+def test_itinerary_map_render_auto_size_selects_landscape_for_wide_route(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "东西横跨路线",
+            "subtitle": "7/1 - 7/3",
+            "size": "auto",
+            "stops": [
+                {"date": "7/1", "name": "里斯本", "lat": 38.7223, "lng": -9.1393, "transport": "抵达"},
+                {"date": "7/2", "name": "马德里", "lat": 40.4168, "lng": -3.7038, "transport": "火车"},
+                {"date": "7/3", "name": "巴塞罗那", "lat": 41.3874, "lng": 2.1686, "transport": "火车"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["size"] == "1920x1088"
+    assert payload["requested_size"] == "auto"
+    assert payload["composition"]["orientation"] == "landscape"
+    assert payload["composition"]["adjusted"] is True
+    assert "东西跨度" in payload["composition"]["message"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["size"] == "1920x1088"
+
+
+def test_itinerary_map_render_auto_size_keeps_square_for_balanced_route(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "均衡路线",
+            "subtitle": "8/1 - 8/3",
+            "size": "auto",
+            "stops": [
+                {"date": "8/1", "name": "A", "lat": 30.0, "lng": 120.0, "transport": "抵达"},
+                {"date": "8/2", "name": "B", "lat": 32.0, "lng": 122.0, "transport": "自驾"},
+                {"date": "8/3", "name": "C", "lat": 31.0, "lng": 121.0, "transport": "活动"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["size"] == "1792x1792"
+    assert payload["requested_size"] == "auto"
+    assert payload["composition"]["orientation"] == "square"
+    assert payload["composition"]["adjusted"] is False
+    assert "方图" in payload["composition"]["message"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["size"] == "1792x1792"
+
+
+def test_itinerary_map_render_inlines_style_reference_when_file_upload_fallbacks(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
+    style_reference = resolved.static_dir / "itinerary-style-reference.jpg"
+    style_reference.write_bytes(base64.b64decode(TINY_PNG_B64) + (b"x" * (900 * 1024)))
+    fake.run_file_upload.side_effect = APIError(404, "Files 上传接口不可用")
+    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "多彩路线图",
+            "subtitle": "6/1 - 6/3",
+            "size": "1792x1792",
+            "stops": [
+                {"date": "6/1", "name": "A 城", "lat": 31.2304, "lng": 121.4737, "transport": "抵达"},
+                {"date": "6/2", "name": "B 山", "lat": 30.2741, "lng": 120.1551, "transport": "包车"},
+                {"date": "6/3", "name": "C 湖", "lat": 29.8683, "lng": 121.5440, "transport": "自驾"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["artwork"]["generated"] is True
+    assert fake.run_file_upload.await_count == 1
+    assert fake.run_file_upload.await_args.args[2]["filename"] == "itinerary-style-reference.jpg"
+    upstream_payload = fake.run_responses.await_args.args[2]
+    content = upstream_payload["input"][0]["content"]
+    assert len(content) == 3
+    assert content[0]["type"] == "input_text"
+    assert "第一张输入图只是风格参考" in content[0]["text"]
+    assert "第二张输入图是程序按真实经纬度投影出来的硬性地理控制稿" in content[0]["text"]
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+    assert content[2]["type"] == "input_image"
+    assert content[2]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_itinerary_map_render_succeeds_without_ai_background(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin", default_api_key="")
+    client, fake, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "D1 - D2",
+            "stops": [
+                {"date": "D1", "name": "城市 A", "lat": 35.6812, "lng": 139.7671},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved_image_mime"] == "image/svg+xml"
+    assert payload["background_image"]["generated"] is False
+    fake.run_json.assert_not_awaited()
+
+
+def test_itinerary_map_render_fails_when_artwork_payload_is_invalid(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
+    fake.run_responses.return_value = {"data": [{"b64_json": "not-base64"}], "created": 1}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "D1 - D2",
+            "stops": [
+                {"date": "D1", "name": "城市 A", "lat": 35.6812, "lng": 139.7671},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023},
+            ],
+        },
+    )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["code"] == "upstream_error"
+    assert "图片生成服务暂时不可用" in payload["error"]
+    assert "上游返回的图片格式无效" in payload["details"]
+
+
+def test_itinerary_map_render_respects_logo_toggle(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin", default_api_key="")
+    client, _, resolved = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "D1 - D2",
+            "logo_requested": False,
+            "stops": [
+                {"date": "D1", "name": "城市 A", "lat": 35.6812, "lng": 139.7671},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["logo_requested"] is False
+    assert payload["logo_overlay_applied"] is False
+    svg = Path(payload["saved_image_path"]).read_text(encoding="utf-8")
+    assert 'data-layer="program-logo"' not in svg
+    with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
+        job = conn.execute(
+            "SELECT logo_requested FROM generation_jobs WHERE endpoint_path = ?",
+            ("/api/itinerary-map/render",),
+        ).fetchone()
+    assert job is not None
+    assert job[0] == 0
+
+
+def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fails(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+        nominatim_url="",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "output_text": (
+            "["
+            '{"index":0,"name":"巴黎","lat":48.8566,"lng":2.3522,"confidence":0.72,'
+            '"note":"Paris city center approximate"},'
+            '{"index":1,"name":"罗马","lat":41.9028,"lng":12.4964,"confidence":0.72,'
+            '"note":"Rome city center approximate"}'
+            "]"
+        )
+    }
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "欧洲漫画路线",
+            "subtitle": "6/1 - 6/8",
+            "generate_background": False,
+            "stops": [
+                {"date": "D1", "name": "巴黎", "transport": "火车"},
+                {"date": "D2", "name": "罗马", "transport": "飞机"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved_image_mime"] == "image/svg+xml"
+    assert payload["plan"]["status"] == "ready"
+    assert payload["plan"]["stops"][0]["coordinate_source"] == "ai_approximate"
+    assert payload["plan"]["stops"][0]["approximate"] is True
+    assert payload["plan"]["stops"][0]["lat"] == 48.8566
+    assert payload["plan"]["stops"][1]["lng"] == 12.4964
+    fake.run_responses.assert_awaited_once()
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "gpt-5.5"
+    assert "可解析 JSON" in upstream_payload["instructions"]
+    assert "经纬度" in upstream_payload["instructions"]
+    prompt_text = upstream_payload["input"][0]["content"][0]["text"]
+    assert "大概经纬度" in prompt_text
+    assert "只返回 JSON" in prompt_text
+    assert "巴黎" in prompt_text
+    assert "罗马" in prompt_text
+    fake.run_json.assert_not_awaited()
+
+    svg = Path(payload["saved_image_path"]).read_text(encoding="utf-8")
+    assert "欧洲漫画路线" in svg
+    assert "巴黎" in svg
+    assert "罗马" in svg
+    assert Path(payload["saved_image_path"]).is_relative_to(resolved.outputs_dir)
+
+
+def test_itinerary_map_plan_uses_configured_mapbox_geocoder(make_client, settings_factory, respx_mock):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        map_provider="mapbox",
+        mapbox_token="mapbox-test-token",
+    )
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    respx_mock.get("https://api.mapbox.com/geocoding/v5/mapbox.places/城市%20A.json").respond(
+        200,
+        json={
+            "features": [
+                {
+                    "text": "城市 A",
+                    "place_name": "城市 A, Country",
+                    "center": [139.7671, 35.6812],
+                    "relevance": 0.99,
+                }
+            ]
+        },
+    )
+
+    response = client.post(
+        "/api/itinerary-map/plan",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "D1 - D2",
+            "stops": [
+                {"date": "D1", "name": "城市 A", "transport": "火车"},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023, "transport": "自驾"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["stops"][0]["geocoded"] is True
+    assert payload["stops"][0]["lat"] == 35.6812
+
+
+def test_itinerary_map_plan_uses_default_nominatim_geocoder(make_client, settings_factory, respx_mock):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin")
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    respx_mock.get("https://nominatim.openstreetmap.org/search").respond(
+        200,
+        json=[
+            {
+                "name": "城市 A",
+                "display_name": "城市 A, Country",
+                "lat": "35.6812",
+                "lon": "139.7671",
+                "importance": 0.8,
+                "place_rank": 16,
+            }
+        ],
+    )
+
+    response = client.post(
+        "/api/itinerary-map/plan",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "D1 - D2",
+            "stops": [
+                {"date": "D1", "name": "城市 A", "transport": "火车"},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023, "transport": "自驾"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["stops"][0]["geocoded"] is True
+    assert payload["stops"][0]["lat"] == 35.6812
+
+
+def test_itinerary_map_render_requires_subtitle_date(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin")
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeplanner", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    response = client.post(
+        "/api/itinerary-map/render",
+        json={
+            "title": "全球旅行路线图",
+            "subtitle": "",
+            "stops": [
+                {"date": "D1", "name": "城市 A", "lat": 35.6812, "lng": 139.7671},
+                {"date": "D2", "name": "城市 B", "lat": 34.6937, "lng": 135.5023},
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    assert "副标题日期" in response.json()["error"]
+
+
+def test_itinerary_projection_spreads_same_place_stops_for_readability():
+    plan = build_itinerary_map_plan(
+        title="同城多站路线",
+        subtitle="D1 - D4",
+        stops=[
+            {"date": "D1", "name": "日内瓦", "lat": 46.2044, "lng": 6.1432},
+            {"date": "D2", "name": "日内瓦湖", "lat": 46.2045, "lng": 6.1431},
+            {"date": "D3", "name": "第戎", "lat": 47.3220, "lng": 5.0415},
+            {"date": "D4", "name": "勃艮第第戎", "lat": 47.3221, "lng": 5.0414},
+        ],
+    )
+
+    points = project_itinerary_points(plan, width=1088, height=2240)
+
+    assert len(points) == 4
+    assert math.hypot(points[0]["x"] - points[1]["x"], points[0]["y"] - points[1]["y"]) >= 30
+    assert math.hypot(points[2]["x"] - points[3]["x"], points[2]["y"] - points[3]["y"]) >= 30
+
+    svg = render_itinerary_map_svg(plan, width=1088, height=2240)
+    assert 'data-layer="program-route"' in svg
+    assert 'class="route-dot-index">4</text>' in svg
+    assert "日内瓦湖" in svg
+    assert "勃艮第第戎" in svg
+
+
+def test_itinerary_map_svg_uses_soft_route_style_and_country_labels():
+    plan = build_itinerary_map_plan(
+        title="欧洲旅行路线图",
+        subtitle="9/5 - 9/17",
+        stops=[
+            {"date": "9/5", "name": "罗马", "lat": 41.9028, "lng": 12.4964},
+            {"date": "9/7", "name": "佛罗伦萨", "lat": 43.7696, "lng": 11.2558},
+            {"date": "9/12", "name": "苏黎世", "lat": 47.3769, "lng": 8.5417},
+            {"date": "9/16", "name": "日内瓦蒙特勒洛桑", "country": "瑞士/法国", "lat": 46.4312, "lng": 6.9107},
+            {"date": "9/17", "name": "巴黎", "country": "法国", "lat": 48.8566, "lng": 2.3522},
+        ],
+    )
+
+    points_before = project_itinerary_points(plan, width=1792, height=1792)
+    svg = render_itinerary_map_svg(plan)
+    points_after = project_itinerary_points(plan, width=1792, height=1792)
+
+    assert points_after == points_before
+    assert 'data-layer="program-country-labels"' in svg
+    assert "意大利" in svg
+    assert "瑞士" in svg
+    assert "法国" in svg
+    assert "瑞士/法国" not in svg
+    assert "日内瓦蒙特勒洛桑" in svg
+    assert "stroke:#a85f4b;stroke-width:7.4" in svg
+    assert "stroke:#bd2f2f" not in svg
+    assert "stroke-width:13" not in svg
+    assert ".route-line.transfer{stroke-width:6.2;opacity:.78}" in svg
+    assert ".route-line.transfer{stroke-width:6.2;stroke-dasharray" not in svg
+    assert 'data-layer="program-title"' in svg
+    assert 'class="title-outline"' in svg
+    assert 'id="titleInk"' in svg
 
 
 def test_generate_ignores_unrecognized_client_mode(make_client, settings_factory):
@@ -829,9 +1523,7 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     assert files[0]["filename"] == "ref.png"
 
 
-def test_edit_accepts_ordered_reference_images_and_returns_candidates(
-    make_client, settings_factory
-):
+def test_edit_accepts_ordered_reference_images_and_returns_candidates(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_multipart.return_value = {
@@ -1041,6 +1733,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
+    assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240"}]
 
@@ -1161,6 +1854,8 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
     assert "风险等级：低" in payload["risk_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.5"
+    assert "版权" in upstream_payload["instructions"]
+    assert "中文" in upstream_payload["instructions"]
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
     assert "版权与商标风险审查助手" in content[0]["text"]
@@ -1178,10 +1873,7 @@ def test_edit_accepts_logo_reference_and_prompt_guidance(make_client, settings_f
         json={
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/images/edits",
-            "prompt": (
-                "生成海报\n\n"
-                "6 人游 LOGO 合成要求：请把参考图中的 6 人游 LOGO 作为公司官方标识整合进最终画面。"
-            ),
+            "prompt": ("生成海报\n\n6 人游 LOGO 合成要求：请把参考图中的 6 人游 LOGO 作为公司官方标识整合进最终画面。"),
             "model": "gpt-image-2",
             "mode": "generate-with-logo",
             "images": [
@@ -1572,10 +2264,13 @@ def test_responses_sse_parser_keeps_partial_image() -> None:
     assert payload["data"][0]["b64_json"] == TINY_PNG_B64
 
 
-@pytest.mark.parametrize("payload", [
-    {"prompt": " "},
-    {"prompt": "x" * 32_001},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"prompt": " "},
+        {"prompt": "x" * 32_001},
+    ],
+)
 def test_generate_validation_errors(make_client, settings_factory, payload):
     settings = settings_factory(default_api_key="sk-test")
     client, _, _ = make_client(settings=settings)

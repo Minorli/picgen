@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     error_alert_telegram_bot_token: str = ""
     error_alert_telegram_chat_id: str = ""
     error_alert_telegram_timeout_seconds: float = Field(default=3.0, ge=1.0, le=30.0)
+    map_provider: str = ""
+    amap_key: str = ""
+    mapbox_token: str = ""
+    nominatim_url: str = "https://nominatim.openstreetmap.org/search"
+    map_geocode_timeout_seconds: float = Field(default=4.0, ge=1.0, le=30.0)
 
     log_level: str = "INFO"
     log_format: str = "console"
@@ -118,6 +123,10 @@ class Settings(BaseSettings):
         "bug_report_webhook_url",
         "error_alert_telegram_bot_token",
         "error_alert_telegram_chat_id",
+        "map_provider",
+        "amap_key",
+        "mapbox_token",
+        "nominatim_url",
         "public_base_url",
         "smtp_host",
         "smtp_username",
@@ -136,6 +145,14 @@ class Settings(BaseSettings):
         normalized = value.strip().lower() or "wecom"
         if normalized not in {"wecom", "serverchan", "generic"}:
             raise ValueError("PICGEN_BUG_REPORT_WEBHOOK_KIND 只能是 wecom、serverchan 或 generic")
+        return normalized
+
+    @field_validator("map_provider", mode="after")
+    @classmethod
+    def _normalize_map_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"", "amap", "mapbox", "nominatim"}:
+            raise ValueError("PICGEN_MAP_PROVIDER 只能是 amap、mapbox、nominatim 或留空")
         return normalized
 
     @field_validator("admin_username", mode="after")

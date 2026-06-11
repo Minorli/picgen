@@ -21,7 +21,9 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert "withLogoLayoutPrompt" in app_js
     assert "官方透明 PNG 原样贴入" in app_js
     assert "图标、字体、颜色和比例均不得改动" in app_js
-    assert "LOGO 位置附近保留干净留白" in app_js
+    assert "LOGO 位置附近保留自然干净背景" in app_js
+    assert "不要绘制 LOGO 占位框" in app_js
+    assert "白色底板" in app_js
     assert "logo_text_color" in app_js
     assert 'textColor: "original"' in app_js
     assert "官方 LOGO 缺少透明背景" in app_js
@@ -88,7 +90,7 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "/api/admin/users" in app_js
     assert "/api/me" in app_js
     assert "/api/usage" in app_js
-    assert "credentials: \"same-origin\"" in app_js
+    assert 'credentials: "same-origin"' in app_js
     assert "scopedStorageKey" in app_js
     assert "settingsStorageKey()" in app_js
     assert "historyStorageKey()" in app_js
@@ -96,7 +98,7 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "enterAuthGate(" in app_js
     assert "enterAppShell()" in app_js
     assert "localStorage.setItem('token'" not in app_js
-    assert "localStorage.setItem(\"token\"" not in app_js
+    assert 'localStorage.setItem("token"' not in app_js
     assert "submitChangePassword" in app_js
     assert ".change-password-dialog" in styles_css
 
@@ -145,7 +147,7 @@ def test_generation_progress_explains_retry_attempts_inside_preview() -> None:
     assert "已多次尝试仍未成功" in app_js
     assert "setPendingResultFailure" in app_js
     assert "refs.resultPreviewEmpty.textContent = safeMessage" in app_js
-    assert "refs.resultPreviewLabel.textContent = \"生成失败\"" in app_js
+    assert 'refs.resultPreviewLabel.textContent = "生成失败"' in app_js
     assert ".preview-empty.failure" in styles_css
 
 
@@ -241,7 +243,7 @@ def test_image_centric_workspace_actions_and_brand_download_gateway_are_present(
     assert 'id="downloadOriginalButton"' in index_html
     assert "下载带 6 人游 LOGO 成品" in index_html
     assert "原始底图" in index_html
-    assert "openPreview(\"result\", \"cinema\")" in app_js
+    assert 'openPreview("result", "cinema")' in app_js
     assert "setDownloadPendingLogo" in app_js
     assert "downloadOriginalButton" in app_js
     assert "updateResultActionSurface" in app_js
@@ -303,22 +305,38 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert 'id="renderItineraryMapButton"' in index_html
     assert "行程路线" in index_html
     assert "粘贴客户行程" in index_html
-    assert "AI 路线图" in index_html
-    assert "AI 生成行程路线" in index_html
+    assert "准确路线图" in index_html
+    assert "生成准确路线图" in index_html
+    assert "AI 路线图" not in index_html
+    assert "AI 生成行程路线" not in index_html
     assert 'id="copyItineraryTemplateButton"' in index_html
     assert 'id="applyItineraryTemplateButton"' in index_html
     assert "复制精细模板" in index_html
     assert "套用精细模板" in index_html
+    assert "系统会自动定位地点" in index_html
+    assert "地点不明确时会提示补充更完整名称" in index_html
+    assert "请补充 @坐标 行" not in index_html
+    assert "未补充坐标时不会生成伪精确地图" not in index_html
+    assert "不要求用户提供经纬度" not in index_html
     assert "官方 LOGO 安全区" in index_html
     assert 'value="定制旅行路线图"' in index_html
-    assert 'id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24"' in index_html
+    assert (
+        'id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24" required' in index_html
+    )
     assert 'id="itineraryTitleInput" type="text" maxlength="120" value="新疆深度定制旅行"' not in index_html
     assert 'value="comic"' in index_html
     assert "漫画路线图" in index_html
-    assert "默认按漫画风格路线图生成" in index_html
+    assert "程序覆盖路线、日期、文字和官方 LOGO" in index_html
+    assert '<option value="auto" selected>自动比例（按真实路线选择）</option>' in index_html
+    assert 'class="itinerary-size-hint"' in index_html
+    assert ".itinerary-size-hint" in styles_css
+    assert index_html.index('<option value="auto" selected>自动比例（按真实路线选择）</option>') < index_html.index(
+        '<option value="1792x1792">方图 1792 x 1792</option>'
+    )
     assert index_html.index('<option value="1792x1792">方图 1792 x 1792</option>') < index_html.index(
         '<option value="1088x2240">6 人游竖版 1088 x 2240</option>'
     )
+    assert "系统会按真实坐标自动选择竖版、横版或方图" in index_html
     assert 'value="1088x2240"' in index_html
     assert 'value="1792x1792"' in index_html
     assert 'value="1920x1088"' in index_html
@@ -331,12 +349,21 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "1800x1800" not in index_html
     assert "1920x1080" not in index_html
 
-    assert "itineraryPanel: document.querySelector(\"#itineraryPanel\")" in app_js
-    assert "itineraryDescriptionInput: document.querySelector(\"#itineraryDescriptionInput\")" in app_js
+    assert 'itineraryPanel: document.querySelector("#itineraryPanel")' in app_js
+    assert 'itineraryDescriptionInput: document.querySelector("#itineraryDescriptionInput")' in app_js
     assert "buildAIItineraryMapPrompt" in app_js
+    assert "parseItineraryCoordinateStops" in app_js
+    assert "parseItineraryTextStops" in app_js
+    assert "isItineraryInstructionSection" in app_js
+    assert "isItineraryInstructionRow" in app_js
+    assert "cleanItineraryStopName" in app_js
+    assert 'postJSON("api/itinerary-map/render"' in app_js
+    assert "itinerary_coordinates_required" in app_js
     assert "isCompleteItineraryPrompt" in app_js
+    assert "normalizeCompleteItineraryPrompt" in app_js
+    assert "ITINERARY_GEOGRAPHY_GUARD" in app_js
     assert "完整行程地图 prompt" in app_js
-    assert "return normalizedDescription" in app_js
+    assert "return normalizeCompleteItineraryPrompt(normalizedDescription" in app_js
     assert "stripCodeFence" in app_js
     assert "submitAIItineraryMap" in app_js
     assert "AI_ITINERARY_EXAMPLE" in app_js
@@ -358,16 +385,20 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "真实酒店" not in app_js
     assert "行程基础信息" in app_js
     assert "逐日行程" in app_js
+    assert "程序坐标（用于准确落点，至少填写两个）" in app_js
+    assert "@坐标: D1,城市/地点 A,纬度,经度,交通方式" in app_js
     assert "地点与地理校验" in app_js
     assert "copyDetailedItineraryTemplate" in app_js
     assert "applyDetailedItineraryTemplate" in app_js
     assert "shouldUseXinjiangRouteGuard" not in app_js
     assert "xinjiangRouteGuardPrompt" not in app_js
-    assert "api/generate" in app_js
     assert "drawItineraryLogoSafeArea" in app_js
-    assert "withLogoLayoutPrompt(aiPrompt, logoRequested)" in app_js
+    assert "withLogoLayoutPrompt(aiPrompt, logoRequested)" not in app_js
     assert "地理正确性硬性要求" in app_js
     assert "不能为了画面好看而调整地点相对位置" in app_js
+    assert "不要凭想象补地图" in app_js
+    assert "测绘式真实地图" in app_js
+    assert "跨大区或跨国家转场必须使用总览图、局部放大框或飞行连接" in app_js
     assert "库尔德宁" not in app_js
     assert "喀拉峻" not in app_js
     assert "伊宁" not in app_js
@@ -390,23 +421,36 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "22cee0390f9c" not in app_js
     assert "新疆游" not in app_js
     assert 'mode: "itinerary"' in app_js
-    assert 'transport: "images-generate"' in app_js
+    assert '"responses-itinerary-artwork"' in app_js
     itinerary_submit_block = app_js[
         app_js.index("async function submitAIItineraryMap()") : app_js.index('rememberRegenerationRequest("itinerary"')
     ]
-    assert 'const result = await postJSON("api/generate"' in itinerary_submit_block
+    assert 'const result = await postJSON("api/itinerary-map/render"' in itinerary_submit_block
+    assert '"responses-itinerary-artwork"' in itinerary_submit_block
     assert 'mode: "itinerary"' in itinerary_submit_block
+    assert 'if (selectedSize === "auto")' in app_js
+    assert "composition?.message" in app_js
+    assert "api_key: settings.apiKey" in itinerary_submit_block
+    assert "endpoint_url: settings.responsesUrl" in itinerary_submit_block
+    assert "model: itineraryModel" in itinerary_submit_block
+    assert "generate_background: true" in itinerary_submit_block
     assert "logo_requested: logoRequested" in itinerary_submit_block
+    assert "logo_requested: true" not in itinerary_submit_block
+    assert "if (!routeStops.length)" in itinerary_submit_block
+    assert "请填写副标题日期" in itinerary_submit_block
     assert "行程描述不能为空" in app_js
     assert "不要让 AI 绘制或改造 6 人游 LOGO" in app_js
-    assert "左上角预留干净白底 LOGO 安全区" in app_js
-    assert "mode: \"itinerary\"" in app_js
+    assert "不要画 LOGO 占位框" in app_js
+    assert "不要画边框" in app_js
+    assert "不要画白底底板" in app_js
+    assert "左上角预留干净白底 LOGO 安全区" not in app_js
+    assert 'mode: "itinerary"' in app_js
     assert "COMPANY_LOGO_URL" in app_js
     assert "ensureCompanyLogoCanvas" not in app_js
     assert "parseItineraryStops" not in app_js
     assert "projectItineraryPoint" not in app_js
     assert "ITINERARY_MAP_FEATURES" not in app_js
-    assert "setMode(\"itinerary\"" in app_js
+    assert 'setMode("itinerary"' in app_js
 
     assert "#itineraryPanel" in styles_css
     assert ".itinerary-ai-options" in styles_css
@@ -437,18 +481,18 @@ def test_layout_review_fixes_keep_generation_path_quiet() -> None:
 
     assert "海报生成" in index_html
     assert "开始海报生成" in index_html
-    assert "\"开始海报生成\"" in app_js
-    assert "\"开始生成\"" not in app_js
-    assert "--font: \"SF Pro Text\"" in styles_css
+    assert '"开始海报生成"' in app_js
+    assert '"开始生成"' not in app_js
+    assert '--font: "SF Pro Text"' in styles_css
     assert "Inter" not in styles_css
     assert 'class="advanced-params"' in index_html
-    assert '<summary>高级参数</summary>' in index_html
+    assert "<summary>高级参数</summary>" in index_html
     assert 'id="generateSizePreset" hidden' in index_html
     assert 'id="logoOverlayEnabled"' in index_html
     assert 'href="#resultPanel"' not in index_html
     assert 'id="resultActions" class="result-actions hidden"' in index_html
     assert 'id="sourcePreviewCard" class="preview-card source-card hidden"' in index_html
-    assert "setStatusMessage(\"已复制本次提示词。\")" in app_js
+    assert 'setStatusMessage("已复制本次提示词。")' in app_js
     assert "errorDetailsWithRequestId" in app_js
     assert "request_id:" in app_js
     assert "flowConnect" not in app_js
@@ -571,7 +615,7 @@ def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
     assert "setTeamChatSending" in app_js
     assert "mergeTeamChatMessages" in app_js
     assert "updateTeamChatLastMessageId" in app_js
-    assert "refs.teamChatMessageInput.value = \"\"" in app_js
+    assert 'refs.teamChatMessageInput.value = ""' in app_js
     assert "refs.sendTeamChatButton.disabled = isSending" in app_js
     assert "restoreTeamChatDraft" in app_js
     assert "createOptimisticTeamChatMessage" in app_js
@@ -585,11 +629,11 @@ def test_team_chat_ui_is_available_without_openai_api_badge() -> None:
     assert "parseTeamChatQuotedContent" in app_js
     assert "renderTeamChatBubbleContent" in app_js
     assert "isOwnTeamChatMessage" in app_js
-    assert 'button.dataset.action = action' in app_js
+    assert "button.dataset.action = action" in app_js
     assert '"copy", "复制"' in app_js
     assert '"quote", "引用"' in app_js
     assert '"recall", "撤回"' in app_js
-    assert "actions.push([\"recall\"" in app_js
+    assert 'actions.push(["recall"' in app_js
     assert "已引用这条消息。" in app_js
     assert 'setTeamChatStatus("逗你的，撤回不了。")' in app_js
     assert ".team-chat-dialog" in styles_css
@@ -753,7 +797,7 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "env_file:" not in compose
     assert f"image: minorli/picgen:{version}" in compose
     assert "picgen-data:/app/data" in compose
-    assert "VOLUME [\"/app/data\"]" in dockerfile
+    assert 'VOLUME ["/app/data"]' in dockerfile
     assert "PICGEN_STATIC_DIR=/app/static" in dockerfile
     assert "PICGEN_ROOT_DIR=/app" in dockerfile
     assert "PICGEN_ENV_FILE=/app/data/.env" in dockerfile

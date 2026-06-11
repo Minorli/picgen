@@ -22,6 +22,7 @@ __pycache__
 /*.jpeg
 /*.webp
 !static/*.png
+!static/*.jpg
 
 data/
 *.sqlite3

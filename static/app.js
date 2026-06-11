@@ -12,9 +12,9 @@ const COMPANY_LOGO_MARGIN_RATIO = 0.04
 const COMPANY_LOGO_MIN_MARGIN = 16
 const COMPANY_LOGO_MAX_MARGIN = 42
 const COMPANY_LOGO_LAYOUT_PROMPT = [
-  "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留干净留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
+  "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留自然干净的留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
-  "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
+  "LOGO 位置附近保留自然干净背景，背景尽量简单；不要绘制 LOGO 占位框、边框、描边、白色底板、贴纸底座或任何临时标识。",
 ].join("\n")
 const EDIT_PRESERVE_PROMPT = [
   "编辑保护要求：只修改用户明确要求修改的部分。",
@@ -59,6 +59,11 @@ const DETAILED_ITINERARY_TEMPLATE = [
   "- 日期：景区/街区 C → 城市/地点 D；交通：请写明；入住：酒店名；当天重点：请写明。",
   "- 按真实行程继续补齐每一天；不要保留示例地名，不要省略中间日期。",
   "",
+  "程序坐标（用于准确落点，至少填写两个）：",
+  "- @坐标: D1,城市/地点 A,纬度,经度,交通方式",
+  "- @坐标: D2,城市/地点 B,纬度,经度,交通方式",
+  "- @坐标: D3,城市/地点 C,纬度,经度,交通方式",
+  "",
   "地点与地理校验（请按本次目的地改写）：",
   "- 必须保持真实相对位置：请列出本次路线中容易画错的城市、景区、海岸、山脉、湖泊、岛屿或边境关系。",
   "- 如果路线跨国家/大区，请明确哪些是飞行或长距离转场，哪些是地面路线；不要把远距离城市画成相邻小镇。",
@@ -68,9 +73,18 @@ const DETAILED_ITINERARY_TEMPLATE = [
   "画面要求：",
   "- 水彩漫画路线图，不要像手机导航截图或低质 PPT。",
   "- 日期必须逐日出现，不能漏任何一天；地点、交通、酒店和核心活动必须按用户原文保留。",
-  "- 左上角预留 6 人游 LOGO 安全区；不要让 AI 绘制 LOGO，程序会用官方透明 PNG 原样贴入。",
+  "- 左上角预留自然干净的 6 人游 LOGO 留白；不要让 AI 绘制 LOGO，不要画 LOGO 占位框，不要画边框，不要画白底底板，程序会用官方透明 PNG 原样贴入。",
   "- 风格：水彩漫画路线图，使用柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
   "- 漫画风格不能牺牲地理真实性；日期、距离、交通方式、酒店和核心景区不能省略，信息丰富但不拥挤。",
+].join("\n")
+
+const ITINERARY_GEOGRAPHY_GUARD = [
+  "地图准确性保护：路线图必须优先服从真实地图坐标、用户提供的地图参考和明确的地理关系，不能只按画面美观重排地点。",
+  "- 如果用户提供了经纬度、导航距离、地点清单里的东西南北关系或转场方式，以这些资料为硬约束。",
+  "- 不要凭想象补地图；不确定地点准确落位时，不要把它画到看起来顺眼的位置，改用编号点、局部放大框、侧边行程表或“待核对位置”备注。",
+  "- 使用测绘式真实地图框架：默认北上南下、西左东右，城市、景区、湖泊、山脉、海岸、岛屿和边境的相对方位不能为了构图改变。",
+  "- 跨大区或跨国家转场必须使用总览图、局部放大框或飞行连接；不要把远距离城市压缩成相邻景点，也不要把南北或东西关系画反。",
+  "- 地点名相近或景区层级复杂时，先按用户给出的地理校验逐项落位，再画路线；缺少把握时保守表达为示意路线，不得伪装成精确地图。",
 ].join("\n")
 
 const SIZE_PRESETS = [
@@ -1716,7 +1730,11 @@ async function askBotWithCreativeBrief() {
 }
 
 function parseItinerarySize() {
-  const [widthText, heightText] = (refs.itinerarySizeSelect?.value || "1792x1792").split("x")
+  const selectedSize = refs.itinerarySizeSelect?.value || "auto"
+  if (selectedSize === "auto") {
+    return "auto"
+  }
+  const [widthText, heightText] = selectedSize.split("x")
   const width = Number.parseInt(widthText, 10)
   const height = Number.parseInt(heightText, 10)
   if (!Number.isInteger(width) || !Number.isInteger(height)) {
@@ -1737,13 +1755,13 @@ function itineraryThemePrompt() {
     return "深色高级手绘地形地图，午夜蓝与暖金路线，低饱和、高对比，适合高端旅行海报；保留真实山脉、湖泊、沙漠和城市层级，路线像精品旅行地图而不是导航截图。"
   }
   if (theme === "classic") {
-    return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线、指南针和图例，保持现代高级旅行质感，地点落位仍必须服从真实地理。"
+    return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线和克制指南针元素，保持现代高级旅行质感；不要生成路线图例或线型说明框，地点落位仍必须服从真实地理。"
   }
   return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；使用红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
 }
 
 function drawItineraryLogoSafeArea() {
-  return "左上角预留干净白底 LOGO 安全区；不要让 AI 绘制或改造 6 人游 LOGO，最终由程序使用官方透明 PNG 原样贴入。"
+  return "左上角预留自然干净的 LOGO 留白；不要让 AI 绘制或改造 6 人游 LOGO，不要画 LOGO 占位框，不要画边框，不要画白底底板，不要画贴纸底座或任何临时标识；最终由程序使用官方透明 PNG 原样贴入。"
 }
 
 function stripCodeFence(value) {
@@ -1760,12 +1778,31 @@ function isCompleteItineraryPrompt(value) {
     && text.includes("地理正确性硬性要求")
 }
 
+function normalizeCompleteItineraryPrompt(value) {
+  let text = stripCodeFence(value)
+  const legacyLogoSafeArea = ["左上角预留干净白底", "LOGO 安全区"].join(" ")
+  text = text
+    .replaceAll(`${legacyLogoSafeArea}；不要让 AI 绘制或改造 6 人游 LOGO，最终由程序使用官方透明 PNG 原样贴入。`, drawItineraryLogoSafeArea())
+    .replaceAll(legacyLogoSafeArea, "左上角预留自然干净的 LOGO 留白")
+    .replaceAll(
+      "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
+      "LOGO 位置附近保留自然干净背景，背景尽量简单；不要绘制 LOGO 占位框、边框、描边、白色底板、贴纸底座或任何临时标识。",
+    )
+  if (!text.includes("地图准确性保护")) {
+    text = `${text}\n\n${ITINERARY_GEOGRAPHY_GUARD}`
+  }
+  if (!text.includes("不要画 LOGO 占位框")) {
+    text = `${text}\n\n- ${drawItineraryLogoSafeArea()}`
+  }
+  return text
+}
+
 function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
   const normalizedTitle = String(title || "").trim() || "定制旅行行程地图"
-  const normalizedSubtitle = String(subtitle || "").trim() || "AI 路线图"
+  const normalizedSubtitle = String(subtitle || "").trim() || "准确路线图"
   const normalizedDescription = stripCodeFence(description)
   if (isCompleteItineraryPrompt(normalizedDescription)) {
-    return normalizedDescription
+    return normalizeCompleteItineraryPrompt(normalizedDescription)
   }
   return [
     "请生成一张漫画风格的高级定制旅行行程路线图海报，不是普通导航截图，也不是纯信息表格。",
@@ -1778,6 +1815,7 @@ function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
     "画面与信息要求：",
     "- 地理正确性硬性要求：所有地点落位、东西南北关系、前后路线顺序必须以真实地图为准；不能为了画面好看而调整地点相对位置，也不要把城市、景区顺序画反。",
     "- 对任何目的地都要先按真实世界地图理解相对位置：城市、国家/地区边界、山脉、湖泊、海岸线、岛屿、沙漠、峡谷和主要交通走廊不能乱画。",
+    ITINERARY_GEOGRAPHY_GUARD,
     "- 必须展示行程原文里的每一个日期，不要漏掉中间日期；日期必须逐日出现，像 5/18 这样的中间日期也必须单独标出；日期标签用小金色日期牌或清晰日程标签呈现。",
     "- 地点层级要有主次；酒店可作为小字备注，不要把所有酒店全文挤满画面，但不能删掉用户明确给出的核心城市、景区、日期和活动。",
     "- 每两个连续地点之间必须有路线连接，并必须标注大致距离或飞行/转场说明；若无法确定精确距离，用“约 xx km”或“飞行转场”这类合理估算，不要空着。",
@@ -1791,16 +1829,133 @@ function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
   ].join("\n")
 }
 
+function parseItineraryCoordinateStops(description) {
+  const rows = String(description || "").split(/\r?\n/)
+  const stops = []
+  const coordinateLine = /^\s*@坐标[:：]\s*(.+?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)(?:\s*[,，]\s*(.*))?\s*$/
+  for (const row of rows) {
+    const match = row.match(coordinateLine)
+    if (!match) {
+      continue
+    }
+    let [, name, latText, lngText, tail] = match
+    let date = ""
+    const datedName = name.match(/^\s*((?:D\d+)|(?:\d{1,2}[/.月-]\d{1,2}))\s*[,，]\s*(.+)$/)
+    if (datedName) {
+      date = datedName[1]
+      name = datedName[2]
+    }
+    const lat = Number(latText)
+    const lng = Number(lngText)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      continue
+    }
+    stops.push({
+      date,
+      name: name.trim(),
+      lat,
+      lng,
+      transport: tail?.trim() || "",
+    })
+  }
+  return stops
+}
+
+function isItineraryInstructionSection(row) {
+  return /^(地点与地理校验|地理校验|画面要求|程序坐标|行程基础信息|客户偏好|地图标题建议)[:：]?/.test(row)
+}
+
+function isItineraryInstructionRow(row) {
+  return /^(必须|不要|请|如果|每两个|每段|左上角|日期必须|风格|画面|程序|地图准确性|交通工具)/.test(
+    row.replace(/^[-*]\s*/, ""),
+  )
+}
+
+function cleanItineraryStopName(value) {
+  return String(value || "")
+    .replace(/入住[:：]?.*$/, "")
+    .replace(/交通[:：]?.*$/, "")
+    .replace(/当天重点[:：]?.*$/, "")
+    .replace(/重点[:：]?.*$/, "")
+    .replace(/活动[:：]?.*$/, "")
+    .replace(/酒店[:：]?.*$/, "")
+    .replace(/^[-*]\s*/, "")
+    .trim()
+}
+
+function parseItineraryTextStops(description) {
+  const stops = []
+  const seen = new Set()
+  let inDailySection = false
+  for (const rawRow of String(description || "").split(/\r?\n/)) {
+    const row = rawRow.trim()
+    if (!row || row.startsWith("@坐标")) {
+      continue
+    }
+    if (/^逐日行程[:：]?$/.test(row)) {
+      inDailySection = true
+      continue
+    }
+    if (isItineraryInstructionSection(row)) {
+      if (inDailySection) {
+        break
+      }
+      continue
+    }
+    const hasDate = /(?:^|[：:\s])((?:D\d+)|(?:\d{1,2}[/.月-]\d{1,2})|(?:\d{1,2}月\d{1,2}?日?))/.test(row)
+    if (!inDailySection && !hasDate) {
+      continue
+    }
+    if (isItineraryInstructionRow(row)) {
+      continue
+    }
+    const dateMatch = row.match(/(?:^|[：:\s])((?:D\d+)|(?:\d{1,2}[/.月-]\d{1,2}))/)
+    const date = dateMatch ? dateMatch[1] : ""
+    const routePart = row
+      .replace(/（[^）]*）/g, "")
+      .replace(/\([^)]*\)/g, "")
+      .split(/[；;]/, 1)[0]
+      .replace(/^[^：:]*[：:]/, "")
+    const names = routePart
+      .split(/(?:→|->|—|-|到|前往)/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map(cleanItineraryStopName)
+      .filter((item) => item.length >= 2 && item.length <= 80 && !isItineraryInstructionRow(item))
+    for (const name of names) {
+      const key = name.toLocaleLowerCase()
+      if (seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      stops.push({ date, name, transport: "" })
+    }
+  }
+  return stops.slice(0, 80)
+}
+
+function itineraryCoordinateHelpText() {
+  return [
+    "系统没能确认部分地点的位置，请把地点写得更完整。",
+    "建议补充城市/国家/景区全称，例如“巴黎 卢浮宫”“日本 东京站”“西班牙 巴塞罗那”。",
+    "如果是小众民宿或非标准地点，请在行程里写出它所在的城市或区域。",
+  ].join("\n")
+}
+
 async function submitAIItineraryMap() {
   try {
-    resetDebugLog("点击行程路线：AI 生成")
+    resetDebugLog("点击行程路线：程序生成")
     const startedAt = performance.now()
     const title = refs.itineraryTitleInput?.value.trim() || "定制旅行行程地图"
     const subtitle = refs.itinerarySubtitleInput?.value.trim() || ""
     const description = refs.itineraryDescriptionInput?.value.trim() || ""
-    const settings = getSettings()
-    const model = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
     const logoRequested = refs.itineraryLogoEnabled?.checked !== false
+
+    if (!subtitle) {
+      setError("请填写副标题日期，例如：5/12 - 5/24。")
+      refs.itinerarySubtitleInput?.focus()
+      return
+    }
 
     if (!description) {
       setError("行程描述不能为空。")
@@ -1808,64 +1963,65 @@ async function submitAIItineraryMap() {
       return
     }
 
-    if (!settings.generateUrl) {
-      appendDebugLine("参数校验失败：行程地图生成接口 URL 为空")
-      setError("请先填写生成接口 URL。")
-      refs.generateUrlInput.focus()
-      return
-    }
-
     let size
-    let imageOptions
     try {
       size = parseItinerarySize()
-      imageOptions = getOpenAIImageOptions()
     } catch (error) {
       appendDebugLine("参数校验失败：行程地图参数无效", { error: error.message })
       setError(error.message, error.details)
       return
     }
 
-    const aiPrompt = buildAIItineraryMapPrompt({
-      title,
-      subtitle,
-      description,
-      theme: itineraryThemePrompt(),
-    })
-    const requestPrompt = withLogoLayoutPrompt(aiPrompt, logoRequested)
     const requestSnapshot = currentFormSnapshot()
-
     saveSettings()
     setError("")
     closePreview()
     setBusy(true, "行程路线生成中", {
-      progressLabel: "准备 AI 行程路线",
+      progressLabel: "准备准确路线图",
       expectedCount: 1,
-      estimatedSecondsPerImage: 210,
+      estimatedSecondsPerImage: 8,
     })
     previewPendingResult({
       mode: "itinerary",
       prompt: description,
-      model,
+      model: "responses-itinerary-artwork",
       size,
     })
 
-    const result = await postJSON("api/generate", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.generateUrl,
-      prompt: requestPrompt,
-      model,
-      mode: "itinerary",
-      sample_count: 1,
-      logo_requested: logoRequested,
+    const coordinateStops = parseItineraryCoordinateStops(description)
+    const routeStops = coordinateStops.length ? coordinateStops : parseItineraryTextStops(description)
+    if (!routeStops.length) {
+      setError(itineraryCoordinateHelpText())
+      refs.itineraryDescriptionInput?.focus()
+      return
+    }
+    const settings = getSettings()
+    const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5"
+    const result = await postJSON("api/itinerary-map/render", {
+      title,
+      subtitle,
+      route_style: refs.itineraryThemeSelect?.value || "comic",
+      stops: routeStops,
       size,
-      ...imageOptions,
+      api_key: settings.apiKey,
+      endpoint_url: settings.responsesUrl,
+      model: itineraryModel,
+      generate_background: true,
+      logo_requested: logoRequested,
     }, {
       mode: "itinerary",
-      progressLabel: "提交 AI 行程路线",
-      waitingLabel: "等待 AI 绘制路线图",
+      progressLabel: coordinateStops.length ? "生成一体化路线图" : "查询坐标并生成路线图",
+      waitingLabel: "生成准确路线图",
     })
-    await setResult({ ...result, mode: "itinerary", prompt: aiPrompt, size, transport: "images-generate", logo_requested: logoRequested }, performance.now() - startedAt)
+    const finalSize = result.size || size
+    await setResult({
+      ...result,
+      mode: "itinerary",
+      prompt: title,
+      requested_size: result.requested_size || size,
+      size: finalSize,
+      logo_requested: logoRequested,
+    }, performance.now() - startedAt)
     rememberRegenerationRequest("itinerary", requestSnapshot)
     pushHistory({
       mode: "itinerary",
@@ -1874,18 +2030,25 @@ async function submitAIItineraryMap() {
       itinerarySubtitle: subtitle,
       itineraryDescription: description,
       itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
-      model,
-      transport: "images-generate",
       logoRequested,
-      sampleCount: 1,
-      size,
-      ...imageOptions,
+      size: finalSize,
+      requestedSize: result.requested_size || size,
+      model: "responses-itinerary-artwork",
+      image: result.saved_image_url || result.image_data_url || "",
+      savedImageUrl: result.saved_image_url || "",
+      generatedImageId: result.generated_image_id || null,
       createdAt: new Date().toISOString(),
     })
+    await loadGalleryItems()
+    await refreshGenerationJobs()
     document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
   } catch (error) {
-    appendDebugLine("AI 行程路线生成失败", { error: error.message })
-    setError(error.cancelled ? "已中断行程路线生成，可以修改行程后重新提交。" : error.message, error.details)
+    appendDebugLine("行程路线生成失败", { error: error.message })
+    if (error.code === "itinerary_coordinates_required") {
+      setError(itineraryCoordinateHelpText(), error.details)
+    } else {
+      setError(error.cancelled ? "已中断行程路线生成，可以修改行程后重新提交。" : error.message, error.details)
+    }
   } finally {
     setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
     state.activeRequestCancelled = false
@@ -4232,7 +4395,7 @@ function createWorkspaceSnapshot() {
       creativeBrief: creativeBriefSnapshot(),
       itineraryTitle: refs.itineraryTitleInput?.value || "",
       itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
-      itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
+      itinerarySize: refs.itinerarySizeSelect?.value || "auto",
       itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
       itineraryDescription: refs.itineraryDescriptionInput?.value || "",
       itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
@@ -4319,7 +4482,7 @@ async function restoreWorkspaceState() {
     refs.itinerarySubtitleInput.value = forms.itinerarySubtitle || refs.itinerarySubtitleInput.value
   }
   if (refs.itinerarySizeSelect) {
-    refs.itinerarySizeSelect.value = forms.itinerarySize || "1792x1792"
+    refs.itinerarySizeSelect.value = forms.itinerarySize || "auto"
   }
   if (refs.itineraryThemeSelect) {
     refs.itineraryThemeSelect.value = forms.itineraryTheme || "comic"
@@ -5010,7 +5173,7 @@ function currentFormSnapshot() {
     creativeBrief: creativeBriefSnapshot(),
     itineraryTitle: refs.itineraryTitleInput?.value || "",
     itinerarySubtitle: refs.itinerarySubtitleInput?.value || "",
-    itinerarySize: refs.itinerarySizeSelect?.value || "1792x1792",
+    itinerarySize: refs.itinerarySizeSelect?.value || "auto",
     itineraryTheme: refs.itineraryThemeSelect?.value || "comic",
     itineraryDescription: refs.itineraryDescriptionInput?.value || "",
     itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
@@ -5060,7 +5223,7 @@ function applyFormSnapshot(snapshot) {
     refs.itinerarySubtitleInput.value = snapshot.itinerarySubtitle || refs.itinerarySubtitleInput.value
   }
   if (refs.itinerarySizeSelect) {
-    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "1792x1792"
+    refs.itinerarySizeSelect.value = snapshot.itinerarySize || "auto"
   }
   if (refs.itineraryThemeSelect) {
     refs.itineraryThemeSelect.value = snapshot.itineraryTheme || "comic"
@@ -6271,7 +6434,11 @@ async function setResult(payload, durationMs, requestSource = null) {
     metaParts.push(`实际 ${actualSize}`)
   }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
-  if (payload.size && actualSize && !isSameSize(payload.size, actualSize)) {
+  const compositionMessage = payload.composition?.message || ""
+  if (payload.mode === "itinerary" && compositionMessage) {
+    setStatusMessage(compositionMessage)
+  }
+  if (payload.size && payload.size !== "auto" && actualSize && !isSameSize(payload.size, actualSize)) {
     setError(`上游返回尺寸为 ${actualSize}，与请求尺寸 ${payload.size} 不一致。图片已按上游原始返回保存，本地没有缩放。`)
   } else {
     setError("")
@@ -6505,6 +6672,7 @@ async function postJSON(url, payload, options = {}) {
       enterAuthGate("login", "登录已过期，请重新登录。")
     }
     const requestError = new Error(data.error || "请求失败")
+    requestError.code = data.code || ""
     requestError.details = errorDetailsWithRequestId(data)
     setPendingResultFailure(requestError.message, requestError.details)
     throw requestError

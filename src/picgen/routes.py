@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -29,6 +32,15 @@ from .auth import (
 )
 from .config import Settings
 from .errors import APIError
+from .itinerary_map import (
+    apply_itinerary_coordinate_estimates,
+    build_itinerary_map_plan_async,
+    geocode_place_with_settings,
+    project_itinerary_points,
+    render_itinerary_control_png,
+    render_itinerary_map_svg,
+    save_itinerary_map_svg,
+)
 from .logging_config import get_logger, get_request_id, log_event
 from .notifications import (
     GenerationSuccessAlert,
@@ -62,6 +74,8 @@ from .schemas import (
     GroupSavedItemRequest,
     HealthResponse,
     ImageResultResponse,
+    ItineraryMapPlanRequest,
+    ItineraryMapRenderRequest,
     OrganizationUnitRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
@@ -97,6 +111,29 @@ _TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
 
 JSON_BODY = Body(...)
 PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。"
+ITINERARY_DEFAULT_SIZE = "1792x1792"
+ITINERARY_AUTO_SIZE = "auto"
+ITINERARY_PORTRAIT_SIZE = "1088x2240"
+ITINERARY_LANDSCAPE_SIZE = "1920x1088"
+ITINERARY_MAX_CANVAS_SIDE = 4096
+ITINERARY_INLINE_REFERENCE_MAX_BYTES = 2 * 1024 * 1024
+ITINERARY_ORIENTATION_THRESHOLD = 1.25
+ITINERARY_ARTWORK_INSTRUCTIONS = (
+    "你是 PicGen 的图像生成助手。严格遵守用户提示词和输入参考图，"
+    "输出一张用于后续程序叠加准确路线和文字的高端旅行地图底图。"
+)
+ITINERARY_COORDINATE_INSTRUCTIONS = (
+    "你是严谨的地理坐标助手。只输出可解析 JSON，不要 Markdown，不要解释；"
+    "为缺少坐标的旅行路线节点估算大概经纬度，优先保证真实相对位置。"
+)
+RESPONSES_IMAGE_INSTRUCTIONS = (
+    "你是 PicGen 的图像生成助手。严格遵守用户提示词、参考图和品牌要求，输出可直接用于旅行产品设计的图像。"
+)
+TEAM_CHAT_BOT_INSTRUCTIONS = (
+    "你是 PicGen 团队聊天里的 GPT-BOT。用中文回复，专业、简洁、可信；群聊被 @ 时回复要艾特提问者，私聊直接回复。"
+)
+COPYRIGHT_RISK_INSTRUCTIONS = "你是图片版权与商标风险审查助手。用中文输出简短、务实、非法律意见的风险提醒。"
+
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
@@ -184,7 +221,7 @@ def _clear_auth_cookie(response: JSONResponse, settings: Settings) -> None:
 def _resolve_served_file(settings: Settings, relative_path: str) -> Path:
     cleaned = relative_path.strip().lstrip("/")
     allowed_roots: dict[str, tuple[Path, set[str]]] = {
-        "outputs/": (settings.outputs_dir, {".png", ".jpg", ".jpeg", ".webp", ".gif", ".json"}),
+        "outputs/": (settings.outputs_dir, {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".json"}),
         "avatars/": (settings.data_dir / "avatars", {".png", ".jpg", ".jpeg", ".webp"}),
     }
     matched_prefix = ""
@@ -230,6 +267,131 @@ def _save_user_avatar(
         temporary_path.unlink(missing_ok=True)
         raise
     return avatar_path, storage_url_for_path(settings.data_dir, avatar_path)
+
+
+def _map_geocoding_enabled(settings: Settings) -> bool:
+    return (
+        (settings.map_provider == "amap" and bool(settings.amap_key))
+        or (settings.map_provider == "mapbox" and bool(settings.mapbox_token))
+        or bool(settings.nominatim_url)
+    )
+
+
+def _public_map_provider(settings: Settings) -> str:
+    return settings.map_provider or "nominatim"
+
+
+def _parse_itinerary_size(value: str) -> tuple[int, int]:
+    cleaned = (value or ITINERARY_DEFAULT_SIZE).strip() or ITINERARY_DEFAULT_SIZE
+    if cleaned.casefold() == ITINERARY_AUTO_SIZE:
+        cleaned = ITINERARY_DEFAULT_SIZE
+    if "x" not in cleaned:
+        raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸无效", code="invalid_parameter")
+    width_text, height_text = cleaned.lower().split("x", 1)
+    try:
+        width = int(width_text)
+        height = int(height_text)
+    except ValueError as exc:
+        raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸无效", code="invalid_parameter") from exc
+    if width <= 0 or height <= 0:
+        raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸必须大于 0", code="invalid_parameter")
+    if width > ITINERARY_MAX_CANVAS_SIDE or height > ITINERARY_MAX_CANVAS_SIDE:
+        raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸过大", code="invalid_parameter")
+    if width % 16 != 0 or height % 16 != 0:
+        raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸的宽高都必须是 16 的倍数", code="invalid_parameter")
+    return width, height
+
+
+def _itinerary_size_orientation(size: str) -> str:
+    width, height = _parse_itinerary_size(size)
+    if height > width:
+        return "portrait"
+    if width > height:
+        return "landscape"
+    return "square"
+
+
+def _itinerary_coordinate_span(plan: dict[str, Any]) -> tuple[float, float]:
+    stops = [
+        stop
+        for stop in plan.get("stops", [])
+        if (
+            isinstance(stop, dict)
+            and isinstance(stop.get("lat"), (int, float))
+            and isinstance(stop.get("lng"), (int, float))
+        )
+    ]
+    if len(stops) < 2:
+        return 0.0, 0.0
+    lats = [float(stop["lat"]) for stop in stops]
+    lngs = [float(stop["lng"]) for stop in stops]
+    lat_span = max(lats) - min(lats)
+    mid_lat = (max(lats) + min(lats)) / 2
+    lng_span = (max(lngs) - min(lngs)) * max(0.2, abs(math.cos(math.radians(mid_lat))))
+    return lat_span, lng_span
+
+
+def _choose_itinerary_output_size(plan: dict[str, Any], requested_size: str) -> dict[str, Any]:
+    normalized_request = (requested_size or ITINERARY_AUTO_SIZE).strip() or ITINERARY_AUTO_SIZE
+    lat_span, lng_span = _itinerary_coordinate_span(plan)
+    if lat_span > lng_span * ITINERARY_ORIENTATION_THRESHOLD:
+        optimal_size = ITINERARY_PORTRAIT_SIZE
+        optimal_orientation = "portrait"
+        reason = "南北跨度明显大于东西跨度"
+    elif lng_span > lat_span * ITINERARY_ORIENTATION_THRESHOLD:
+        optimal_size = ITINERARY_LANDSCAPE_SIZE
+        optimal_orientation = "landscape"
+        reason = "东西跨度明显大于南北跨度"
+    else:
+        optimal_size = ITINERARY_DEFAULT_SIZE
+        optimal_orientation = "square"
+        reason = "南北与东西跨度相对均衡"
+
+    if normalized_request.casefold() == ITINERARY_AUTO_SIZE:
+        selected_size = optimal_size
+        orientation = optimal_orientation
+        adjusted = selected_size != ITINERARY_DEFAULT_SIZE
+        message = (
+            f"系统根据真实坐标判断：{reason}，"
+            f"已自动选择{_itinerary_orientation_label(orientation)}构图 {selected_size}。"
+        )
+    else:
+        _parse_itinerary_size(normalized_request)
+        selected_size = normalized_request
+        orientation = _itinerary_size_orientation(selected_size)
+        adjusted = False
+        if orientation == optimal_orientation:
+            message = (
+                f"已按你手动选择的{_itinerary_orientation_label(orientation)}构图 {selected_size} 生成；"
+                f"系统根据真实坐标判断：{reason}，当前尺寸与路线构图匹配。"
+            )
+        else:
+            message = (
+                f"已按你手动选择的{_itinerary_orientation_label(orientation)}构图 {selected_size} 生成；"
+                f"系统根据真实坐标判断：{reason}，但不会自动改写手动尺寸。"
+            )
+
+    width, height = _parse_itinerary_size(selected_size)
+
+    return {
+        "requested_size": normalized_request,
+        "selected_size": selected_size,
+        "width": width,
+        "height": height,
+        "orientation": orientation,
+        "adjusted": adjusted,
+        "message": message,
+        "lat_span": round(lat_span, 6),
+        "lng_span": round(lng_span, 6),
+    }
+
+
+def _itinerary_orientation_label(orientation: str) -> str:
+    if orientation == "portrait":
+        return "竖版"
+    if orientation == "landscape":
+        return "横版"
+    return "方图"
 
 
 async def _ensure_admin_bootstrap(request: Request, settings: Settings, auth_store: AuthStore) -> None:
@@ -446,6 +608,735 @@ def _prepare_mask(part: FilePayload, max_image_bytes: int) -> dict[str, Any]:
     return file_info
 
 
+def _itinerary_style_reference_part(settings: Settings) -> dict[str, Any] | None:
+    candidates = (
+        settings.static_dir / "itinerary-style-reference.png",
+        settings.static_dir / "itinerary-style-reference.jpg",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        return {
+            "field_name": "image",
+            "filename": sanitize_filename(path.name),
+            "content_type": detect_image_mime(data),
+            "data": data,
+            "role": "style_reference",
+        }
+    return None
+
+
+def _itinerary_stop_lines(plan: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for index, stop in enumerate(plan.get("stops", []), start=1):
+        if not isinstance(stop, dict) or stop.get("status") != "ok":
+            continue
+        date = str(stop.get("date") or f"第 {index} 站").strip()
+        name = str(stop.get("name") or "").strip()
+        transport = str(stop.get("transport") or "").strip()
+        note = str(stop.get("note") or "").strip()
+        lat = stop.get("lat")
+        lng = stop.get("lng")
+        suffixes = []
+        if transport:
+            suffixes.append(f"交通：{transport}")
+        if note:
+            suffixes.append(f"备注：{note}")
+        suffixes.append(f"坐标：lat={lat}, lng={lng}")
+        lines.append(f"{index:02d}. {date}｜{name}｜" + "｜".join(suffixes))
+    return lines
+
+
+def _itinerary_position_lock_lines(plan: dict[str, Any], *, width: int, height: int) -> list[str]:
+    lines: list[str] = []
+    for index, point in enumerate(project_itinerary_points(plan, width=width, height=height), start=1):
+        date = str(point.get("date") or f"第 {index} 站").strip()
+        name = str(point.get("name") or "").strip()
+        lines.append(f"{index:02d}. {date}｜{name}｜锁定像素坐标 x={float(point['x']):.0f}, y={float(point['y']):.0f}")
+    return lines
+
+
+def _itinerary_artwork_prompt(
+    plan: dict[str, Any],
+    *,
+    route_style: str,
+    has_style_reference: bool,
+    width: int,
+    height: int,
+) -> str:
+    title = str(plan.get("title") or "定制旅行路线图")
+    subtitle = str(plan.get("subtitle") or "").strip()
+    style_prompts = {
+        "comic": (
+            "高级水彩漫画旅行路线图，温柔曲线，手绘纸感；风格可轻微靠近古典欧洲航海羊皮纸地图，"
+            "有旧地图海岸线、卷轴纸感、罗盘和航线气质，但保持现代高端旅行海报，不要复刻任何游戏或影视 IP。"
+        ),
+        "premium": "高级旅行杂志手绘路线图，克制色彩，纸张肌理，安静奢华。",
+        "classic": "经典手绘羊皮纸旅行路线图，复古墨线，低对比水彩。",
+        "dark": "深色高级插画旅行路线图，低亮度地形肌理，文字覆盖区保持干净。",
+    }
+    style = style_prompts.get(route_style, style_prompts["comic"])
+    stop_lines = _itinerary_stop_lines(plan)
+    position_lock_lines = _itinerary_position_lock_lines(plan, width=width, height=height)
+    control_role = "第二张输入图" if has_style_reference else "输入图"
+    style_role = (
+        "第一张输入图只是风格参考：学习它的水彩地形、地标小插画、手写感标题氛围和精致纸张质感；"
+        "不要复制其中的具体新疆/西班牙地点、边界、文字、路线、编号、清单和 LOGO。\n"
+        if has_style_reference
+        else ""
+    )
+    return (
+        "请生成一张高级漫画旅行路线图底图。最终路线、编号圆点、日期牌和地点文字会由程序覆盖，"
+        "你只负责把地形、国家/地区氛围、城市环境、山河湖海和纸张质感做得高级自然，"
+        "不要把控制稿当作可见图层叠上去，不要出现工程草稿、半透明覆盖、粗糙折线或双重地图。\n\n"
+        f"标题：{title}\n"
+        f"副标题/日期：{subtitle or '按行程日期呈现'}\n"
+        f"视觉风格：{style}\n"
+        f"{style_role}"
+        f"{control_role}是程序按真实经纬度投影出来的硬性地理控制稿：它只用于理解真实区域和构图留白。"
+        "请把它转译成精美手绘地图底图，而不是照抄控制稿的线条；可以自然重绘为水彩地形、山脉、湖泊、城市和地标，"
+        "但不要在底图里绘制最终路线、编号点、日期牌或站点文字。\n\n"
+        "几何位置锁定：请像描图纸一样沿着控制稿理解真实地理结构。每个站点所在区域必须贴近下方锁定像素坐标；"
+        "可以美化背景和地形，但不得为了构图、插画或留白移动地点，不能交换东西南北关系。"
+        "若风格参考图与锁定像素坐标冲突，必须以锁定像素坐标为准。\n"
+        f"锁定像素坐标表（画布 {width}x{height}）：\n{chr(10).join(position_lock_lines)[:5000]}\n\n"
+        "编号与站点对应如下，仅用于理解区域、地貌和城市环境；最终文字由程序覆盖，底图里不要手写这些名称：\n"
+        f"{chr(10).join(stop_lines)[:7000]}\n\n"
+        "成图要求：\n"
+        "- 只画高级手绘地图底图、区域纹理、自然地貌、城市氛围、少量不含文字的地标小插画和干净留白。\n"
+        "- 不要绘制任何编号圆点、路线线条、日期牌、地点名、交通方式文字、"
+        "右侧行程清单或解释文字；这些会由程序准确覆盖。\n"
+        "- 不要生成路线图例、Legend、线型说明框、比例尺说明框或左下角说明卡。\n"
+        "- 地图背景应像高级旅行定制海报：真实区域轮廓和地貌层次清楚，但表达是水彩漫画，"
+        "不是手机导航截图、卫星图、低质 PPT 或技术示意图。\n"
+        "- 左上角只保留自然干净留白给官方 6 人游 LOGO；不要绘制 LOGO、LOGO 框、"
+        "白底贴纸、占位框、水印、二维码或 OpenAI/API/debug 字样。\n"
+        "- 如果参考图和本次目的地不一致，绝不能套用参考图的国家、省份、城市、山河、边界或路线。"
+    )
+
+
+async def _upload_itinerary_reference_images(
+    *,
+    settings: Settings,
+    client: UpstreamClient,
+    endpoint_url: str,
+    api_key: str,
+    parts: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], list[str], str, list[str]]:
+    files_endpoint_url = sibling_endpoint_url(endpoint_url, "files")
+    file_ids: list[str] = []
+    uploaded_roles: list[str] = []
+    try:
+        for part in parts:
+            upload_response = await client.run_file_upload(
+                files_endpoint_url,
+                api_key,
+                part,
+                settings.upstream_user_agent,
+            )
+            if not isinstance(upload_response, dict):
+                raise APIError(HTTPStatus.BAD_GATEWAY, "Files 上传接口返回无效", code="upstream_error")
+            image_file_id = str(upload_response.get("id") or "").strip()
+            if not image_file_id:
+                raise APIError(HTTPStatus.BAD_GATEWAY, "Files 上传接口没有返回 file id", code="upstream_error")
+            file_ids.append(image_file_id)
+            uploaded_roles.append(str(part.get("role") or "reference"))
+        return [{"type": "input_image", "file_id": file_id} for file_id in file_ids], file_ids, "", uploaded_roles
+    except APIError as exc:
+        content: list[dict[str, str]] = []
+        inline_roles: list[str] = []
+        skipped_roles: list[str] = []
+        for part in parts:
+            part_role = str(part.get("role") or "reference")
+            data = bytes(part["data"])
+            if (
+                part_role not in {"geometry_control", "style_reference"}
+                and len(data) > ITINERARY_INLINE_REFERENCE_MAX_BYTES
+            ):
+                skipped_roles.append(part_role)
+                continue
+            encoded = base64.b64encode(part["data"]).decode("ascii")
+            content.append({"type": "input_image", "image_url": f"data:{part['content_type']};base64,{encoded}"})
+            inline_roles.append(part_role)
+        upload_error = exc.message
+        content = [
+            *content,
+        ]
+        log_event(
+            logger,
+            logging.WARNING,
+            "itinerary_reference_upload_fallback",
+            status=exc.status,
+            message=redact_sensitive_text(exc.message, limit=300),
+            inlined_roles=inline_roles,
+            skipped_roles=skipped_roles,
+        )
+        return content, [], upload_error, inline_roles
+
+
+def _saved_image_as_data_url(saved: dict[str, Any]) -> str:
+    image_data_url = str(saved.get("image_data_url") or "").strip()
+    if image_data_url.startswith("data:image/"):
+        return image_data_url
+
+    image_path_value = str(saved.get("saved_image_path") or "").strip()
+    image_mime = str(saved.get("saved_image_mime") or "").strip()
+    if not image_path_value or not image_mime.startswith("image/"):
+        return ""
+    image_path = Path(image_path_value)
+    if not image_path.is_file():
+        return ""
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{image_mime};base64,{encoded}"
+
+
+async def _generate_itinerary_artwork(
+    *,
+    parsed: ItineraryMapRenderRequest,
+    plan: dict[str, Any],
+    settings: Settings,
+    client: UpstreamClient,
+    user: AuthUser,
+    output_size: str,
+    composition: dict[str, Any],
+) -> dict[str, Any]:
+    endpoint_url = validate_url(settings.default_responses_url, "Responses 图像接口 URL")
+    api_key = (parsed.api_key or settings.default_api_key).strip()
+    if not api_key:
+        return {}
+    model = settings.default_responses_model.strip() or "gpt-5.5"
+    width, height = _parse_itinerary_size(output_size)
+    # Pure-Python pixel rendering + zlib over a multi-MB canvas takes seconds of
+    # CPU; run it in a worker thread so the event loop keeps serving requests.
+    control_png = await anyio.to_thread.run_sync(lambda: render_itinerary_control_png(plan, width=width, height=height))
+    control_part = {
+        "field_name": "image",
+        "filename": "itinerary-geometry-control.png",
+        "content_type": "image/png",
+        "data": control_png,
+        "role": "geometry_control",
+    }
+    style_part = _itinerary_style_reference_part(settings)
+    image_parts = [part for part in (style_part, control_part) if part is not None]
+    image_content, image_file_ids, upload_error, included_image_roles = await _upload_itinerary_reference_images(
+        settings=settings,
+        client=client,
+        endpoint_url=endpoint_url,
+        api_key=api_key,
+        parts=image_parts,
+    )
+    prompt = _itinerary_artwork_prompt(
+        plan,
+        route_style=parsed.route_style,
+        has_style_reference="style_reference" in included_image_roles,
+        width=width,
+        height=height,
+    )
+    content = [{"type": "input_text", "text": prompt}, *image_content]
+
+    tool: dict[str, Any] = {"type": "image_generation"}
+    tool["size"] = output_size
+    upstream_payload: dict[str, Any] = {
+        "model": model,
+        "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
+        "stream": True,
+        "input": [{"role": "user", "content": content}],
+        "tools": [tool],
+    }
+    upstream_response = await client.run_responses(
+        endpoint_url,
+        api_key,
+        upstream_payload,
+        settings.upstream_user_agent,
+    )
+    saved = await _finalize_image_response(
+        upstream_response=upstream_response,
+        settings=settings,
+        client=client,
+        save_context={
+            "mode": "itinerary",
+            "prompt": parsed.title,
+            "model": model,
+            "endpoint_url": endpoint_url,
+            "files_endpoint_url": sibling_endpoint_url(endpoint_url, "files"),
+            "transport": "responses-itinerary-artwork",
+            "sample_count": 1,
+            "logo_requested": parsed.logo_requested,
+            "logo_overlay_applied": False,
+            "filename_prefix": user.username,
+            "route_style": parsed.route_style,
+            "size": f"{width}x{height}",
+            "requested_size": composition["requested_size"],
+            "composition": composition,
+            "itinerary_title": parsed.title,
+            "itinerary_subtitle": parsed.subtitle,
+            "itinerary_artwork_mode": "ai_background_source",
+            "itinerary_control_sketch_bytes": len(control_png),
+            "itinerary_style_reference": str(style_part.get("filename") if style_part else ""),
+            "source_image_names": [str(part["filename"]) for part in image_parts],
+            "source_image_roles": [
+                "style_reference" if part is style_part else "geometry_control" for part in image_parts
+            ],
+            "source_image_count": len(image_parts),
+            "source_file_ids": image_file_ids,
+            "included_source_image_roles": included_image_roles,
+            "file_upload_fallback": bool(upload_error),
+            "file_upload_error": upload_error,
+            **_user_metadata(user),
+        },
+        extra={
+            "mode": "itinerary",
+            "prompt": parsed.title,
+            "model": model,
+            "transport": "responses-itinerary-artwork",
+            "size": f"{width}x{height}",
+            "requested_size": composition["requested_size"],
+            "composition": composition,
+            "logo_requested": parsed.logo_requested,
+            "logo_overlay_applied": False,
+            "endpoint_url": endpoint_url,
+            "files_endpoint_url": sibling_endpoint_url(endpoint_url, "files"),
+            "source_file_ids": image_file_ids,
+            "included_source_image_roles": included_image_roles,
+            "file_upload_fallback": bool(upload_error),
+        },
+    )
+    image_data_url = str(saved.get("image_data_url") or "")
+    if not saved.get("saved_image_url") and not image_data_url:
+        raise APIError(
+            HTTPStatus.BAD_GATEWAY,
+            "路线图生成接口没有返回可保存的图片",
+            compact_raw_response(upstream_response),
+            code="upstream_no_image",
+        )
+    image_mime = str(saved.get("saved_image_mime") or "")
+    if (image_mime and not image_mime.startswith("image/")) or (
+        image_data_url and not image_data_url.startswith("data:image/")
+    ):
+        raise APIError(
+            HTTPStatus.BAD_GATEWAY,
+            "路线图生成失败：上游返回的图片格式无效，请稍后重试",
+            f"上游返回的图片格式无效：mime={image_mime or 'inline-data-url'}",
+            code="upstream_error",
+        )
+    background_data_url = await anyio.to_thread.run_sync(lambda: _saved_image_as_data_url(saved))
+    if not background_data_url:
+        raise APIError(
+            HTTPStatus.BAD_GATEWAY,
+            "路线图生成接口没有返回可用的底图",
+            compact_raw_response(upstream_response),
+            code="upstream_error",
+        )
+
+    svg_text = render_itinerary_map_svg(
+        plan,
+        width=width,
+        height=height,
+        background_image_url=background_data_url,
+        logo_href="",
+        reserve_logo_area=parsed.logo_requested,
+    )
+    overlay = await anyio.to_thread.run_sync(
+        lambda: save_itinerary_map_svg(
+            data_dir=settings.data_dir,
+            outputs_dir=settings.outputs_dir,
+            svg_text=svg_text,
+            filename_prefix=user.username,
+            metadata={
+                "mode": "itinerary",
+                "prompt": parsed.title,
+                "model": model,
+                "transport": "responses-itinerary-artwork",
+                "route_style": parsed.route_style,
+                "size": f"{width}x{height}",
+                "requested_size": composition["requested_size"],
+                "composition": composition,
+                "artwork_generated": True,
+                "artwork_mode": "ai_background_program_overlay",
+                "ai_background_image_path": str(saved.get("saved_image_path") or ""),
+                "ai_background_image_url": str(saved.get("saved_image_url") or ""),
+                "ai_background_image_mime": str(saved.get("saved_image_mime") or ""),
+                "logo_requested": parsed.logo_requested,
+                "logo_overlay_applied": False,
+                "stop_count": len(plan.get("stops", [])),
+                "source_image_names": [str(part["filename"]) for part in image_parts],
+                "source_image_roles": [
+                    "style_reference" if part is style_part else "geometry_control" for part in image_parts
+                ],
+                "source_image_count": len(image_parts),
+                "source_file_ids": image_file_ids,
+                "included_source_image_roles": included_image_roles,
+                "file_upload_fallback": bool(upload_error),
+                "file_upload_error": upload_error,
+                **_user_metadata(user),
+            },
+            width=width,
+            height=height,
+        )
+    )
+    image = {
+        **overlay,
+        "candidate_index": 0,
+        "mode": "itinerary",
+        "model": model,
+        "prompt": parsed.title,
+        "logo_overlay_applied": False,
+    }
+    return {
+        **image,
+        "transport": "responses-itinerary-artwork",
+        "size": f"{width}x{height}",
+        "requested_size": composition["requested_size"],
+        "composition": composition,
+        "logo_requested": parsed.logo_requested,
+        "logo_overlay_applied": False,
+        "endpoint_url": endpoint_url,
+        "files_endpoint_url": sibling_endpoint_url(endpoint_url, "files"),
+        "source_file_ids": image_file_ids,
+        "included_source_image_roles": included_image_roles,
+        "file_upload_fallback": bool(upload_error),
+        "ai_background_image_path": str(saved.get("saved_image_path") or ""),
+        "ai_background_image_url": str(saved.get("saved_image_url") or ""),
+        "ai_background_image_mime": str(saved.get("saved_image_mime") or ""),
+        "candidate_count": 1,
+        "images": [image],
+    }
+
+
+def _itinerary_coordinate_prompt(plan: dict[str, Any]) -> str:
+    stops = [stop for stop in plan.get("stops", []) if isinstance(stop, dict)]
+    route_lines: list[str] = []
+    unresolved_lines: list[str] = []
+    for stop in stops:
+        index = int(stop.get("index") or 0)
+        date = str(stop.get("date") or "").strip() or f"第 {index + 1} 站"
+        name = str(stop.get("name") or "").strip()
+        transport = str(stop.get("transport") or "").strip()
+        note = str(stop.get("note") or "").strip()
+        status = str(stop.get("status") or "")
+        lat = stop.get("lat")
+        lng = stop.get("lng")
+        suffix = f"，交通：{transport}" if transport else ""
+        note_suffix = f"，说明：{note}" if note else ""
+        if status == "ok" and isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+            route_lines.append(f"- index={index}，{date}，{name}，已知坐标 lat={lat}, lng={lng}{suffix}{note_suffix}")
+        else:
+            line = f"- index={index}，{date}，{name}{suffix}{note_suffix}"
+            route_lines.append(line)
+            unresolved_lines.append(line)
+    return (
+        "你是严谨的旅行路线图地理坐标助手。请根据行程标题、日期、所有站点上下文，为未确认坐标的地点给出大概经纬度。"
+        "不需要门牌级精确，城市、景区、岛屿、国家区域中心点或常见旅行落点即可，但必须保持真实相对位置，"
+        "不能把不同城市、省份、国家或南北东西关系颠倒。遇到酒店/民宿/小众地点无法确认时，使用其所在城市、景区或地区的大概坐标。\n\n"
+        f"标题：{plan.get('title') or '定制旅行路线图'}\n"
+        f"副标题/日期：{plan.get('subtitle') or '未提供'}\n"
+        "完整路线节点：\n"
+        f"{chr(10).join(route_lines)[:6000]}\n\n"
+        "需要估算坐标的节点：\n"
+        f"{chr(10).join(unresolved_lines)[:3000]}\n\n"
+        "只返回 JSON 数组，不要 Markdown，不要解释。index 是上面节点里的从 0 开始的 index，不要改成从 1 开始。"
+        "数组每一项格式："
+        '{"index":0,"name":"地点名","country":"国家或地区","lat":31.2304,"lng":121.4737,'
+        '"confidence":0.58,"note":"使用城市中心大概坐标"}。'
+        "index 必须使用上面给出的 index；lat/lng 必须是数字；confidence 取 0 到 1；"
+        "country 使用简短中文国家/地区名。"
+    )
+
+
+def _json_candidates_from_text(text: str) -> list[Any]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    candidates: list[str] = [stripped]
+    array_start = stripped.find("[")
+    array_end = stripped.rfind("]")
+    if 0 <= array_start < array_end:
+        candidates.append(stripped[array_start : array_end + 1])
+    object_start = stripped.find("{")
+    object_end = stripped.rfind("}")
+    if 0 <= object_start < object_end:
+        candidates.append(stripped[object_start : object_end + 1])
+
+    parsed_candidates: list[Any] = []
+    for candidate in candidates:
+        try:
+            parsed_candidates.append(json.loads(candidate))
+        except json.JSONDecodeError:
+            continue
+    return parsed_candidates
+
+
+def _parse_itinerary_coordinate_estimates(text: str) -> list[dict[str, Any]]:
+    for parsed in _json_candidates_from_text(text):
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        if isinstance(parsed, dict):
+            for key in ("stops", "coordinates", "items", "data"):
+                items = parsed.get(key)
+                if isinstance(items, list):
+                    return [item for item in items if isinstance(item, dict)]
+            return [parsed]
+    return []
+
+
+async def _complete_itinerary_plan_with_ai_coordinates(
+    *,
+    parsed: ItineraryMapRenderRequest,
+    plan: dict[str, Any],
+    settings: Settings,
+    client: UpstreamClient,
+    user: AuthUser,
+) -> dict[str, Any]:
+    if plan.get("status") == "ready":
+        return plan
+    endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
+    api_key = (parsed.api_key or settings.default_api_key).strip()
+    if not api_key:
+        return plan
+
+    model = settings.default_responses_model.strip() or "gpt-5.5"
+    upstream_payload = {
+        "model": model,
+        "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
+        "reasoning": {"effort": "high"},
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _itinerary_coordinate_prompt(plan),
+                    }
+                ],
+            }
+        ],
+    }
+    try:
+        upstream_response = await client.run_responses(
+            endpoint_url,
+            api_key,
+            upstream_payload,
+            settings.upstream_user_agent,
+        )
+    except APIError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "itinerary_ai_coordinate_estimation_failed",
+            status=exc.status,
+            code=exc.code,
+            message=redact_sensitive_text(exc.message, limit=300),
+            user_id=user.id,
+            username=user.username,
+        )
+        return plan
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "itinerary_ai_coordinate_estimation_failed",
+            error=redact_sensitive_text(str(exc), limit=300),
+            user_id=user.id,
+            username=user.username,
+        )
+        return plan
+
+    estimates = _parse_itinerary_coordinate_estimates(_extract_text_output(upstream_response))
+    completed = apply_itinerary_coordinate_estimates(plan, estimates, source="ai_approximate")
+    log_event(
+        logger,
+        logging.INFO if completed.get("status") == "ready" else logging.WARNING,
+        "itinerary_ai_coordinate_estimation_completed",
+        status=completed.get("status"),
+        estimate_count=len(estimates),
+        unresolved_count=len(
+            [stop for stop in completed.get("stops", []) if isinstance(stop, dict) and stop.get("status") != "ok"]
+        ),
+        user_id=user.id,
+        username=user.username,
+    )
+    return completed
+
+
+async def handle_itinerary_map_render(
+    body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
+) -> dict[str, Any]:
+    if user is None:
+        raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+    payload = _ensure_dict(body)
+    parsed = _validate_request(ItineraryMapRenderRequest, payload)
+    plan = await build_itinerary_map_plan_async(
+        title=parsed.title,
+        subtitle=parsed.subtitle,
+        route_style=parsed.route_style,
+        stops=[stop.model_dump() for stop in parsed.stops],
+        geocode=lambda name: geocode_place_with_settings(name, settings),
+    )
+    if plan["status"] != "ready":
+        plan = await _complete_itinerary_plan_with_ai_coordinates(
+            parsed=parsed,
+            plan=plan,
+            settings=settings,
+            client=client,
+            user=user,
+        )
+    if plan["status"] != "ready":
+        raise APIError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "路线图仍有地点无法自动定位，暂时不能生成准确路线图",
+            "\n".join(str(item) for item in plan.get("warnings", [])),
+            code="itinerary_coordinates_required",
+        )
+
+    composition = _choose_itinerary_output_size(plan, parsed.size)
+    width = int(composition["width"])
+    height = int(composition["height"])
+    output_size = str(composition["selected_size"])
+    api_key = (parsed.api_key or settings.default_api_key).strip()
+    artwork_fallback_error = ""
+    if parsed.generate_background and not parsed.background_image_url and api_key:
+        try:
+            artwork = await _generate_itinerary_artwork(
+                parsed=parsed,
+                plan=plan,
+                settings=settings,
+                client=client,
+                user=user,
+                output_size=output_size,
+                composition=composition,
+            )
+        except APIError as exc:
+            if exc.code != "upstream_no_image":
+                raise
+            log_event(
+                logger,
+                logging.WARNING,
+                "itinerary_artwork_no_image",
+                message=redact_sensitive_text(exc.message, limit=300),
+                details=redact_sensitive_text(str(exc.details or ""), limit=500),
+                user_id=user.id,
+                username=user.username,
+            )
+            raise APIError(
+                HTTPStatus.BAD_GATEWAY,
+                "路线图 AI 底图这次没有生成成功，请稍后重试",
+                "Responses image generation completed without a usable image output.",
+                code="upstream_no_image",
+            ) from exc
+        except (OSError, ValueError, binascii.Error) as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "itinerary_artwork_generation_failed",
+                error=redact_sensitive_text(str(exc), limit=300),
+            )
+            raise APIError(
+                HTTPStatus.BAD_GATEWAY,
+                "路线图生成失败：上游返回的图片无效，请稍后重试",
+                f"{type(exc).__name__}: {exc}",
+                code="upstream_error",
+            ) from exc
+        else:
+            artwork["candidate_index"] = 0
+            artwork["mode"] = "itinerary"
+            artwork["prompt"] = parsed.title
+            artwork["logo_requested"] = parsed.logo_requested
+            artwork["logo_overlay_applied"] = False
+            return {
+                "requested_size": composition["requested_size"],
+                "size": output_size,
+                "composition": composition,
+                "plan": plan,
+                "artwork": {
+                    "generated": True,
+                    "mode": "ai_background_program_overlay",
+                    "model": str(artwork.get("model") or ""),
+                    "image_mime": str(artwork.get("saved_image_mime") or ""),
+                },
+                "background_image": {
+                    "generated": True,
+                    "mode": "ai_background_program_overlay",
+                    "model": str(artwork.get("model") or ""),
+                    "image_mime": str(artwork.get("ai_background_image_mime") or ""),
+                    "error": "",
+                },
+                **artwork,
+            }
+
+    try:
+        svg_text = render_itinerary_map_svg(
+            plan,
+            width=width,
+            height=height,
+            background_image_url=parsed.background_image_url,
+            logo_href="",
+            reserve_logo_area=parsed.logo_requested,
+        )
+        saved = await anyio.to_thread.run_sync(
+            lambda: save_itinerary_map_svg(
+                data_dir=settings.data_dir,
+                outputs_dir=settings.outputs_dir,
+                svg_text=svg_text,
+                filename_prefix=user.username,
+                metadata={
+                    "user_id": user.id,
+                    "username": user.username,
+                    "mode": "itinerary",
+                    "prompt": parsed.title,
+                    "route_style": parsed.route_style,
+                    "size": output_size,
+                    "requested_size": composition["requested_size"],
+                    "composition": composition,
+                    "background_image_url": parsed.background_image_url,
+                    "artwork_generated": False,
+                    "artwork_mode": "program_svg_fallback",
+                    "artwork_fallback_error": artwork_fallback_error,
+                    "logo_requested": parsed.logo_requested,
+                    "logo_overlay_applied": False,
+                    "stop_count": len(parsed.stops),
+                },
+                width=width,
+                height=height,
+            )
+        )
+    except (OSError, ValueError, binascii.Error) as exc:
+        raise APIError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc), code="itinerary_coordinates_required") from exc
+    saved["candidate_index"] = 0
+    saved["mode"] = "itinerary"
+    saved["model"] = "program-itinerary-map"
+    saved["prompt"] = parsed.title
+    saved["logo_overlay_applied"] = False
+    return {
+        "mode": "itinerary",
+        "prompt": parsed.title,
+        "model": "program-itinerary-map",
+        "transport": "program-itinerary-map",
+        "requested_size": composition["requested_size"],
+        "size": output_size,
+        "composition": composition,
+        "logo_requested": parsed.logo_requested,
+        "logo_overlay_applied": False,
+        "candidate_count": 1,
+        "images": [saved],
+        "plan": plan,
+        "artwork": {
+            "generated": False,
+            "mode": "program_svg_fallback",
+            "model": "",
+            "image_mime": saved.get("saved_image_mime", ""),
+        },
+        "background_image": {
+            "generated": False,
+            "mode": "program_svg_fallback",
+            "model": "",
+            "image_mime": saved.get("saved_image_mime", ""),
+            "error": artwork_fallback_error,
+        },
+        **saved,
+    }
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -469,6 +1360,8 @@ def create_router() -> APIRouter:
             bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
             password_reset_email_enabled=smtp_notifications_enabled(settings),
+            map_provider=_public_map_provider(settings),
+            map_geocoding_enabled=_map_geocoding_enabled(settings),
         )
 
     @router.get("/api/health", response_model=HealthResponse)
@@ -853,9 +1746,7 @@ def create_router() -> APIRouter:
     ) -> dict[str, Any]:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
-        members = await anyio.to_thread.run_sync(
-            lambda: auth_store.list_team_chat_members(current_user_id=user.id)
-        )
+        members = await anyio.to_thread.run_sync(lambda: auth_store.list_team_chat_members(current_user_id=user.id))
         group = await anyio.to_thread.run_sync(lambda: auth_store.team_chat_group_for_user(user.id))
         bot = next((member for member in members if member.get("type") == "bot"), None)
         human_members = [member for member in members if member.get("type") != "bot"]
@@ -1534,6 +2425,46 @@ def create_router() -> APIRouter:
         shares = await anyio.to_thread.run_sync(lambda: auth_store.list_shared_results_for_user(user_id=user.id))
         return {"shares": shares}
 
+    @router.post("/api/itinerary-map/plan")
+    async def itinerary_map_plan(
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        user: AuthUser | None = Depends(require_current_user),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        payload = _ensure_dict(body)
+        parsed = _validate_request(ItineraryMapPlanRequest, payload)
+        return await build_itinerary_map_plan_async(
+            title=parsed.title,
+            subtitle=parsed.subtitle,
+            route_style=parsed.route_style,
+            stops=[stop.model_dump() for stop in parsed.stops],
+            geocode=lambda name: geocode_place_with_settings(name, settings),
+        )
+
+    @router.post("/api/itinerary-map/render")
+    async def itinerary_map_render(
+        request: Request,
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        client: UpstreamClient = Depends(get_client),
+        auth_store: AuthStore = Depends(get_auth_store),
+        user: AuthUser | None = Depends(require_current_user),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await _with_timing(
+                "/api/itinerary-map/render",
+                handle_itinerary_map_render,
+                body,
+                settings,
+                client,
+                auth_store,
+                user,
+                request,
+            )
+        )
+
     @router.post("/api/generate")
     async def generate(
         request: Request,
@@ -1712,6 +2643,7 @@ async def _create_team_chat_bot_reply(
     model = settings.default_responses_model.strip() or "gpt-5.5"
     upstream_payload = {
         "model": model,
+        "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
         "reasoning": {"effort": "high"},
         "input": [
             {
@@ -1864,6 +2796,7 @@ async def handle_copyright_risk(
     content = _responses_inline_input_content(_copyright_risk_prompt(parsed), image_parts)
     upstream_payload = {
         "model": model,
+        "instructions": COPYRIGHT_RISK_INSTRUCTIONS,
         "input": [
             {
                 "role": "user",
@@ -1913,7 +2846,7 @@ def _result_saved_bytes(result: dict[str, Any]) -> int:
 
 
 def _should_track_generation_job(path: str) -> bool:
-    return path in {"/api/generate", "/api/edit", "/api/responses-image"}
+    return path in {"/api/generate", "/api/edit", "/api/responses-image", "/api/itinerary-map/render"}
 
 
 def _job_sample_count(payload: dict[str, Any]) -> int:
@@ -1932,6 +2865,8 @@ def _generate_mode(value: Any) -> str:
 
 
 def _job_mode(path: str, payload: dict[str, Any]) -> str:
+    if path == "/api/itinerary-map/render":
+        return "itinerary"
     if path == "/api/generate":
         return _generate_mode(payload.get("mode"))
     if path == "/api/edit":
@@ -1947,6 +2882,7 @@ def _job_transport(path: str) -> str:
         "/api/generate": "images-generate",
         "/api/edit": "images-edit",
         "/api/responses-image": "responses-image",
+        "/api/itinerary-map/render": "responses-itinerary-artwork",
     }.get(path, "")
 
 
@@ -1964,15 +2900,27 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "endpoint_path": path,
         "mode": _job_mode(path, payload),
         "transport": _job_transport(path),
-        "prompt": str(payload.get("prompt") or ""),
-        "original_prompt": str(payload.get("original_prompt") or payload.get("prompt") or ""),
+        "prompt": str(payload.get("prompt") or payload.get("title") or ""),
+        "original_prompt": str(
+            payload.get("original_prompt")
+            or payload.get("prompt")
+            or payload.get("title")
+            or payload.get("subtitle")
+            or ""
+        ),
         "prompt_mode": prompt_mode,
         "recipe_id": recipe_id,
         "recipe_version": recipe_version,
-        "model": str(payload.get("model") or ""),
-        "size": str(payload.get("size") or ""),
+        "model": str(
+            payload.get("model") or ("responses-itinerary-artwork" if path == "/api/itinerary-map/render" else "")
+        ),
+        "size": str(payload.get("size") or (ITINERARY_DEFAULT_SIZE if path == "/api/itinerary-map/render" else "")),
         "sample_count": _job_sample_count(payload),
-        "logo_requested": bool(payload.get("logo_requested")),
+        "logo_requested": (
+            bool(payload.get("logo_requested", True))
+            if path == "/api/itinerary-map/render"
+            else bool(payload.get("logo_requested"))
+        ),
     }
 
 
@@ -2470,9 +3418,7 @@ def _responses_input_content(prompt: str, image_file_ids: list[str]) -> list[dic
     return content
 
 
-def _responses_inline_input_content(
-    prompt: str, image_parts: list[dict[str, Any]]
-) -> list[dict[str, str]]:
+def _responses_inline_input_content(prompt: str, image_parts: list[dict[str, Any]]) -> list[dict[str, str]]:
     content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
     for image_part in image_parts:
         image_b64 = base64.b64encode(image_part["data"]).decode("ascii")
@@ -2554,6 +3500,7 @@ async def handle_responses_image(
 
     upstream_payload = {
         "model": model,
+        "instructions": RESPONSES_IMAGE_INSTRUCTIONS,
         "stream": True,
         "input": [
             {
