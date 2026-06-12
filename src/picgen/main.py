@@ -48,6 +48,7 @@ _ALERTABLE_ERROR_CODES = frozenset(
         "upstream_timeout",
         "upstream_network_error",
         "upstream_invalid_response",
+        "upstream_no_image",
         "upstream_rate_limited",
         "upstream_blocked",
     }
@@ -302,6 +303,8 @@ def _base_operational_message(exc: APIError) -> str:
         return "暂时无法连接图片生成服务，请稍后再试。"
     if exc.code == "upstream_invalid_response":
         return "图片生成服务返回了无法解析的响应，请稍后再试。"
+    if exc.code == "upstream_no_image":
+        return "路线图 AI 底图这次没有生成成功，请稍后再试。"
     if exc.code == "upstream_blocked":
         return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
     if exc.code == "upstream_error":

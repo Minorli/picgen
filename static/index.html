@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=0.1.30">
+    <link rel="stylesheet" href="styles.css?v=0.1.34">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -472,12 +472,12 @@
             <section id="itineraryPanel" class="studio-card command-card itinerary-panel hidden">
               <div class="section-title">
                 <h2>行程路线</h2>
-                <span class="soft-label">AI 路线图</span>
+                <span class="soft-label">准确路线图</span>
               </div>
 
               <div class="itinerary-help-panel">
                 <strong>粘贴客户行程</strong>
-                <p>把客户发来的日期、城市、酒店、交通和活动原文贴进来。默认按漫画风格路线图生成，但地理位置、日期、距离和转场信息必须真实，程序最后使用官方透明 PNG 贴入 LOGO。</p>
+                <p>把客户发来的日期、城市、酒店、交通和活动原文贴进来。系统会自动定位地点并由程序覆盖路线、日期、文字和官方 LOGO。</p>
               </div>
 
               <div class="itinerary-stop-grid">
@@ -486,12 +486,13 @@
                   <input id="itineraryTitleInput" type="text" maxlength="120" value="定制旅行路线图">
                 </label>
                 <label>
-                  <span>副标题</span>
-                  <input id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24">
+                  <span>副标题日期</span>
+                  <input id="itinerarySubtitleInput" type="text" maxlength="160" placeholder="例如：5/12 - 5/24" required>
                 </label>
                 <label>
                   <span>输出尺寸</span>
                   <select id="itinerarySizeSelect">
+                    <option value="auto" selected>自动比例（按真实路线选择）</option>
                     <option value="1792x1792">方图 1792 x 1792</option>
                     <option value="1088x2240">6 人游竖版 1088 x 2240</option>
                     <option value="1920x1088">横版 1920 x 1088</option>
@@ -507,6 +508,7 @@
                   </select>
                 </label>
               </div>
+              <p class="itinerary-size-hint">系统会按真实坐标自动选择竖版、横版或方图；手动尺寸不适合时会优先保证地理相对位置真实。</p>
 
               <label class="prompt-field itinerary-textarea">
                 <span>行程描述</span>
@@ -524,8 +526,8 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
               </div>
 
               <div class="itinerary-ai-options">
-                <span>AI 会整理地点层级、交通方式、日期标签和地图视觉，不要求用户提供经纬度。</span>
-                <span>提示词会明确要求左上角预留干净白底 LOGO 安全区。</span>
+                <span>关键地点、路线、日期、文字和 LOGO 都由程序覆盖；地点不明确时会提示补充更完整名称。</span>
+                <span>提示词会明确要求左上角只保留自然留白，不画 LOGO 占位框或白底板。</span>
               </div>
 
               <div class="logo-run-toggle">
@@ -537,7 +539,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
               </div>
 
               <div class="primary-run-row">
-                <button id="renderItineraryMapButton" class="primary-button" type="button">AI 生成行程路线</button>
+                <button id="renderItineraryMapButton" class="primary-button" type="button">生成准确路线图</button>
                 <button id="clearItineraryMapButton" class="ghost-button" type="button">恢复示例</button>
               </div>
             </section>
@@ -870,7 +872,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.30</span>
+        <span>PicGen Console　v0.1.34</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -1151,6 +1153,6 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
 
     <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
 
-    <script src="app.js?v=0.1.30" type="module"></script>
+    <script src="app.js?v=0.1.34" type="module"></script>
   </body>
 </html>

@@ -64,6 +64,17 @@ def event_image_base64(event: dict[str, Any]) -> str | None:
     return None
 
 
+def event_text_delta(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("type") or "")
+    if event_type not in {"response.output_text.delta", "response.text.delta"}:
+        return None
+    for key in ("delta", "text", "output_text"):
+        value = event.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def stream_events_to_image_payload(
     events: list[dict[str, Any]],
     *,
@@ -74,13 +85,18 @@ def stream_events_to_image_payload(
 
     last_image_b64: str | None = None
     completed_response: dict[str, Any] = {}
+    text_chunks: list[str] = []
     for event in events:
         image_b64 = event_image_base64(event)
         if image_b64:
             last_image_b64 = image_b64
+        text_delta = event_text_delta(event)
+        if text_delta:
+            text_chunks.append(text_delta)
         response_payload = event.get("response")
         if isinstance(response_payload, dict):
             completed_response = response_payload
+    has_image = bool(last_image_b64 or extract_response_image_item(completed_response))
 
     log_event(
         logger,
@@ -89,10 +105,23 @@ def stream_events_to_image_payload(
         url=url,
         elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
         events=len(events),
-        has_image=bool(last_image_b64 or extract_response_image_item(completed_response)),
+        has_image=has_image,
+        has_text=bool(text_chunks or completed_response.get("output_text") or completed_response.get("output")),
     )
-    return normalize_responses_image_payload(
-        completed_response,
-        fallback_b64=last_image_b64,
-        events=events[-20:],
-    )
+    if has_image:
+        normalized = normalize_responses_image_payload(
+            completed_response,
+            fallback_b64=last_image_b64,
+            events=events[-20:],
+        )
+        if completed_response.get("output_text"):
+            normalized["output_text"] = completed_response["output_text"]
+        elif text_chunks:
+            normalized["output_text"] = "".join(text_chunks)
+        return normalized
+
+    payload = dict(completed_response)
+    if text_chunks and not isinstance(payload.get("output_text"), str):
+        payload["output_text"] = "".join(text_chunks)
+    payload["stream_events"] = events[-20:]
+    return payload

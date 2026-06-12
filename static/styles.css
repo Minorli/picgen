@@ -1348,6 +1348,13 @@ select:focus,
   font-weight: 700;
 }
 
+.itinerary-size-hint {
+  margin: -2px 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .itinerary-textarea {
   display: grid;
   gap: 7px;

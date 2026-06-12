@@ -445,6 +445,58 @@ class FinalImageRequest(BaseModel):
         return value.strip()
 
 
+class ItineraryMapStopRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    date: str = Field(default="", max_length=32)
+    name: str = Field(min_length=1, max_length=120)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    country: str = Field(default="", max_length=48)
+    transport: str = Field(default="", max_length=40)
+    note: str = Field(default="", max_length=180)
+
+    @field_validator("date", "name", "country", "transport", "note", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class ItineraryMapPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(default="定制旅行路线图", max_length=120)
+    subtitle: str = Field(default="", max_length=160)
+    stops: list[ItineraryMapStopRequest] = Field(min_length=1, max_length=80)
+    route_style: Literal["comic", "premium", "classic", "dark"] = "comic"
+
+    @field_validator("title", "subtitle", "route_style", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_subtitle(self) -> ItineraryMapPlanRequest:
+        if not self.subtitle.strip():
+            raise ValueError("请填写副标题日期，例如：5/12 - 5/24")
+        return self
+
+
+class ItineraryMapRenderRequest(ItineraryMapPlanRequest):
+    background_image_url: str = Field(default="", max_length=1024)
+    endpoint_url: str = Field(default="", max_length=512)
+    api_key: str = Field(default="", max_length=4096)
+    model: str = Field(default="", max_length=128)
+    size: str = Field(default="", max_length=64)
+    generate_background: bool = True
+    logo_requested: bool = True
+
+    @field_validator("background_image_url", "endpoint_url", "api_key", "model", "size", mode="after")
+    @classmethod
+    def _strip_render_text(cls, value: str) -> str:
+        return value.strip()
+
+
 class UserPreferencesRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -488,6 +540,8 @@ class ConfigResponse(BaseModel):
     bug_report_notifications_enabled: bool
     error_alert_notifications_enabled: bool
     password_reset_email_enabled: bool
+    map_provider: str
+    map_geocoding_enabled: bool
 
 
 class HealthResponse(BaseModel):

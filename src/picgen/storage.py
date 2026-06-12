@@ -22,6 +22,7 @@ _MIME_TO_EXT: dict[str, str] = {
     "image/jpg": ".jpg",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "image/svg+xml": ".svg",
     "application/octet-stream": ".bin",
 }
 
@@ -74,8 +75,19 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
     if image_bytes.startswith(b"\xff\xd8"):
         index = 2
         sof_markers = {
-            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
-            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
         }
         while index + 9 < len(image_bytes):
             if image_bytes[index] != 0xFF:
@@ -87,12 +99,12 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
                 continue
             if index + 2 > len(image_bytes):
                 break
-            segment_length = int.from_bytes(image_bytes[index:index + 2], "big")
+            segment_length = int.from_bytes(image_bytes[index : index + 2], "big")
             if segment_length < 2 or index + segment_length > len(image_bytes):
                 break
             if marker in sof_markers and segment_length >= 7:
-                height = int.from_bytes(image_bytes[index + 3:index + 5], "big")
-                width = int.from_bytes(image_bytes[index + 5:index + 7], "big")
+                height = int.from_bytes(image_bytes[index + 3 : index + 5], "big")
+                width = int.from_bytes(image_bytes[index + 5 : index + 7], "big")
                 return width, height
             index += segment_length
 

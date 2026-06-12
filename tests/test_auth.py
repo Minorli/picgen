@@ -963,10 +963,7 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        tables = {
-            row["name"]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert "schema_migrations" in tables
         assert "password_reset_requests" in tables
         assert "user_preferences" in tables
@@ -976,34 +973,17 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         assert "gallery_image_metadata" in tables
         assert "gallery_image_tags" in tables
         assert "image_delivery_events" in tables
-        password_reset_columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(password_reset_requests)")
-        }
+        password_reset_columns = {row["name"] for row in conn.execute("PRAGMA table_info(password_reset_requests)")}
         assert {"token_hash", "email", "email_sent_at", "expires_at"}.issubset(password_reset_columns)
-        password_reset_indexes = {
-            row["name"]
-            for row in conn.execute("PRAGMA index_list(password_reset_requests)")
-        }
+        password_reset_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(password_reset_requests)")}
         assert "idx_password_reset_token_hash" in password_reset_indexes
-        gallery_metadata_indexes = {
-            row["name"]
-            for row in conn.execute("PRAGMA index_list(gallery_image_metadata)")
-        }
-        gallery_tag_indexes = {
-            row["name"]
-            for row in conn.execute("PRAGMA index_list(gallery_image_tags)")
-        }
+        gallery_metadata_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(gallery_image_metadata)")}
+        gallery_tag_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(gallery_image_tags)")}
         assert "idx_gallery_metadata_user_favorite" in gallery_metadata_indexes
         assert "idx_gallery_tags_user_tag" in gallery_tag_indexes
         assert "idx_gallery_tags_image" in gallery_tag_indexes
-        generation_job_columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(generation_jobs)")
-        }
-        assert {"original_prompt", "prompt_mode", "recipe_id", "recipe_version"}.issubset(
-            generation_job_columns
-        )
+        generation_job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+        assert {"original_prompt", "prompt_mode", "recipe_id", "recipe_version"}.issubset(generation_job_columns)
         user = conn.execute(
             "SELECT role, is_active, company, department, last_seen_at FROM users WHERE id = ?",
             (user_id,),
@@ -1712,6 +1692,8 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.5"
     assert upstream_payload["reasoning"]["effort"] == "high"
+    assert "GPT-BOT" in upstream_payload["instructions"]
+    assert "中文" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]
     assert "高端定制旅行" in prompt_text
     assert "全局图片质量助手" in prompt_text
@@ -1745,10 +1727,13 @@ def test_team_chat_messages_initial_load_returns_latest_window(make_client, sett
     client, _, _ = make_client(settings=settings)
 
     alice_client = TestClient(client.app)
-    assert alice_client.post(
-        "/api/auth/register",
-        json={"username": "alice", "password": USER_PASSWORD},
-    ).status_code == 200
+    assert (
+        alice_client.post(
+            "/api/auth/register",
+            json={"username": "alice", "password": USER_PASSWORD},
+        ).status_code
+        == 200
+    )
 
     for index in range(205):
         response = alice_client.post(
@@ -1885,9 +1870,7 @@ def test_admin_org_dictionary_group_assets_stats_and_summary(make_client, settin
 
     orgs = admin_client.get("/api/admin/org-units")
     assert orgs.status_code == 200
-    assert ("6renyou", "PD & OPS") in {
-        (item["company"], item["department"]) for item in orgs.json()["org_units"]
-    }
+    assert ("6renyou", "PD & OPS") in {(item["company"], item["department"]) for item in orgs.json()["org_units"]}
 
     create_org = admin_client.post(
         "/api/admin/org-units",
@@ -2051,9 +2034,7 @@ def test_team_chat_private_rooms_are_limited_to_participants(make_client, settin
     assert send.json()["messages"][0]["room_type"] == "dm"
 
     alice_id = alice.json()["user"]["id"]
-    bob_messages = bob_client.get(
-        f"/api/team-chat/messages?room_type=dm&recipient_user_id={alice_id}"
-    )
+    bob_messages = bob_client.get(f"/api/team-chat/messages?room_type=dm&recipient_user_id={alice_id}")
     assert bob_messages.status_code == 200
     assert bob_messages.json()["messages"][0]["content"] == "这个版式我觉得可以。"
 

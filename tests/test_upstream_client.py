@@ -31,9 +31,7 @@ async def test_run_json_retries_then_succeeds() -> None:
     transport = httpx.MockTransport(handler)
     client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
     try:
-        payload = await client.run_json(
-            "https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA"
-        )
+        payload = await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert payload["data"][0]["b64_json"] == "abc"
         assert calls["count"] == 2
     finally:
@@ -45,9 +43,7 @@ async def test_run_json_raises_after_max_retries() -> None:
     client = await _build_client(transport, max_retries=1, retry_backoff=0.0)
     try:
         with pytest.raises(APIError) as info:
-            await client.run_json(
-                "https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA"
-            )
+            await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 502
     finally:
         await client.aclose()
@@ -63,9 +59,7 @@ async def test_run_json_reports_retry_exhaustion_to_user() -> None:
     client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
     try:
         with pytest.raises(APIError) as info:
-            await client.run_json(
-                "https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA"
-            )
+            await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 502
         assert "已自动尝试 3 次" in info.value.message
         assert "上游连续返回 502" in (info.value.details or "")
@@ -81,9 +75,7 @@ async def test_run_json_translates_timeout() -> None:
     client = await _build_client(transport, max_retries=0, retry_backoff=0.0)
     try:
         with pytest.raises(APIError) as info:
-            await client.run_json(
-                "https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA"
-            )
+            await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 504
         assert info.value.code == "upstream_timeout"
     finally:
@@ -144,9 +136,7 @@ async def test_fetch_image_rejects_oversized_content_length() -> None:
 
 async def test_run_responses_parses_sse() -> None:
     sse_body = (
-        b"event: response.image_generation_call.partial_image\n"
-        b'data: {"partial_image_b64":"abcd"}\n\n'
-        b"data: [DONE]\n\n"
+        b'event: response.image_generation_call.partial_image\ndata: {"partial_image_b64":"abcd"}\n\ndata: [DONE]\n\n'
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -166,6 +156,60 @@ async def test_run_responses_parses_sse() -> None:
             "UA",
         )
         assert payload["data"][0]["b64_json"] == "abcd"
+    finally:
+        await client.aclose()
+
+
+async def test_run_responses_preserves_text_from_sse() -> None:
+    coordinate_json = '[{"index":0,"name":"巴黎","lat":48.8566,"lng":2.3522,"confidence":0.72}]'
+    sse_body = (
+        b"event: response.output_text.delta\n"
+        + json.dumps({"type": "response.output_text.delta", "delta": coordinate_json})
+        .encode("utf-8")
+        .join((b"data: ", b"\n\n"))
+        + b"event: response.completed\n"
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_text",
+                    "model": "gpt-5.5",
+                    "status": "completed",
+                    "output_text": coordinate_json,
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": coordinate_json}],
+                        }
+                    ],
+                },
+            }
+        )
+        .encode("utf-8")
+        .join((b"data: ", b"\n\n"))
+        + b"data: [DONE]\n\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0)
+    try:
+        payload = await client.run_responses(
+            "https://upstream.test/responses",
+            "sk-test",
+            {"model": "gpt-5.5", "instructions": "只返回 JSON", "input": []},
+            "UA",
+        )
+        assert payload["id"] == "resp_text"
+        assert payload["output_text"] == coordinate_json
+        assert payload["output"][0]["content"][0]["text"] == coordinate_json
+        assert payload["stream_events"]
     finally:
         await client.aclose()
 
@@ -203,8 +247,7 @@ async def test_upstream_http_error_status_and_details_are_sanitized() -> None:
                 {
                     "error": {
                         "message": (
-                            "Rate limit reached for gpt-image-2-codex "
-                            "in organization org-BOvpEHVcDPTe8h4lZnwMO5Ly"
+                            "Rate limit reached for gpt-image-2-codex in organization org-BOvpEHVcDPTe8h4lZnwMO5Ly"
                         ),
                         "type": "rate_limit_error",
                         "api_key": "sk-secret123456",
