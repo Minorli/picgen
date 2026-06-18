@@ -100,6 +100,19 @@ def test_bootstrap_admin_login_and_open_registration(make_client, settings_facto
     assert me.json()["user"]["role"] == "admin"
 
 
+def test_open_registration_rejects_reserved_usernames(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password=ADMIN_PASSWORD)
+    client, _, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/auth/register",
+        json={"username": "admin", "password": USER_PASSWORD},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "reserved_username"
+
+
 def test_login_failures_lock_account_temporarily(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True)
     client, _, _ = make_client(settings=settings)
@@ -125,6 +138,75 @@ def test_login_failures_lock_account_temporarily(make_client, settings_factory):
     )
     assert locked.status_code == 429
     assert locked.json()["code"] == "account_locked"
+
+
+def test_login_lockout_resets_after_window_expires(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, resolved_settings = make_client(settings=settings)
+
+    register = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert register.status_code == 200
+    client.post("/api/auth/logout")
+
+    for _ in range(5):
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": "wrong password"},
+            ).status_code
+            == 400
+        )
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"username": "alice", "password": USER_PASSWORD},
+        ).status_code
+        == 429
+    )
+
+    # Simulate the 15-minute lock window elapsing.
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.execute(
+            "UPDATE users SET locked_until = ? WHERE username_normalized = ?",
+            ("2000-01-01T00:00:00+00:00", "alice"),
+        )
+        conn.commit()
+
+    # A single wrong attempt after expiry must not instantly re-lock the account:
+    # the failure counter starts fresh, so the correct password then succeeds.
+    wrong_after_expiry = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "still wrong"},
+    )
+    assert wrong_after_expiry.status_code == 400
+    assert wrong_after_expiry.json()["code"] == "invalid_credentials"
+
+    success = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert success.status_code == 200
+
+
+def test_verify_password_rejects_corrupt_hashes_without_raising():
+    from picgen.auth import hash_password, verify_password
+
+    stored = hash_password("correct horse battery")
+    assert verify_password("correct horse battery", stored) is True
+    assert verify_password("nope", stored) is False
+    for corrupt in (
+        "",
+        "garbage",
+        "x$y$z",
+        "pbkdf2_sha256$notanint$abcd$abcd",
+        "pbkdf2_sha256$0$abcd$abcd",  # zero iterations would crash pbkdf2_hmac if unguarded
+        "pbkdf2_sha256$600000$zzzz$zzzz",  # non-hex salt/digest
+        "scrypt$1$ab$cd",  # unknown algorithm
+    ):
+        assert verify_password("anything", corrupt) is False
 
 
 def test_password_reset_request_is_admin_assisted_and_non_enumerating(make_client, settings_factory):
@@ -450,6 +532,156 @@ def test_password_reset_without_email_keeps_admin_fallback(
     assert admin_notifications[0]["reset_token"] == ""
 
 
+def test_password_reset_email_requires_public_base_url_to_avoid_host_poisoning(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    sent_emails = []
+    admin_notifications = []
+
+    def _fake_send_password_reset_email(**kwargs):
+        sent_emails.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        admin_notifications.append(kwargs["request_info"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr("picgen.routes.send_password_reset_email", _fake_send_password_reset_email)
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+    )
+    client, _, _ = make_client(settings=settings)
+    register = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert register.status_code == 200
+    update_profile = client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice",
+            "display_name": "Alice",
+            "email": "alice@example.com",
+            "company": "6renyou",
+            "department": "PD & OPS",
+        },
+    )
+    assert update_profile.status_code == 200
+    client.post("/api/auth/logout")
+
+    response = client.post(
+        "/api/password-reset-requests",
+        json={"username": "alice"},
+        headers={"host": "evil.example"},
+    )
+
+    assert response.status_code == 200
+    assert sent_emails == []
+    assert len(admin_notifications) == 1
+    assert admin_notifications[0]["email_available"] is False
+    assert admin_notifications[0]["reset_token"] == ""
+
+
+def test_password_reset_request_suppresses_recent_duplicate_email(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    sent_emails = []
+    admin_notifications = []
+
+    def _fake_send_password_reset_email(**kwargs):
+        sent_emails.append(kwargs)
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        admin_notifications.append(kwargs["request_info"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr("picgen.routes.send_password_reset_email", _fake_send_password_reset_email)
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        public_base_url="https://picgen.example.com",
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+    )
+    client, _, _ = make_client(settings=settings)
+    register = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert register.status_code == 200
+    update_profile = client.put(
+        "/api/me/profile",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "company": "6renyou",
+            "department": "PD & OPS",
+        },
+    )
+    assert update_profile.status_code == 200
+    client.post("/api/auth/logout")
+
+    first = client.post("/api/password-reset-requests", json={"username": "alice"})
+    second = client.post("/api/password-reset-requests", json={"username": "alice"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(sent_emails) == 1
+    assert admin_notifications == []
+
+
+def test_password_reset_request_suppresses_recent_duplicate_admin_notification(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    admin_notifications = []
+
+    async def _fake_send_password_reset_request_notification(**kwargs):
+        admin_notifications.append(kwargs["request_info"])
+        from picgen.notifications import NotificationResult
+
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.routes.send_password_reset_request_notification",
+        _fake_send_password_reset_request_notification,
+    )
+    settings = settings_factory(
+        auth_enabled=True,
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-1",
+    )
+    client, _, _ = make_client(settings=settings)
+
+    first = client.post("/api/password-reset-requests", json={"username": "unknown"})
+    second = client.post("/api/password-reset-requests", json={"username": "unknown"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(admin_notifications) == 1
+
+
 def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True)
     client, _, _ = make_client(settings=settings)
@@ -565,6 +797,21 @@ def test_user_profile_can_update_username_and_optional_fields(make_client, setti
         json={"username": "alice-new", "password": USER_PASSWORD},
     )
     assert new_username_login.status_code == 200
+
+
+def test_user_profile_rejects_reserved_username(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True)
+    client, _, _ = make_client(settings=settings)
+    register = client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD})
+    assert register.status_code == 200
+
+    response = client.put(
+        "/api/me/profile",
+        json={"username": "admin", "current_password": USER_PASSWORD},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "reserved_username"
 
 
 def test_user_profile_rejects_duplicate_username_and_saves_avatar(make_client, settings_factory):
@@ -697,6 +944,14 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     assert user_usage["users"][0]["generated_image_count"] == 1
     assert user_usage["users"][0]["delivered_image_count"] == 1
 
+    image_stats_response = client.get("/api/image-stats")
+    assert image_stats_response.status_code == 200
+    image_stats = image_stats_response.json()["stats"]
+    assert image_stats == {
+        "current_user_generated_image_count": 1,
+        "platform_generated_image_count": 1,
+    }
+
     forbidden_admin = client.get("/api/admin/users")
     assert forbidden_admin.status_code == 403
     assert forbidden_admin.json()["code"] == "forbidden"
@@ -715,6 +970,12 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     usage_by_name = {row["username"]: row for row in admin_usage["users"]}
     assert usage_by_name["admin"]["request_count"] == 0
     assert usage_by_name["alice"]["request_count"] == 1
+
+    admin_image_stats_response = client.get("/api/image-stats")
+    assert admin_image_stats_response.status_code == 200
+    admin_image_stats = admin_image_stats_response.json()["stats"]
+    assert admin_image_stats["current_user_generated_image_count"] == 0
+    assert admin_image_stats["platform_generated_image_count"] == 1
 
 
 def test_result_feedback_is_recorded_and_admin_can_review_summary(make_client, settings_factory):
@@ -1027,7 +1288,9 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
     assert not legacy_metadata_path.exists()
 
 
-def test_final_logo_image_upload_replaces_canonical_generated_image(make_client, settings_factory):
+def test_final_logo_image_upload_replaces_canonical_generated_image_and_notifies_once(
+    make_client, settings_factory
+):
     alerts = []
 
     async def _fake_send_generation_success_notification(**kwargs):
@@ -1069,6 +1332,8 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
         original_url = generated["saved_image_url"]
         generated_image_id = generated["generated_image_id"]
 
+        assert alerts == []
+
         final_response = client.post(
             "/api/final-images",
             json={
@@ -1084,9 +1349,25 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
                 },
             },
         )
+        duplicate_final_response = client.post(
+            "/api/final-images",
+            json={
+                "generated_image_id": generated_image_id,
+                "source_saved_image_url": original_url,
+                "logo_overlay_applied": True,
+                "logo_overlay_source": "6renyou.png",
+                "logo_text_color": "black",
+                "image": {
+                    "name": "result-logo-again.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            },
+        )
     finally:
         picgen.routes.send_generation_success_notification = original_notifier
     assert final_response.status_code == 200
+    assert duplicate_final_response.status_code == 200
     final_payload = final_response.json()["image"]
     assert final_payload["generated_image_id"] == generated_image_id
     assert final_payload["saved_image_url"] != original_url
@@ -1104,15 +1385,16 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
 
     import sqlite3
 
+    duplicate_payload = duplicate_final_response.json()["image"]
     with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
         conn.row_factory = sqlite3.Row
         image = conn.execute(
             "SELECT * FROM generated_images WHERE id = ?",
             (generated_image_id,),
         ).fetchone()
-        assert image["saved_image_url"] == final_payload["saved_image_url"]
-        assert image["saved_image_path"] == final_payload["saved_image_path"]
-        assert image["saved_metadata_url"] == final_payload["saved_metadata_url"]
+        assert image["saved_image_url"] == duplicate_payload["saved_image_url"]
+        assert image["saved_image_path"] == duplicate_payload["saved_image_path"]
+        assert image["saved_metadata_url"] == duplicate_payload["saved_metadata_url"]
         assert image["logo_overlay_applied"] == 1
         metadata_row = conn.execute(
             "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = ?",
@@ -1120,19 +1402,105 @@ def test_final_logo_image_upload_replaces_canonical_generated_image(make_client,
         ).fetchone()
         assert metadata_row is not None
         metadata = json.loads(metadata_row["metadata_json"])
-        assert metadata["source_saved_image_url"] == original_url
+        assert metadata["source_saved_image_url"] in {original_url, final_payload["saved_image_url"]}
         assert metadata["logo_overlay_applied"] is True
         assert metadata["logo_overlay_source"] == "6renyou.png"
-    assert len(alerts) == 2
-    generation_alert, final_alert = alerts
-    assert generation_alert.logo_requested is True
-    assert generation_alert.logo_overlay_applied is False
+    assert len(alerts) == 1
+    final_alert = alerts[0]
     assert final_alert.path == "/api/final-images"
     assert final_alert.mode == "generate"
     assert final_alert.logo_requested is True
     assert final_alert.logo_overlay_applied is True
     assert final_alert.saved_image_urls == [final_payload["saved_image_url"]]
     assert final_alert.generated_image_ids == [generated_image_id]
+
+
+def test_logo_final_image_detail_exposes_original_source_and_edit_lineage_is_inferred(
+    make_client, settings_factory
+):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_multipart.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 2}
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    )
+    assert register_response.status_code == 200
+
+    generate_response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "生成一张亲子研学海报",
+            "model": "gpt-image-2",
+            "logo_requested": True,
+        },
+    )
+    assert generate_response.status_code == 200
+    generated = generate_response.json()
+    generated_image_id = generated["generated_image_id"]
+    original_url = generated["saved_image_url"]
+    original_path = generated["saved_image_path"]
+
+    final_response = client.post(
+        "/api/final-images",
+        json={
+            "generated_image_id": generated_image_id,
+            "source_saved_image_url": original_url,
+            "logo_overlay_applied": True,
+            "logo_overlay_source": "6renyou.png",
+            "image": {
+                "name": "result-logo.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+    assert final_response.status_code == 200
+    final_image = final_response.json()["image"]
+    assert final_image["saved_image_url"] != original_url
+
+    detail_response = client.get(f"/api/generated-images/{generated_image_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["image"]
+    assert detail["saved_image_url"] == final_image["saved_image_url"]
+    assert detail["original_saved_image_url"] == original_url
+    assert detail["original_saved_image_path"] == original_path
+    assert detail["metadata"]["source_saved_image_url"] == original_url
+
+    edit_response = client.post(
+        "/api/edit",
+        json={
+            "prompt": "只把标题调小一点",
+            "model": "gpt-image-2",
+            "logo_requested": True,
+            "source_saved_image_url": detail["original_saved_image_url"],
+            "source_saved_image_path": detail["original_saved_image_path"],
+            "image": {
+                "name": final_image["saved_image_name"],
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+    assert edit_response.status_code == 200
+    edited = edit_response.json()
+    assert edited["source_generated_image_id"] == generated_image_id
+    assert fake.run_multipart.await_args is not None
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        child = conn.execute(
+            """
+            SELECT source_generated_image_id
+            FROM generated_images
+            WHERE job_id = ?
+            """,
+            (edited["generation_job_id"],),
+        ).fetchone()
+    assert child is not None
+    assert child["source_generated_image_id"] == generated_image_id
 
 
 def test_user_preferences_are_persisted_without_api_key(make_client, settings_factory):

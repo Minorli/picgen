@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .upstream.payload import decode_base64_blob
 
+# SQLite stores INTEGER as signed 64-bit; binding a larger Python int raises
+# OverflowError. Cap id-shaped fields here so out-of-range input is a clean 422.
+_SQLITE_MAX_INT = 2**63 - 1
+
 
 class FilePayload(BaseModel):
     """Image (or mask) payload sent inline from the browser."""
@@ -56,6 +60,7 @@ class GenerateRequest(_ImageOptions):
     mode: str | None = Field(default=None, max_length=64)
     sample_count: int = Field(default=1, ge=1, le=3)
     logo_requested: bool = False
+    itinerary_id: str | None = Field(default=None, max_length=64)
     prompt_mode: Literal["free", "recipe"] = "free"
     original_prompt: str | None = Field(default=None, max_length=32_000)
     recipe_id: str | None = Field(default=None, max_length=128)
@@ -64,6 +69,8 @@ class GenerateRequest(_ImageOptions):
     @model_validator(mode="after")
     def _validate_prompt(self) -> GenerateRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="生成提示词不能为空")
+        if self.itinerary_id is not None:
+            self.itinerary_id = self.itinerary_id.strip()
         if self.original_prompt is not None:
             self.original_prompt = self.original_prompt.strip()
         if self.recipe_id is not None:
@@ -87,10 +94,14 @@ class EditRequest(_ImageOptions):
     mode: str | None = Field(default=None, max_length=64)
     sample_count: int = Field(default=1, ge=1, le=3)
     logo_requested: bool = False
+    source_generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
+    itinerary_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> EditRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="编辑指令不能为空")
+        if self.itinerary_id is not None:
+            self.itinerary_id = self.itinerary_id.strip()
         return self
 
 
@@ -108,10 +119,14 @@ class ResponsesImageRequest(_ImageOptions):
     sample_count: int = Field(default=1, ge=1, le=3)
     allow_inline_fallback: bool = True
     logo_requested: bool = False
+    source_generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
+    itinerary_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> ResponsesImageRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="Responses 图像提示词不能为空")
+        if self.itinerary_id is not None:
+            self.itinerary_id = self.itinerary_id.strip()
         return self
 
 
@@ -357,7 +372,7 @@ class TeamChatMessageRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     room_type: Literal["team", "dm", "bot"] = "team"
-    recipient_user_id: int | None = Field(default=None, ge=1)
+    recipient_user_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
     content: str = Field(min_length=1, max_length=4000)
 
     @field_validator("content", mode="after")
@@ -373,8 +388,8 @@ class TeamChatReadRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     room_type: Literal["team", "dm", "bot"] = "team"
-    recipient_user_id: int | None = Field(default=None, ge=1)
-    message_id: int = Field(default=0, ge=0)
+    recipient_user_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
+    message_id: int = Field(default=0, ge=0, le=_SQLITE_MAX_INT)
 
 
 class GroupAnnouncementRequest(OrganizationUnitRequest):

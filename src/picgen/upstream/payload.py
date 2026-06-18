@@ -163,10 +163,11 @@ def ensure_json_object(payload: Any, context: str) -> dict[str, Any]:
     return payload
 
 
-def extract_response_image_item(payload: dict[str, Any]) -> dict[str, Any]:
+def extract_response_image_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     output = payload.get("output")
     if not isinstance(output, list):
-        return {}
+        return []
+    images: list[dict[str, Any]] = []
     for item in output:
         if not isinstance(item, dict):
             continue
@@ -174,11 +175,17 @@ def extract_response_image_item(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         result = item.get("result")
         if isinstance(result, str) and result:
-            return {
-                "b64_json": result,
-                "revised_prompt": item.get("revised_prompt"),
-            }
-    return {}
+            images.append(
+                {
+                    "b64_json": result,
+                    "revised_prompt": item.get("revised_prompt"),
+                }
+            )
+    return images
+
+
+def extract_response_image_item(payload: dict[str, Any]) -> dict[str, Any]:
+    return next(iter(extract_response_image_items(payload)), {})
 
 
 def normalize_responses_image_payload(
@@ -187,12 +194,12 @@ def normalize_responses_image_payload(
     fallback_b64: str | None = None,
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    first_item = extract_response_image_item(payload)
-    if not first_item and fallback_b64:
-        first_item = {"b64_json": fallback_b64}
+    items = extract_response_image_items(payload)
+    if not items and fallback_b64:
+        items = [{"b64_json": fallback_b64}]
 
     normalized: dict[str, Any] = {
-        "data": [first_item] if first_item else [],
+        "data": items,
         "created": payload.get("created_at") or payload.get("created"),
         "response_id": payload.get("id"),
         "model": payload.get("model"),
@@ -281,19 +288,29 @@ def prepare_image_payload(
 
     data_items = upstream.get("data")
     candidate_items = [item for item in data_items if isinstance(item, dict)] if isinstance(data_items, list) else []
-    images = [
-        _image_item_payload(
-            item,
-            upstream=upstream,
-            data_dir=data_dir,
-            outputs_dir=outputs_dir,
-            user_agent=user_agent,
-            save_context=save_context,
-            fetch_remote=fetch_remote,
-            index=index,
-        )
-        for index, item in enumerate(candidate_items)
-    ]
+    # Process candidates independently: a single sample that fails to download or
+    # save must not discard the others. Only surface an error if every candidate
+    # failed (otherwise the customer silently loses good images they asked for).
+    images: list[dict[str, Any]] = []
+    candidate_errors: list[Exception] = []
+    for index, item in enumerate(candidate_items):
+        try:
+            images.append(
+                _image_item_payload(
+                    item,
+                    upstream=upstream,
+                    data_dir=data_dir,
+                    outputs_dir=outputs_dir,
+                    user_agent=user_agent,
+                    save_context=save_context,
+                    fetch_remote=fetch_remote,
+                    index=index,
+                )
+            )
+        except Exception as exc:
+            candidate_errors.append(exc)
+    if not images and candidate_errors:
+        raise candidate_errors[0]
     first_image = images[0] if images else {}
 
     return {

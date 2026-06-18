@@ -60,21 +60,61 @@ def classify_upstream_error(status: int, message: str, details: str | None = Non
     haystack = f"{message}\n{details or ''}".lower()
     if status == 429 or "rate limit" in haystack or "rate_limit" in haystack:
         return "upstream_rate_limited"
-    if any(
-        needle in haystack
-        for needle in (
-            "content policy",
-            "safety",
-            "moderation",
-            "not allowed",
-            "disallowed",
-            "policy violation",
-        )
-    ):
+    if _looks_like_content_policy_error(status, message, details):
         return "upstream_content_policy"
     if "cloudflare" in haystack or "error 1010" in haystack:
         return "upstream_blocked"
     return "upstream_error"
+
+
+def _looks_like_content_policy_error(status: int, message: str, details: str | None) -> bool:
+    explicit_values = _error_values(details)
+    if any(
+        value in {
+            "content_policy",
+            "content_policy_violation",
+            "policy_violation",
+            "safety_policy_violation",
+            "moderation_blocked",
+            "image_generation_user_error",
+        }
+        for value in explicit_values
+    ):
+        return True
+
+    haystack = f"{message}\n{details or ''}".lower()
+    explicit_phrases = (
+        "content policy",
+        "policy violation",
+        "disallowed content",
+        "disallowed prompt",
+        "not allowed by",
+        "violates policy",
+    )
+    if any(phrase in haystack for phrase in explicit_phrases):
+        return True
+    return status in {400, 403} and any(
+        phrase in haystack for phrase in ("not allowed", "disallowed")
+    )
+
+
+def _error_values(details: str | None) -> set[str]:
+    if not details:
+        return set()
+    try:
+        parsed = json.loads(details)
+    except json.JSONDecodeError:
+        return set()
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+        parsed = parsed["error"]
+    if not isinstance(parsed, dict):
+        return set()
+    values = {
+        str(parsed.get("code") or "").strip().lower(),
+        str(parsed.get("type") or "").strip().lower(),
+        str(parsed.get("param") or "").strip().lower(),
+    }
+    return {value for value in values if value}
 
 
 def public_upstream_error_message(status: int, code: str, action: str) -> str:

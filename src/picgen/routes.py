@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -54,6 +55,14 @@ from .notifications import (
 )
 from .recipes import list_prompt_recipes, recipe_public_dict
 from .redaction import redact_sensitive_text
+from .restricted_destinations import (
+    RESTRICTED_DESTINATION_CODE,
+    RESTRICTED_DESTINATION_ERROR,
+    RESTRICTED_DESTINATION_GUARD_TEXT,
+    append_restricted_destination_guard,
+    stop_has_restricted_destination,
+    values_contain_restricted_destination,
+)
 from .schemas import (
     AdminCreateUserRequest,
     AdminResetPasswordRequest,
@@ -108,9 +117,14 @@ from .upstream.client import UpstreamClient
 
 logger = get_logger("picgen.routes")
 _TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
+_ITINERARY_ID_RE = re.compile(
+    r"(?i)(?:行程\s*id|行程\s*ID|itinerary\s*id|trip\s*id|(?<![A-Za-z])id)"
+    r"\s*[:：#-]?\s*([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
+)
 
 JSON_BODY = Body(...)
 PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。"
+RESERVED_SELF_SERVICE_USERNAMES = frozenset({"admin"})
 ITINERARY_DEFAULT_SIZE = "1792x1792"
 ITINERARY_AUTO_SIZE = "auto"
 ITINERARY_PORTRAIT_SIZE = "1088x2240"
@@ -121,13 +135,16 @@ ITINERARY_ORIENTATION_THRESHOLD = 1.25
 ITINERARY_ARTWORK_INSTRUCTIONS = (
     "你是 PicGen 的图像生成助手。严格遵守用户提示词和输入参考图，"
     "输出一张用于后续程序叠加准确路线和文字的高端旅行地图底图。"
+    f"{RESTRICTED_DESTINATION_GUARD_TEXT}"
 )
 ITINERARY_COORDINATE_INSTRUCTIONS = (
     "你是严谨的地理坐标助手。只输出可解析 JSON，不要 Markdown，不要解释；"
     "为缺少坐标的旅行路线节点估算大概经纬度，优先保证真实相对位置。"
+    f"{RESTRICTED_DESTINATION_GUARD_TEXT}"
 )
 RESPONSES_IMAGE_INSTRUCTIONS = (
     "你是 PicGen 的图像生成助手。严格遵守用户提示词、参考图和品牌要求，输出可直接用于旅行产品设计的图像。"
+    f"{RESTRICTED_DESTINATION_GUARD_TEXT}"
 )
 TEAM_CHAT_BOT_INSTRUCTIONS = (
     "你是 PicGen 团队聊天里的 GPT-BOT。用中文回复，专业、简洁、可信；群聊被 @ 时回复要艾特提问者，私聊直接回复。"
@@ -147,6 +164,58 @@ def get_auth_store(request: Request) -> AuthStore:
     return request.app.state.auth_store
 
 
+def _raise_restricted_destination_error() -> None:
+    raise APIError(
+        HTTPStatus.BAD_REQUEST,
+        RESTRICTED_DESTINATION_ERROR,
+        code=RESTRICTED_DESTINATION_CODE,
+    )
+
+
+def _ensure_no_restricted_destination_text(*values: Any) -> None:
+    if values_contain_restricted_destination(values):
+        _raise_restricted_destination_error()
+
+
+def _ensure_no_restricted_destination_stops(stops: list[Any]) -> None:
+    for stop in stops:
+        if isinstance(stop, dict):
+            if stop_has_restricted_destination(stop):
+                _raise_restricted_destination_error()
+            continue
+        if hasattr(stop, "model_dump") and stop_has_restricted_destination(stop.model_dump()):
+            _raise_restricted_destination_error()
+
+
+def _ensure_itinerary_request_has_no_restricted_destination(parsed: ItineraryMapPlanRequest) -> None:
+    _ensure_no_restricted_destination_text(parsed.title, parsed.subtitle, parsed.route_style)
+    _ensure_no_restricted_destination_stops([stop.model_dump() for stop in parsed.stops])
+
+
+def _is_legacy_program_layout_background_prompt(value: str) -> bool:
+    normalized = "".join(str(value or "").split())
+    if not normalized:
+        return False
+    background_markers = ("无文字背景底图", "无字背景底图", "生成背景底图")
+    layout_markers = ("后续程序排版", "用于程序排版", "程序排版中文", "程序覆盖", "中文由程序")
+    no_text_markers = ("不生成任何可读文字", "不要生成文字内容", "不生成文字内容", "不要生成任何可读文字")
+    return (
+        any(marker in normalized for marker in background_markers)
+        and any(marker in normalized for marker in layout_markers)
+        and any(marker in normalized for marker in no_text_markers)
+    )
+
+
+def _ensure_not_legacy_program_layout_background_prompt(*values: str) -> None:
+    if any(_is_legacy_program_layout_background_prompt(value) for value in values):
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "检测到旧程序排版背景底图提示词：它会要求 AI 生成空背景。"
+            "请改成包含标题、榜单正文和全部可见文案的最终海报提示词。",
+            code="legacy_layout_background_prompt",
+        )
+
+
 def _get_session_token(request: Request, settings: Settings) -> str:
     return request.cookies.get(settings.auth_cookie_name, "").strip()
 
@@ -157,9 +226,26 @@ def _password_reset_expires_at(settings: Settings) -> str:
 
 def _password_reset_url(request: Request, settings: Settings, token: str) -> str:
     base = settings.public_base_url.strip().rstrip("/")
-    if not base:
-        base = str(request.base_url).rstrip("/")
     return f"{base}/?reset_token={token}"
+
+
+def _password_reset_email_can_include_link(settings: Settings) -> bool:
+    return bool(settings.public_base_url.strip())
+
+
+def _safe_admin_reset_request_info(reset_request: dict[str, Any]) -> dict[str, Any]:
+    return {**reset_request, "email_available": False, "reset_token": ""}
+
+
+def _ensure_self_service_username_allowed(username: str, settings: Settings) -> None:
+    normalized = normalize_username(username)
+    reserved = {*RESERVED_SELF_SERVICE_USERNAMES, normalize_username(settings.admin_username)}
+    if normalized in reserved:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "该登录用户名为系统保留名，请换一个。",
+            code="reserved_username",
+        )
 
 
 async def _current_user_or_none(request: Request, settings: Settings, auth_store: AuthStore) -> AuthUser | None:
@@ -833,7 +919,7 @@ async def _generate_itinerary_artwork(
         width=width,
         height=height,
     )
-    content = [{"type": "input_text", "text": prompt}, *image_content]
+    content = [{"type": "input_text", "text": append_restricted_destination_guard(prompt)}, *image_content]
 
     tool: dict[str, Any] = {"type": "image_generation"}
     tool["size"] = output_size
@@ -1029,6 +1115,7 @@ def _itinerary_coordinate_prompt(plan: dict[str, Any]) -> str:
         "你是严谨的旅行路线图地理坐标助手。请根据行程标题、日期、所有站点上下文，为未确认坐标的地点给出大概经纬度。"
         "不需要门牌级精确，城市、景区、岛屿、国家区域中心点或常见旅行落点即可，但必须保持真实相对位置，"
         "不能把不同城市、省份、国家或南北东西关系颠倒。遇到酒店/民宿/小众地点无法确认时，使用其所在城市、景区或地区的大概坐标。\n\n"
+        f"{RESTRICTED_DESTINATION_GUARD_TEXT}\n\n"
         f"标题：{plan.get('title') or '定制旅行路线图'}\n"
         f"副标题/日期：{plan.get('subtitle') or '未提供'}\n"
         "完整路线节点：\n"
@@ -1142,7 +1229,11 @@ async def _complete_itinerary_plan_with_ai_coordinates(
         )
         return plan
 
-    estimates = _parse_itinerary_coordinate_estimates(_extract_text_output(upstream_response))
+    estimates = [
+        estimate
+        for estimate in _parse_itinerary_coordinate_estimates(_extract_text_output(upstream_response))
+        if not stop_has_restricted_destination(estimate)
+    ]
     completed = apply_itinerary_coordinate_estimates(plan, estimates, source="ai_approximate")
     log_event(
         logger,
@@ -1166,6 +1257,7 @@ async def handle_itinerary_map_render(
         raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
     payload = _ensure_dict(body)
     parsed = _validate_request(ItineraryMapRenderRequest, payload)
+    _ensure_itinerary_request_has_no_restricted_destination(parsed)
     plan = await build_itinerary_map_plan_async(
         title=parsed.title,
         subtitle=parsed.subtitle,
@@ -1359,7 +1451,8 @@ def create_router() -> APIRouter:
             auth_enabled=settings.auth_enabled,
             bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
-            password_reset_email_enabled=smtp_notifications_enabled(settings),
+            password_reset_email_enabled=smtp_notifications_enabled(settings)
+            and _password_reset_email_can_include_link(settings),
             map_provider=_public_map_provider(settings),
             map_geocoding_enabled=_map_geocoding_enabled(settings),
         )
@@ -1393,6 +1486,16 @@ def create_router() -> APIRouter:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         return {"recipes": list_prompt_recipes()}
+
+    @router.get("/api/success-templates")
+    async def success_templates(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        templates = await anyio.to_thread.run_sync(lambda: auth_store.list_success_templates_for_user(user_id=user.id))
+        return {"templates": templates}
 
     @router.get("/files/{relative_path:path}")
     async def files(
@@ -1430,6 +1533,7 @@ def create_router() -> APIRouter:
         parsed = _validate_request(AuthRequest, payload)
         try:
             normalize_username(parsed.username)
+            _ensure_self_service_username_allowed(parsed.username, settings)
             user = await anyio.to_thread.run_sync(
                 lambda: auth_store.create_user(
                     parsed.username,
@@ -1491,34 +1595,51 @@ def create_router() -> APIRouter:
             )
         if reset_request is not None:
             email_sent = False
+            reset_notification_info = reset_request
+            if reset_request.get("notification_suppressed"):
+                return {"status": "ok", "message": PASSWORD_RESET_REQUEST_MESSAGE}
             if reset_request.get("email_available") and reset_request.get("reset_token"):
-                reset_url = _password_reset_url(request, settings, str(reset_request["reset_token"]))
-                email_result = await anyio.to_thread.run_sync(
-                    lambda: send_password_reset_email(
-                        settings=settings,
-                        to_email=str(reset_request.get("email") or ""),
-                        username=str(reset_request.get("username") or ""),
-                        reset_url=reset_url,
-                        expires_minutes=settings.password_reset_token_minutes,
-                    )
-                )
-                if email_result.sent:
-                    email_sent = True
-                    await anyio.to_thread.run_sync(
-                        lambda: auth_store.mark_password_reset_email_sent(int(reset_request["id"]))
-                    )
-                elif email_result.configured:
+                can_send_reset_email = smtp_notifications_enabled(
+                    settings
+                ) and _password_reset_email_can_include_link(settings)
+                if smtp_notifications_enabled(settings) and not _password_reset_email_can_include_link(settings):
+                    reset_notification_info = _safe_admin_reset_request_info(reset_request)
                     log_event(
                         logger,
                         logging.WARNING,
-                        "password_reset_email_failed",
-                        status=email_result.status,
-                        error=email_result.error,
+                        "password_reset_email_public_base_url_missing",
+                        username=redact_sensitive_text(str(reset_request.get("username_normalized") or ""), limit=80),
                     )
+                elif can_send_reset_email:
+                    reset_url = _password_reset_url(request, settings, str(reset_request["reset_token"]))
+                    email_result = await anyio.to_thread.run_sync(
+                        lambda: send_password_reset_email(
+                            settings=settings,
+                            to_email=str(reset_request.get("email") or ""),
+                            username=str(reset_request.get("username") or ""),
+                            reset_url=reset_url,
+                            expires_minutes=settings.password_reset_token_minutes,
+                        )
+                    )
+                    if email_result.sent:
+                        email_sent = True
+                        await anyio.to_thread.run_sync(
+                            lambda: auth_store.mark_password_reset_email_sent(int(reset_request["id"]))
+                        )
+                    elif email_result.configured:
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "password_reset_email_failed",
+                            status=email_result.status,
+                            error=email_result.error,
+                        )
+                else:
+                    reset_notification_info = _safe_admin_reset_request_info(reset_request)
             if not email_sent:
                 notification = await send_password_reset_request_notification(
                     settings=settings,
-                    request_info=reset_request,
+                    request_info=reset_notification_info,
                 )
                 if notification.configured and not notification.sent:
                     log_event(
@@ -1564,6 +1685,16 @@ def create_router() -> APIRouter:
     async def me(user: AuthUser | None = Depends(require_current_user)) -> dict[str, Any]:
         return {"user": user.public_dict() if user else None}
 
+    @router.get("/api/image-stats")
+    async def image_stats(
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        stats = await anyio.to_thread.run_sync(lambda: auth_store.image_count_stats(user_id=user.id))
+        return {"stats": stats}
+
     @router.put("/api/me/password")
     async def change_my_password(
         request: Request,
@@ -1603,6 +1734,8 @@ def create_router() -> APIRouter:
         parsed = _validate_request(UserProfileRequest, payload)
         normalized_current = normalize_username(user.username)
         normalized_next = normalize_username(parsed.username)
+        if normalized_next != normalized_current:
+            _ensure_self_service_username_allowed(parsed.username, settings)
         if normalized_next != normalized_current and not parsed.current_password:
             raise APIError(
                 HTTPStatus.BAD_REQUEST,
@@ -1790,7 +1923,7 @@ def create_router() -> APIRouter:
                     after_id=after_id,
                 )
             )
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
         return {"room_key": room_key, "messages": messages}
 
@@ -2044,6 +2177,30 @@ def create_router() -> APIRouter:
         if image is None:
             raise APIError(HTTPStatus.NOT_FOUND, "图片不存在或无权查看", code="not_found")
         return {"image": image}
+
+    @router.get("/api/generated-images/{generated_image_id}/versions")
+    async def generated_image_versions(
+        generated_image_id: int,
+        limit: int = 200,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        versions = await anyio.to_thread.run_sync(
+            lambda: auth_store.list_generated_image_versions_for_user(
+                generated_image_id=generated_image_id,
+                user_id=user.id,
+                limit=limit,
+            )
+        )
+        if versions is None:
+            raise APIError(HTTPStatus.NOT_FOUND, "图片不存在或无权查看", code="not_found")
+        return {
+            "current_generated_image_id": generated_image_id,
+            "count": len(versions),
+            "versions": versions,
+        }
 
     @router.put("/api/gallery/{generated_image_id}")
     async def update_gallery_item(
@@ -2396,7 +2553,8 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.FORBIDDEN, str(exc), code="forbidden") from exc
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
-        if parsed.logo_overlay_applied:
+        should_notify_final_image = bool(updated.pop("_first_logo_final_for_job", False))
+        if parsed.logo_overlay_applied and should_notify_final_image:
             await _send_generation_success_alert(
                 settings,
                 _build_final_image_success_alert(
@@ -2435,6 +2593,7 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(ItineraryMapPlanRequest, payload)
+        _ensure_itinerary_request_has_no_restricted_destination(parsed)
         return await build_itinerary_map_plan_async(
             title=parsed.title,
             subtitle=parsed.subtitle,
@@ -2550,7 +2709,9 @@ def _copyright_risk_prompt(parsed: CopyrightRiskRequest) -> str:
 
 def _parse_team_chat_mentions(content: str) -> list[str]:
     mentions: list[str] = []
-    for token in content.replace("\u3000", " ").split():
+    # Normalize the full-width "\uff20" (U+FF20) that Chinese IMEs commonly produce, and
+    # the full-width space, so "\uff20GPT-BOT" still triggers a mention.
+    for token in content.replace("\u3000", " ").replace("\uff20", "@").split():
         if not token.startswith("@"):
             continue
         name = token[1:].strip("，,。.!！?？:：;；()（）[]【】")
@@ -2574,7 +2735,7 @@ def _team_chat_display_name(user: AuthUser) -> str:
 
 
 def _team_chat_bot_was_mentioned(content: str, mentions: list[str]) -> bool:
-    lowered = content.casefold()
+    lowered = content.casefold().replace("＠", "@")
     return any(item.casefold() in {"gpt-bot", "gptbot", "bot"} for item in mentions) or "@gpt-bot" in lowered
 
 
@@ -2846,7 +3007,46 @@ def _result_saved_bytes(result: dict[str, Any]) -> int:
 
 
 def _should_track_generation_job(path: str) -> bool:
-    return path in {"/api/generate", "/api/edit", "/api/responses-image", "/api/itinerary-map/render"}
+    return path in {
+        "/api/generate",
+        "/api/edit",
+        "/api/responses-image",
+        "/api/itinerary-map/render",
+    }
+
+
+def _extract_itinerary_id_from_prompt(prompt: str) -> str:
+    match = _ITINERARY_ID_RE.search(prompt or "")
+    if not match:
+        return ""
+    return _clean_itinerary_id(match.group(1))
+
+
+def _clean_itinerary_id(value: str) -> str:
+    cleaned = str(value or "").strip()
+    cleaned = cleaned.strip(" \t\r\n,，.。;；)")
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if not cleaned:
+        return ""
+    return cleaned[:32]
+
+
+def _resolve_itinerary_id(*, explicit_id: str | None, prompt: str) -> str:
+    return _clean_itinerary_id(explicit_id or "") or _extract_itinerary_id_from_prompt(prompt)
+
+
+def _append_itinerary_id_badge_prompt(prompt: str, itinerary_id: str) -> str:
+    clean_id = _clean_itinerary_id(itinerary_id)
+    if not clean_id:
+        return prompt
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "行程 ID 角标要求：\n"
+        f"- 请把“行程 ID：{clean_id}”作为克制的品牌信息角标放在画面右上角。\n"
+        "- 右上角行程 ID 要和左上角 LOGO 安全区形成对称关系，字号、基线、留白和视觉重量保持协调。\n"
+        "- 角标应融入整体海报风格，可使用半透明底、细线、轻微阴影或同色系文字；不要做成突兀红字、硬贴纸或大标题。\n"
+        "- 不要在其它位置重复出现行程 ID。"
+    )
 
 
 def _job_sample_count(payload: dict[str, Any]) -> int:
@@ -2893,6 +3093,12 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
     recipe = recipe_public_dict(raw_recipe_id) if raw_recipe_id else None
     recipe_id = raw_recipe_id if prompt_mode == "recipe" and recipe is not None else ""
     recipe_version = str(payload.get("recipe_version") or "").strip() if recipe_id else ""
+    default_model = {
+        "/api/itinerary-map/render": "responses-itinerary-artwork",
+    }.get(path, "")
+    default_size = {
+        "/api/itinerary-map/render": ITINERARY_DEFAULT_SIZE,
+    }.get(path, "")
     return {
         "request_id": get_request_id(),
         "user_id": user.id,
@@ -2911,10 +3117,8 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "prompt_mode": prompt_mode,
         "recipe_id": recipe_id,
         "recipe_version": recipe_version,
-        "model": str(
-            payload.get("model") or ("responses-itinerary-artwork" if path == "/api/itinerary-map/render" else "")
-        ),
-        "size": str(payload.get("size") or (ITINERARY_DEFAULT_SIZE if path == "/api/itinerary-map/render" else "")),
+        "model": str(payload.get("model") or default_model),
+        "size": str(payload.get("size") or default_size),
         "sample_count": _job_sample_count(payload),
         "logo_requested": (
             bool(payload.get("logo_requested", True))
@@ -2931,15 +3135,100 @@ def _attach_generation_record_ids(
     image_records: list[dict[str, Any]],
 ) -> None:
     result["generation_job_id"] = job_id
+    # DB rows are only created for SAVED candidates (_result_images_for_db filters
+    # out URL-only / unsaved ones), so a positional zip against the full images list
+    # misaligns ids whenever any candidate is unsaved — feedback/finalize/favorite
+    # would then hit the wrong image. Match by candidate_index, which both sides carry.
+    records_by_candidate = {
+        int(record.get("candidate_index", idx) or 0): record
+        for idx, record in enumerate(image_records)
+    }
     images = result.get("images")
     if isinstance(images, list):
-        for image, record in zip(images, image_records, strict=False):
+        for idx, image in enumerate(images):
             if not isinstance(image, dict):
                 continue
             image["generation_job_id"] = job_id
-            image["generated_image_id"] = record["id"]
+            record = records_by_candidate.get(int(image.get("candidate_index", idx) or 0))
+            if record is not None:
+                image["generated_image_id"] = record["id"]
     if image_records:
         result["generated_image_id"] = image_records[0]["id"]
+
+
+async def _attach_source_generation_id(
+    result: dict[str, Any],
+    body: Any,
+    auth_store: AuthStore | None = None,
+    user: AuthUser | None = None,
+) -> None:
+    if not isinstance(body, dict):
+        return
+    source_generated_image_id = body.get("source_generated_image_id")
+    if not isinstance(source_generated_image_id, int) or source_generated_image_id <= 0:
+        source_generated_image_id = await _infer_source_generation_id(body, auth_store, user)
+    if not isinstance(source_generated_image_id, int) or source_generated_image_id <= 0:
+        return
+    result["source_generated_image_id"] = source_generated_image_id
+    images = result.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict):
+                image.setdefault("source_generated_image_id", source_generated_image_id)
+
+
+async def _infer_source_generation_id(
+    body: dict[str, Any],
+    auth_store: AuthStore | None,
+    user: AuthUser | None,
+) -> int | None:
+    if auth_store is None or user is None:
+        return None
+    source_names, source_urls, source_paths = _source_image_identity_tokens(body)
+    if not source_names and not source_urls and not source_paths:
+        return None
+    return await anyio.to_thread.run_sync(
+        lambda: auth_store.resolve_generated_image_id_from_source(
+            user_id=user.id,
+            source_names=source_names,
+            source_urls=source_urls,
+            source_paths=source_paths,
+        )
+    )
+
+
+def _source_image_identity_tokens(body: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    names: list[str] = []
+    urls: list[str] = []
+    paths: list[str] = []
+    for key in ("source_saved_image_url", "source_original_saved_image_url"):
+        value = body.get(key)
+        if isinstance(value, str):
+            urls.append(value)
+    for key in ("source_saved_image_path", "source_original_saved_image_path"):
+        value = body.get(key)
+        if isinstance(value, str):
+            paths.append(value)
+    image_items: list[Any] = []
+    image = body.get("image")
+    if image is not None:
+        image_items.append(image)
+    images = body.get("images")
+    if isinstance(images, list):
+        image_items.extend(images)
+    for item in image_items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str):
+            names.append(name)
+        saved_url = item.get("saved_image_url") or item.get("source_saved_image_url")
+        if isinstance(saved_url, str):
+            urls.append(saved_url)
+        saved_path = item.get("saved_image_path") or item.get("source_saved_image_path")
+        if isinstance(saved_path, str):
+            paths.append(saved_path)
+    return names, urls, paths
 
 
 def _result_images(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3036,6 +3325,10 @@ def _build_final_image_success_alert(
     )
 
 
+def _should_send_generation_success_alert(alert: GenerationSuccessAlert) -> bool:
+    return not (alert.logo_requested and not alert.logo_overlay_applied)
+
+
 async def _send_generation_success_alert(settings: Settings, alert: GenerationSuccessAlert) -> None:
     result = await send_generation_success_notification(settings=settings, alert=alert)
     if result.configured and not result.sent:
@@ -3124,6 +3417,7 @@ async def _with_timing(
             user=user,
             request=request,
         )
+        await _attach_source_generation_id(result, body, auth_store, user)
         generation_alert: GenerationSuccessAlert | None = None
         if auth_store is not None and user is not None:
             if job_id is not None:
@@ -3154,7 +3448,7 @@ async def _with_timing(
                     saved_bytes=_result_saved_bytes(result),
                 )
             )
-        if generation_alert is not None:
+        if generation_alert is not None and _should_send_generation_success_alert(generation_alert):
             await _send_generation_success_alert(settings, generation_alert)
     except APIError as exc:
         error_code = exc.code
@@ -3255,7 +3549,11 @@ async def handle_generate(
     recipe_id = parsed.recipe_id or ""
     recipe_version = parsed.recipe_version or ""
     recipe = recipe_public_dict(recipe_id) if recipe_id else None
+    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=original_prompt)
+    effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
 
+    _ensure_no_restricted_destination_text(parsed.prompt, original_prompt)
+    _ensure_not_legacy_program_layout_background_prompt(parsed.prompt, original_prompt)
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
     if prompt_mode == "recipe" and recipe is None:
@@ -3266,7 +3564,7 @@ async def handle_generate(
 
     upstream_payload: dict[str, Any] = {
         "model": model,
-        "prompt": parsed.prompt,
+        "prompt": append_restricted_destination_guard(effective_prompt),
         **image_options,
     }
     if size and size != "auto":
@@ -3285,9 +3583,11 @@ async def handle_generate(
     metadata = request_metadata({**payload, **image_options}, size=size)
     lineage_metadata: dict[str, Any] = {
         "original_prompt": original_prompt,
-        "effective_prompt": parsed.prompt,
+        "effective_prompt": effective_prompt,
         "prompt_mode": prompt_mode,
     }
+    if itinerary_id:
+        lineage_metadata["itinerary_id"] = itinerary_id
     if recipe_id:
         lineage_metadata["recipe_id"] = recipe_id
     if recipe_version:
@@ -3302,7 +3602,7 @@ async def handle_generate(
         client=client,
         save_context={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             "model": model,
             "endpoint_url": endpoint_url,
             "transport": "images-generate",
@@ -3314,7 +3614,7 @@ async def handle_generate(
         },
         extra={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             **lineage_metadata,
             **({"recipe": recipe} if recipe is not None else {}),
             "model": model,
@@ -3341,6 +3641,9 @@ async def handle_edit(
     )
     model = (parsed.model or settings.default_model).strip() or settings.default_model
     api_key = (parsed.api_key or settings.default_api_key).strip()
+    _ensure_no_restricted_destination_text(parsed.prompt)
+    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
+    effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
@@ -3358,7 +3661,7 @@ async def handle_edit(
     image_options = openai_image_options(payload)
     fields: dict[str, Any] = {
         "model": model,
-        "prompt": parsed.prompt,
+        "prompt": append_restricted_destination_guard(effective_prompt),
         **image_options,
     }
     if size and size != "auto":
@@ -3376,6 +3679,9 @@ async def handle_edit(
         sample_count=parsed.sample_count,
     )
     metadata = request_metadata({**payload, **image_options}, size=size or None)
+    if itinerary_id:
+        metadata["itinerary_id"] = itinerary_id
+        metadata["effective_prompt"] = effective_prompt
     mode = (parsed.mode or "edit").strip() or "edit"
     image_metadata = _image_reference_metadata(image_parts)
 
@@ -3385,7 +3691,7 @@ async def handle_edit(
         client=client,
         save_context={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             "model": model,
             "endpoint_url": endpoint_url,
             **image_metadata,
@@ -3398,7 +3704,7 @@ async def handle_edit(
         },
         extra={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             "model": model,
             "logo_requested": parsed.logo_requested,
             **metadata,
@@ -3446,6 +3752,9 @@ async def handle_responses_image(
     size = (parsed.size or settings.default_size).strip() or settings.default_size
     image_options = openai_image_options(payload)
 
+    _ensure_no_restricted_destination_text(parsed.prompt)
+    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
+    effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
@@ -3498,6 +3807,7 @@ async def handle_responses_image(
         if key in image_options:
             tool[key] = image_options[key]
 
+    guarded_prompt = append_restricted_destination_guard(effective_prompt)
     upstream_payload = {
         "model": model,
         "instructions": RESPONSES_IMAGE_INSTRUCTIONS,
@@ -3506,9 +3816,9 @@ async def handle_responses_image(
             {
                 "role": "user",
                 "content": (
-                    _responses_input_content(parsed.prompt, image_file_ids)
+                    _responses_input_content(guarded_prompt, image_file_ids)
                     if upload_error is None
-                    else _responses_inline_input_content(parsed.prompt, image_parts)
+                    else _responses_inline_input_content(guarded_prompt, image_parts)
                 ),
             }
         ],
@@ -3519,6 +3829,9 @@ async def handle_responses_image(
         endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
     )
     metadata = request_metadata({**payload, **image_options}, size=size)
+    if itinerary_id:
+        metadata["itinerary_id"] = itinerary_id
+        metadata["effective_prompt"] = effective_prompt
     mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
     image_metadata = _image_reference_metadata(image_parts)
 
@@ -3528,7 +3841,7 @@ async def handle_responses_image(
         client=client,
         save_context={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             "model": model,
             "endpoint_url": endpoint_url,
             "files_endpoint_url": files_endpoint_url,
@@ -3545,7 +3858,7 @@ async def handle_responses_image(
         },
         extra={
             "mode": mode,
-            "prompt": parsed.prompt,
+            "prompt": effective_prompt,
             "model": model,
             "logo_requested": parsed.logo_requested,
             **metadata,
@@ -3580,6 +3893,16 @@ async def _finalize_image_response(
             fetch_remote=fetch_remote_sync,
         )
     )
+    # An empty upstream response (no candidates) must be a clear error, not a blank
+    # 200 that gets recorded as a "succeeded" job with 0 images. The itinerary path
+    # catches this code to surface its own message / fallback.
+    if int(saved.get("candidate_count") or 0) <= 0:
+        raise APIError(
+            HTTPStatus.BAD_GATEWAY,
+            "图片生成接口这次没有返回图片，请稍后重试。",
+            compact_raw_response(upstream_response),
+            code="upstream_no_image",
+        )
     return {**extra, **saved}
 
 

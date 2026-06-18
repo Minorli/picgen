@@ -26,6 +26,10 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert "白色底板" in app_js
     assert "logo_text_color" in app_js
     assert 'textColor: "original"' in app_js
+    assert "analyzeLogoBackground" in app_js
+    assert "drawLogoContrastMatte" in app_js
+    assert "soft-warm-matte" in app_js
+    assert "backgroundLuminance" in app_js
     assert "官方 LOGO 缺少透明背景" in app_js
     assert 'imageSmoothingQuality = "high"' in app_js
     assert "chooseLogoTextColorForPlacement" not in app_js
@@ -76,6 +80,7 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert 'id="changePasswordModal"' in index_html
     assert 'id="changePasswordForm"' in index_html
     assert 'id="userUsageSummary"' in index_html
+    assert 'id="userImageStats"' in index_html
     assert 'id="adminPanel"' in index_html
     assert 'id="adminCreateUserForm"' in index_html
     assert 'id="adminUsersList"' in index_html
@@ -90,6 +95,9 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert "/api/admin/users" in app_js
     assert "/api/me" in app_js
     assert "/api/usage" in app_js
+    assert "/api/image-stats" in app_js
+    assert "originalSavedUrl" in app_js
+    assert "sourceImageIdentityFields" in app_js
     assert 'credentials: "same-origin"' in app_js
     assert "scopedStorageKey" in app_js
     assert "settingsStorageKey()" in app_js
@@ -231,6 +239,40 @@ def test_generation_task_center_and_lineage_controls_are_present() -> None:
     assert "void refreshGenerationJobs()" in app_js
     assert ".job-center-item" in styles_css
     assert ".job-center-thumb" in styles_css
+
+
+def test_image_version_history_controls_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="showVersionsButton"' in index_html
+    assert 'id="versionHistoryPanel"' in index_html
+    assert 'id="versionHistoryList"' in index_html
+    assert "/api/generated-images/${encodeURIComponent(generatedImageId)}/versions" in app_js
+    assert "showImageVersions" in app_js
+    assert "renderImageVersions" in app_js
+    assert "source_generated_image_id" in app_js
+    assert ".version-history-panel" in styles_css
+    assert ".version-history-item" in styles_css
+
+
+def test_logo_final_images_use_original_asset_for_followup_model_input() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "function modelInputAssetForLogoWorkflow(asset)" in app_js
+    helper_start = app_js.index("function modelInputAssetForLogoWorkflow(asset)")
+    helper_end = app_js.index("function getAssetDisplaySrc", helper_start)
+    helper = app_js[helper_start:helper_end]
+    assert "!asset?.logoOverlayApplied" in helper
+    assert "asset.originalSavedUrl" in helper
+    assert "asset.originalSavedPath || asset.savedPath || \"\"" in helper
+    assert "return getAssetDisplaySrc(source) ? source : asset" in helper
+
+    assert "modelInputAssetForLogoWorkflow(state.lastResultImage)" in app_js
+    assert "modelInputAssetForLogoWorkflow(state.editImage)" in app_js
+    assert "modelInputAssetForLogoWorkflow(state.lastResultImage, logoRequested)" not in app_js
+    assert "modelInputAssetForLogoWorkflow(state.editImage, logoRequested)" not in app_js
 
 
 def test_image_centric_workspace_actions_and_brand_download_gateway_are_present() -> None:
@@ -524,6 +566,34 @@ def test_password_reset_ui_supports_email_self_service_and_admin_fallback() -> N
     assert "如果账号存在且已填写邮箱，会收到重置邮件" in app_js
 
 
+def test_fetch_json_handles_expired_session_like_post_json() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    fetch_json_block = app_js[app_js.index("async function fetchJSON") : app_js.index("function enterAuthGate")]
+
+    assert "response.status === 401" in fetch_json_block
+    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' in fetch_json_block
+    assert "state.appReady = false" in fetch_json_block
+
+
+def test_frontend_guards_async_logo_and_team_chat_room_races() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    logo_block = app_js[
+        app_js.index("async function composeLogoOverlayAfterDisplay") : app_js.index("async function setResult")
+    ]
+    chat_block = app_js[
+        app_js.index("async function refreshTeamChatMessages") : app_js.index("async function markCurrentTeamChatRead")
+    ]
+    logout_block = app_js[app_js.index("async function logout") : app_js.index("async function loadWorkspaceSnapshot")]
+
+    assert "resultGenerationSeq !== state.resultGenerationSeq" in logo_block
+    assert "const resultGenerationSeq = state.resultGenerationSeq + 1" in app_js
+    assert "const requestedRoomKey = currentTeamChatRoomKey()" in chat_block
+    assert "requestedRoomKey !== currentTeamChatRoomKey()" in chat_block
+    assert "message.room_key === requestedRoomKey" in chat_block
+    assert "window.clearTimeout(state.persistTimer)" in logout_block
+    assert "state.persistTimer = null" in logout_block
+
+
 def test_user_profile_ui_supports_avatar_and_editable_login_username() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -757,12 +827,67 @@ def test_prompt_recipe_mode_keeps_precise_prompt_as_default_and_records_lineage(
     assert "prompt_mode: promptPlan.promptMode" in app_js
     assert "recipe_id: promptPlan.recipe?.id" in app_js
     assert "const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)" in app_js
+    assert 'id="itineraryIdEnabled"' in index_html
+    assert 'id="itineraryIdInput"' in index_html
+    assert "itinerary_id: itineraryId" in app_js
+    assert "getExplicitItineraryId" in app_js
+    assert ".itinerary-id-toggle" in styles_css
     assert "只追加质量要求，不覆盖原提示词" in app_js
     assert ".prompt-mode-panel" in styles_css
     assert ".recipe-assist-panel" in styles_css
     assert ".prompt-recipe-cards" in styles_css
     assert ".prompt-recipe-card" in styles_css
     assert ".effective-prompt-panel" in styles_css
+
+
+def test_prompt_flow_only_keeps_exact_and_recipe_assist_controls() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "精确提示词" in index_html
+    assert "配方辅助" in index_html
+    assert 'id="promptRecipeSelect"' in index_html
+    assert 'id="applyPromptRecipeButton"' in index_html
+    assert 'id="effectivePromptPreview"' in index_html
+    assert "只追加质量要求，不覆盖原提示词" in app_js
+    assert ".prompt-mode-panel" in styles_css
+    assert ".recipe-assist-panel" in styles_css
+
+    removed_tokens = [
+        'id="optimizePromptButton"',
+        'id="promptOptimizationReview"',
+        'id="repeatWarningPanel"',
+        'id="posterLayoutPanel"',
+        'id="renderPosterLayoutButton"',
+        'id="successTemplateList"',
+        'fetchJSON("/api/prompt/optimize"',
+        'fetchJSON("/api/prompt/repetition-check"',
+        'fetchJSON("/api/poster-layout/render"',
+        'fetchJSON("/api/success-templates"',
+        "maybeOptimizeTextHeavyPromptBeforeImage",
+        "looksLikePosterLayoutPrompt",
+        "submitPosterLayoutRender",
+        "showRepeatWarning",
+        "useSuccessTemplate",
+        ".prompt-optimization-review",
+        ".repeat-warning-panel",
+        ".poster-layout-panel",
+        ".success-template-list",
+    ]
+    combined_assets = "\n".join([index_html, app_js, styles_css])
+    for token in removed_tokens:
+        assert token not in combined_assets
+
+
+def test_legacy_program_layout_background_prompt_is_blocked_before_generation() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "isLegacyProgramLayoutBackgroundPrompt" in app_js
+    assert "legacy_layout_background_prompt" in app_js
+    assert "旧程序排版背景底图提示词" in app_js
+    assert "sanitizeLegacyWorkspacePrompt" in app_js
+    assert "已清空旧程序排版背景底图提示词" in app_js
 
 
 def test_aesthetic_memory_is_optional_and_never_forced_into_prompts() -> None:
@@ -805,6 +930,8 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "apt-get" not in dockerfile
     assert "curl" not in dockerfile
     assert "urllib.request.urlopen" in dockerfile
+    assert '"--workers", "1"' in dockerfile
+    assert '"--workers", "2"' not in dockerfile
     assert "https://sub.tidba.com/v1/images/generations" in dockerfile
     assert "https://sub.tidba.com/v1/images/edits" in dockerfile
     assert "https://sub.tidba.com/v1/responses" in dockerfile
@@ -823,3 +950,25 @@ def test_static_footer_version_matches_release() -> None:
     assert f'href="styles.css?v={version}"' in index_html
     assert f'src="app.js?v={version}"' in index_html
     assert "PicGen Console　v0.1.2</span>" not in index_html
+
+
+def test_frontend_generation_result_state_race_guards_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "snapshotCurrentResultState" in app_js
+    assert "restoreResultStateSnapshot" in app_js
+    assert "state.pendingResultSnapshot" in app_js
+    assert "restorePendingResultAfterCancellation" in app_js
+    assert "selectedCandidate.saved_image_path" in app_js
+    assert "LOGO 成品已落盘到 ${selectedCandidate.saved_image_path}" in app_js
+    assert "state.copyrightRiskRequestSeq += 1" in app_js
+    assert "riskRequestSeq !== state.copyrightRiskRequestSeq" in app_js
+
+
+def test_frontend_rejects_oversized_image_uploads_before_reading_files() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "CLIENT_IMAGE_UPLOAD_MAX_BYTES" in app_js
+    assert "validateClientImageFile" in app_js
+    assert "图片文件过大" in app_js
+    assert "validateClientImageFile(file)" in app_js

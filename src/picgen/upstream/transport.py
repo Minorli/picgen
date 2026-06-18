@@ -18,6 +18,18 @@ def upstream_headers(user_agent: str, extra_headers: dict[str, str] | None = Non
     return headers
 
 
+def sanitize_header_value(value: str, *, fallback: str) -> str:
+    """Strip CR/LF and other control characters from a header value.
+
+    The declared ``content_type`` of an uploaded image is user-controlled; without
+    this, a value like ``image/png\\r\\nX-Evil: 1`` would inject extra headers into
+    the multipart body PicGen sends upstream.
+    """
+
+    cleaned = "".join(char for char in value if 0x20 <= ord(char) <= 0x7E).strip()
+    return cleaned[:128] or fallback
+
+
 def ascii_multipart_filename(filename: str, content_type: str) -> str:
     raw_name = Path(filename or "").name
     raw_path = Path(raw_name)
@@ -49,16 +61,17 @@ def encode_multipart(fields: dict[str, Any], files: list[dict[str, Any]]) -> tup
 
     for file_part in files:
         lines.extend(f"--{boundary}\r\n".encode())
-        filename = ascii_multipart_filename(
-            str(file_part["filename"]),
-            str(file_part.get("content_type") or "application/octet-stream"),
+        content_type = sanitize_header_value(
+            str(file_part.get("content_type") or ""),
+            fallback="application/octet-stream",
         )
+        filename = ascii_multipart_filename(str(file_part["filename"]), content_type)
         disposition = (
             f'Content-Disposition: form-data; name="{file_part["field_name"]}"; '
             f'filename="{filename}"\r\n'
         )
         lines.extend(disposition.encode("utf-8"))
-        lines.extend(f'Content-Type: {file_part["content_type"]}\r\n\r\n'.encode())
+        lines.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
         lines.extend(file_part["data"])
         lines.extend(b"\r\n")
 

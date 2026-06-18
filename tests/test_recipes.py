@@ -26,3 +26,10 @@ def test_route_map_recipe_is_global_and_geography_first():
     assert recipe["default_size"] == "1792x1792"
     assert "真实地图相对位置准确" in recipe["prompt_suffix"]
     assert "新疆" not in recipe["prompt_suffix"]
+
+
+def test_generate_recipes_do_not_include_programmatic_poster_layout():
+    recipes = list_prompt_recipes()
+
+    assert recipe_public_dict("poster-layout-list") is None
+    assert {recipe["mode"] for recipe in recipes} <= {"generate", "itinerary"}

@@ -82,7 +82,8 @@ def _print_config(settings: Settings) -> None:
         "error_alert_telegram_chat_id": _mask_secret(settings.error_alert_telegram_chat_id),
         "password_reset_email_enabled": bool(
             settings.smtp_host and settings.smtp_from_email and settings.smtp_username and settings.smtp_password
-        ),
+        )
+        and bool(settings.public_base_url.strip()),
         "public_base_url": settings.public_base_url,
         "smtp_host": settings.smtp_host,
         "smtp_port": settings.smtp_port,

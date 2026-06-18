@@ -100,7 +100,12 @@ async def _send_telegram_message(
             )
             response.raise_for_status()
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
-        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+        return NotificationResult(
+            configured=True,
+            sent=False,
+            status="failed",
+            error=redact_sensitive_text(str(exc), limit=300),
+        )
     return NotificationResult(configured=True, sent=True, status="sent")
 
 
@@ -186,7 +191,12 @@ def send_password_reset_email(
                 smtp.login(settings.smtp_username.strip(), settings.smtp_password.strip())
                 smtp.send_message(message)
     except Exception as exc:  # pragma: no cover - network and provider failures vary
-        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+        return NotificationResult(
+            configured=True,
+            sent=False,
+            status="failed",
+            error=redact_sensitive_text(str(exc), limit=300),
+        )
     return NotificationResult(configured=True, sent=True, status="sent")
 
 
@@ -266,7 +276,12 @@ async def send_bug_report_notification(
             response = await _post_webhook(client, settings.bug_report_webhook_kind, webhook_url, report, content)
             response.raise_for_status()
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
-        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+        return NotificationResult(
+            configured=True,
+            sent=False,
+            status="failed",
+            error=redact_sensitive_text(str(exc), limit=300),
+        )
     return NotificationResult(configured=True, sent=True, status="sent")
 
 
@@ -302,7 +317,12 @@ async def send_password_reset_request_notification(
             )
             response.raise_for_status()
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
-        return NotificationResult(configured=True, sent=False, status="failed", error=str(exc)[:300])
+        return NotificationResult(
+            configured=True,
+            sent=False,
+            status="failed",
+            error=redact_sensitive_text(str(exc), limit=300),
+        )
     return NotificationResult(configured=True, sent=True, status="sent")
 
 

@@ -11,6 +11,9 @@ const COMPANY_LOGO_MAX_WIDTH = 220
 const COMPANY_LOGO_MARGIN_RATIO = 0.04
 const COMPANY_LOGO_MIN_MARGIN = 16
 const COMPANY_LOGO_MAX_MARGIN = 42
+const COMPANY_LOGO_CONTRAST_LUMINANCE_MIN = 150
+const COMPANY_LOGO_CONTRAST_COMPLEXITY_MAX = 18
+const COMPANY_LOGO_CONTRAST_PAD_RATIO = 0.18
 const COMPANY_LOGO_LAYOUT_PROMPT = [
   "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留自然干净的留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
@@ -33,6 +36,7 @@ const REQUEST_TIMEOUT_MS = 20 * 60 * 1000 + 30 * 1000
 const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
+const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
@@ -110,6 +114,7 @@ const state = {
   authMode: "login",
   passwordResetToken: "",
   appReady: false,
+  lastReadyUserId: null,
   editImage: null,
   editMaskImage: null,
   generateReferenceImage: null,
@@ -123,6 +128,7 @@ const state = {
   lastResultMode: null,
   currentComparisonSource: null,
   resultPreview: null,
+  resultGenerationSeq: 0,
   resultCandidates: [],
   selectedCandidateIndex: 0,
   progressTimer: null,
@@ -133,6 +139,7 @@ const state = {
   progressEstimatedSecondsPerImage: 210,
   activeRequestController: null,
   activeRequestCancelled: false,
+  pendingResultSnapshot: null,
   preview: {
     mode: "single",
     target: "result",
@@ -152,6 +159,7 @@ const state = {
     text: "生成完成后自动检查。",
     hidden: true,
   },
+  copyrightRiskRequestSeq: 0,
   rawResponsePreview: null,
   debugLines: [],
   persistTimer: null,
@@ -245,6 +253,7 @@ const refs = {
   openProfileButton: document.querySelector("#openProfileButton"),
   currentUsername: document.querySelector("#currentUsername"),
   userAvatar: document.querySelector("#userAvatar"),
+  userImageStats: document.querySelector("#userImageStats"),
   userUsageSummary: document.querySelector("#userUsageSummary"),
   adminPanel: document.querySelector("#adminPanel"),
   adminPasswordResetPanel: document.querySelector("#adminPasswordResetPanel"),
@@ -429,12 +438,15 @@ const refs = {
   copyrightRiskText: document.querySelector("#copyrightRiskText"),
   logoOverlayEnabled: document.querySelector("#logoOverlayEnabled"),
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
+  itineraryIdEnabled: document.querySelector("#itineraryIdEnabled"),
+  itineraryIdInput: document.querySelector("#itineraryIdInput"),
   generateSampleCountHint: document.querySelector("#generateSampleCountHint"),
   downloadButton: document.querySelector("#downloadButton"),
   downloadOriginalButton: document.querySelector("#downloadOriginalButton"),
   continueEditButton: document.querySelector("#continueEditButton"),
   startVariantButton: document.querySelector("#startVariantButton"),
   previewCompareButton: document.querySelector("#previewCompareButton"),
+  showVersionsButton: document.querySelector("#showVersionsButton"),
   hoverContinueEditButton: document.querySelector("#hoverContinueEditButton"),
   hoverVariantButton: document.querySelector("#hoverVariantButton"),
   inspectLongImageButton: document.querySelector("#inspectLongImageButton"),
@@ -481,6 +493,9 @@ const refs = {
   galleryFavoriteInput: document.querySelector("#galleryFavoriteInput"),
   galleryTagsInput: document.querySelector("#galleryTagsInput"),
   saveGalleryMetaButton: document.querySelector("#saveGalleryMetaButton"),
+  versionHistoryPanel: document.querySelector("#versionHistoryPanel"),
+  versionHistoryList: document.querySelector("#versionHistoryList"),
+  versionHistoryStatus: document.querySelector("#versionHistoryStatus"),
   changePasswordModal: document.querySelector("#changePasswordModal"),
   changePasswordBackdrop: document.querySelector("#changePasswordBackdrop"),
   changePasswordForm: document.querySelector("#changePasswordForm"),
@@ -614,6 +629,13 @@ async function fetchJSON(url, options = {}) {
     data = await response.json()
   } catch {
     data = {}
+  }
+  if (response.status === 401) {
+    state.appReady = false
+    state.persistenceReady = false
+    state.lastReadyUserId = null
+    stopTeamChatPolling()
+    enterAuthGate("login", "登录已过期，请重新登录。")
   }
   return { response, data }
 }
@@ -819,6 +841,26 @@ async function refreshUsageSummary() {
   await refreshSharedResults()
   await refreshShareRecipients()
   await refreshGallery()
+}
+
+async function refreshImageStats() {
+  if (state.serverConfig?.auth_enabled === false || !refs.userImageStats || !state.currentUser) {
+    refs.userImageStats?.classList.add("hidden")
+    return
+  }
+  try {
+    const { response, data } = await fetchJSON("/api/image-stats", { cache: "no-store" })
+    if (!response.ok || !data.stats) {
+      refs.userImageStats.classList.add("hidden")
+      return
+    }
+    const mine = Number(data.stats.current_user_generated_image_count || 0)
+    const platform = Number(data.stats.platform_generated_image_count || 0)
+    refs.userImageStats.textContent = `我的 ${mine} 张 · 平台 ${platform} 张`
+    refs.userImageStats.classList.remove("hidden")
+  } catch {
+    refs.userImageStats.classList.add("hidden")
+  }
 }
 
 function updateAdminPanelVisibility() {
@@ -1499,6 +1541,31 @@ function buildEffectiveGeneratePrompt() {
   }
 }
 
+function isLegacyProgramLayoutBackgroundPrompt(value) {
+  const normalized = String(value || "").replace(/\s+/g, "")
+  if (!normalized) {
+    return false
+  }
+  const hasBackgroundIntent = ["无文字背景底图", "无字背景底图", "生成背景底图"].some((marker) => normalized.includes(marker))
+  const hasProgramLayoutIntent = ["后续程序排版", "用于程序排版", "程序排版中文", "程序覆盖", "中文由程序"].some((marker) => normalized.includes(marker))
+  const forbidsText = ["不生成任何可读文字", "不要生成文字内容", "不生成文字内容", "不要生成任何可读文字"].some((marker) => normalized.includes(marker))
+  return hasBackgroundIntent && hasProgramLayoutIntent && forbidsText
+}
+
+function legacyProgramLayoutPromptMessage() {
+  return "检测到旧程序排版背景底图提示词：它会要求 AI 生成空背景。请改成包含标题、榜单正文和全部可见文案的最终海报提示词。"
+}
+
+function rejectLegacyProgramLayoutBackgroundPrompt(prompt) {
+  if (!isLegacyProgramLayoutBackgroundPrompt(prompt)) {
+    return false
+  }
+  appendDebugLine("参数校验失败：旧程序排版背景底图提示词", { code: "legacy_layout_background_prompt" })
+  setError(legacyProgramLayoutPromptMessage())
+  refs.generatePromptInput.focus()
+  return true
+}
+
 function updatePromptModeUI() {
   state.promptMode = refs.promptModeInputs.find((input) => input.checked)?.value || "free"
   refs.recipeAssistPanel?.classList.toggle("hidden", state.promptMode !== "recipe")
@@ -1885,7 +1952,7 @@ function cleanItineraryStopName(value) {
 
 function parseItineraryTextStops(description) {
   const stops = []
-  const seen = new Set()
+  let previousKey = ""
   let inDailySection = false
   for (const rawRow of String(description || "").split(/\r?\n/)) {
     const row = rawRow.trim()
@@ -1909,25 +1976,43 @@ function parseItineraryTextStops(description) {
     if (isItineraryInstructionRow(row)) {
       continue
     }
-    const dateMatch = row.match(/(?:^|[：:\s])((?:D\d+)|(?:\d{1,2}[/.月-]\d{1,2}))/)
-    const date = dateMatch ? dateMatch[1] : ""
-    const routePart = row
+    const dateMatch = row.match(/(?:D\d+)|(?:\d{1,2}\s*[/.月-]\s*\d{1,2}\s*日?)|(?:\d{1,2}\s*月)/)
+    const date = dateMatch ? dateMatch[0].replace(/\s+/g, "") : ""
+    const withoutNotes = row
       .replace(/（[^）]*）/g, "")
       .replace(/\([^)]*\)/g, "")
-      .split(/[；;]/, 1)[0]
-      .replace(/^[^：:]*[：:]/, "")
+      // A hyphen between two CJK characters is a route arrow ("巴黎-里昂"); leave
+      // hyphenated Latin names ("Aix-en-Provence") intact.
+      .replace(/([一-鿿])\s*[-—]\s*([一-鿿])/g, "$1→$2")
+    // Pick the ；-segment that actually contains a route ("交通：火车；巴黎 → 里昂"),
+    // not blindly the first segment.
+    const routeSeparator = /→|->|—|，|,|、|到|前往/
+    const segments = withoutNotes.split(/[；;]/)
+    let routePart = segments.find((seg) => routeSeparator.test(seg)) || segments[0] || ""
+    // Strip a leading note label ("交通：…"), then the date token and any arrival verb
+    // glued to the first city ("5/12 抵达东京" → "东京", "D1：前往巴黎" → "巴黎").
+    routePart = routePart.replace(/^[^：:]{0,12}[：:]/, "")
+    if (date && dateMatch) {
+      routePart = routePart.replace(dateMatch[0], " ")
+    }
+    routePart = routePart
+      .replace(/^[\s　·.、,，-]+/, "")
+      .replace(/^(?:抵达|到达|出发|前往|返回|入住|游览|游玩|打卡)\s*/, "")
     const names = routePart
-      .split(/(?:→|->|—|-|到|前往)/)
-      .map((item) => item.trim())
+      .split(/→|->|—|，|,|、|到|前往|\s+-\s+/)
+      .map((item) => item.trim().replace(/(?:出发|启程|返程|出行)$/, "").trim())
       .filter(Boolean)
       .map(cleanItineraryStopName)
       .filter((item) => item.length >= 2 && item.length <= 80 && !isItineraryInstructionRow(item))
     for (const name of names) {
       const key = name.toLocaleLowerCase()
-      if (seen.has(key)) {
+      // Collapse only consecutive repeats (including the row-boundary case where a
+      // day ends and the next begins at the same city). A city that recurs later —
+      // e.g. a return leg back to the start — must still be drawn as its own stop.
+      if (key === previousKey) {
         continue
       }
-      seen.add(key)
+      previousKey = key
       stops.push({ date, name, transport: "" })
     }
   }
@@ -1943,6 +2028,9 @@ function itineraryCoordinateHelpText() {
 }
 
 async function submitAIItineraryMap() {
+  if (state.isBusy) {
+    return
+  }
   try {
     resetDebugLog("点击行程路线：程序生成")
     const startedAt = performance.now()
@@ -2039,7 +2127,7 @@ async function submitAIItineraryMap() {
       generatedImageId: result.generated_image_id || null,
       createdAt: new Date().toISOString(),
     })
-    await loadGalleryItems()
+    await refreshGallery()
     await refreshGenerationJobs()
     document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
   } catch (error) {
@@ -2047,7 +2135,11 @@ async function submitAIItineraryMap() {
     if (error.code === "itinerary_coordinates_required") {
       setError(itineraryCoordinateHelpText(), error.details)
     } else {
+    if (error.cancelled && restorePendingResultAfterCancellation()) {
+      setStatusMessage("已中断行程路线生成，上一张结果已保留。")
+    } else {
       setError(error.cancelled ? "已中断行程路线生成，可以修改行程后重新提交。" : error.message, error.details)
+    }
     }
   } finally {
     setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
@@ -2375,6 +2467,9 @@ function galleryItemToAsset(item) {
   if (!item?.saved_image_url) {
     return null
   }
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {}
+  const originalSavedUrl = item.original_saved_image_url || item.source_saved_image_url || metadata.source_saved_image_url || ""
+  const originalSavedPath = item.original_saved_image_path || item.source_saved_image_path || metadata.source_saved_image_path || metadata.source_image_path || ""
   return {
     dataUrl: "",
     file: null,
@@ -2387,7 +2482,12 @@ function galleryItemToAsset(item) {
     savedPath: item.saved_image_path || "",
     fileUrl: item.saved_image_url || "",
     src: item.saved_image_url || "",
+    originalDataUrl: "",
+    originalSavedUrl,
+    originalFileUrl: originalSavedUrl,
+    originalSavedPath,
     generatedImageId: item.generated_image_id || item.id || null,
+    sourceGeneratedImageId: item.source_generated_image_id || null,
     origin: "gallery",
     description: `作品库 · ${item.username || "我的作品"}`,
     logoOverlayApplied: Boolean(item.logo_overlay_applied),
@@ -2642,6 +2742,7 @@ function openGalleryLikeImage(item, label = "作品库") {
     generated_image_id: item.generated_image_id || item.id || null,
     image_url: item.saved_image_url || "",
     logo_overlay_applied: Boolean(item.logo_overlay_applied),
+    source_generated_image_id: item.source_generated_image_id || null,
     asset,
   }]
   state.selectedCandidateIndex = 0
@@ -2675,6 +2776,105 @@ function openGalleryLikeImage(item, label = "作品库") {
 function openGalleryItem(galleryId) {
   const item = state.galleryItems.find((entry) => Number(entry.id || entry.generated_image_id) === Number(galleryId))
   openGalleryLikeImage(item, "作品库")
+}
+
+function imageVersionLabel(item, index) {
+  if (!item.source_generated_image_id) {
+    return "原始版本"
+  }
+  if (item.logo_overlay_applied) {
+    return "LOGO 成品"
+  }
+  if (item.mode === "variant") {
+    return `延展版本 ${index + 1}`
+  }
+  if (item.mode === "edit") {
+    return `编辑版本 ${index + 1}`
+  }
+  return `版本 ${index + 1}`
+}
+
+function renderImageVersions(versions = [], currentGeneratedImageId = selectedGeneratedImageId()) {
+  if (!refs.versionHistoryPanel || !refs.versionHistoryList) {
+    return
+  }
+  refs.versionHistoryList.replaceChildren()
+  refs.versionHistoryPanel.classList.toggle("hidden", versions.length === 0)
+  if (refs.versionHistoryStatus) {
+    refs.versionHistoryStatus.textContent = versions.length > 1 ? `${versions.length} 个版本` : "暂无可回退版本"
+  }
+  versions.forEach((item, index) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "version-history-item"
+    button.classList.toggle(
+      "active",
+      Number(item.generated_image_id || item.id) === Number(currentGeneratedImageId),
+    )
+
+    const image = document.createElement("img")
+    image.src = item.saved_image_url || ""
+    image.alt = imageVersionLabel(item, index)
+
+    const copy = document.createElement("span")
+    copy.className = "version-history-copy"
+
+    const title = document.createElement("strong")
+    title.textContent = imageVersionLabel(item, index)
+
+    const meta = document.createElement("span")
+    meta.textContent = [
+      formatTimestamp(item.created_at),
+      item.mode || "",
+      item.logo_overlay_applied ? "已集成 LOGO" : "",
+    ].filter(Boolean).join(" · ")
+
+    const prompt = document.createElement("span")
+    prompt.textContent = item.lineage?.original_prompt || item.prompt || "未记录提示词"
+
+    copy.append(title, meta, prompt)
+    button.append(image, copy)
+    button.addEventListener("click", () => {
+      openGalleryLikeImage(item, "版本记录")
+      refs.versionHistoryPanel?.classList.add("hidden")
+      setStatusMessage("已找回所选图片版本，可继续编辑或下载。")
+    })
+    refs.versionHistoryList.appendChild(button)
+  })
+}
+
+async function showImageVersions() {
+  const generatedImageId = selectedGeneratedImageId()
+  if (!generatedImageId) {
+    setStatusMessage("当前图片还没有服务端版本记录。")
+    return
+  }
+  if (refs.showVersionsButton) {
+    refs.showVersionsButton.disabled = true
+  }
+  if (refs.versionHistoryStatus) {
+    refs.versionHistoryStatus.textContent = "读取版本中"
+  }
+  refs.versionHistoryPanel?.classList.remove("hidden")
+  try {
+    const { response, data } = await fetchJSON(
+      `/api/generated-images/${encodeURIComponent(generatedImageId)}/versions`,
+      { method: "GET" },
+    )
+    if (!response.ok) {
+      setStatusMessage(data.error || "版本记录暂时不可用。")
+      refs.versionHistoryPanel?.classList.add("hidden")
+      return
+    }
+    renderImageVersions(Array.isArray(data.versions) ? data.versions : [], generatedImageId)
+  } catch {
+    setStatusMessage("版本记录读取失败。")
+    refs.versionHistoryPanel?.classList.add("hidden")
+  } finally {
+    if (refs.showVersionsButton) {
+      refs.showVersionsButton.disabled = !selectedGeneratedImageId()
+    }
+  }
 }
 
 function parseGalleryTagsInput() {
@@ -3626,7 +3826,14 @@ function formatTeamChatTime(value) {
   if (!value) {
     return ""
   }
-  const normalized = String(value).endsWith("Z") ? value : `${value}Z`
+  // Server timestamps are UTC, written either as an ISO offset form
+  // ("2026-06-14T10:00:00+00:00") or a legacy naive form ("2026-06-14 10:00:00").
+  // Only append "Z" when there is no timezone designator yet — appending it to the
+  // offset form produces "...+00:00Z", an Invalid Date (which blanked every timestamp).
+  let normalized = String(value).trim().replace(" ", "T")
+  if (!/[zZ]$/.test(normalized) && !/[+-]\d\d:?\d\d$/.test(normalized)) {
+    normalized = `${normalized}Z`
+  }
   const date = new Date(normalized)
   if (Number.isNaN(date.getTime())) {
     return ""
@@ -3735,17 +3942,23 @@ async function refreshTeamChatMessages({ append = false } = {}) {
   if (!state.currentUser || !refs.teamChatMessages) {
     return
   }
+  const requestedRoomKey = currentTeamChatRoomKey()
   const params = teamChatRoomParams()
   if (append && state.teamChatLastMessageId) {
     params.set("after_id", String(state.teamChatLastMessageId))
   }
   try {
     const { response, data } = await fetchJSON(`/api/team-chat/messages?${params.toString()}`, { cache: "no-store" })
+    if (requestedRoomKey !== currentTeamChatRoomKey()) {
+      return
+    }
     if (!response.ok) {
       setTeamChatStatus(data.error || "消息读取失败", true)
       return
     }
-    const messages = Array.isArray(data.messages) ? data.messages : []
+    const messages = Array.isArray(data.messages)
+      ? data.messages.filter((message) => !message.room_key || message.room_key === requestedRoomKey)
+      : []
     mergeTeamChatMessages(messages, { replace: !append })
     renderTeamChatMessages({ scrollToBottom: messages.length > 0 || !append })
     if (!refs.teamChatModal?.classList.contains("hidden")) {
@@ -4231,8 +4444,11 @@ async function logout() {
   try {
     await fetchJSON("/api/auth/logout", { method: "POST" })
   } finally {
+    window.clearTimeout(state.persistTimer)
+    state.persistTimer = null
     state.persistenceReady = false
     state.appReady = false
+    state.lastReadyUserId = null
     state.history = []
     state.shareRecipients = []
     state.sharedResults = []
@@ -4245,6 +4461,7 @@ async function logout() {
     if (refs.userUsageSummary) {
       refs.userUsageSummary.textContent = "登录后自动统计。"
     }
+    refs.userImageStats?.classList.add("hidden")
     updateAdminPanelVisibility()
   }
 }
@@ -4404,6 +4621,8 @@ function createWorkspaceSnapshot() {
       responsesModel: refs.responsesModelInput.value,
       imageTransport: getImageTransport(),
       logoOverlayEnabled: refs.logoOverlayEnabled.checked,
+      itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
+      itineraryId: refs.itineraryIdInput?.value || "",
     },
     result: {
       promptText: refs.resultPrompt.textContent,
@@ -4462,6 +4681,7 @@ async function restoreWorkspaceState() {
   }
 
   const forms = snapshot.forms || {}
+  sanitizeLegacyWorkspacePrompt(forms)
   state.generateIntent = snapshot.generateIntent === "variant" ? "variant" : "fresh"
   refs.generatePromptInput.value = forms.generatePrompt || ""
   refs.generateModelInput.value = forms.generateModel || state.serverConfig.default_model || "gpt-image-2"
@@ -4503,7 +4723,14 @@ async function restoreWorkspaceState() {
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
   refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
   refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
+  if (refs.itineraryIdEnabled) {
+    refs.itineraryIdEnabled.checked = Boolean(forms.itineraryIdEnabled)
+  }
+  if (refs.itineraryIdInput) {
+    refs.itineraryIdInput.value = forms.itineraryId || ""
+  }
   updateLogoControlUI()
+  updateItineraryIdControlUI()
   if (forms.imageTransport) {
     setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
   }
@@ -4578,6 +4805,18 @@ async function restoreWorkspaceState() {
   return true
 }
 
+function sanitizeLegacyWorkspacePrompt(forms) {
+  if (!forms || typeof forms !== "object") {
+    return false
+  }
+  if (!isLegacyProgramLayoutBackgroundPrompt(forms.generatePrompt)) {
+    return false
+  }
+  forms.generatePrompt = ""
+  setStatusMessage("已清空旧程序排版背景底图提示词，请输入要直接生成的完整海报文案。")
+  return true
+}
+
 function cloneImageAsset(asset, overrides = {}) {
   if (!asset) {
     return null
@@ -4585,8 +4824,8 @@ function cloneImageAsset(asset, overrides = {}) {
   return { ...asset, ...overrides }
 }
 
-function modelInputAssetForLogoWorkflow(asset, logoRequested) {
-  if (!logoRequested || !asset?.logoOverlayApplied) {
+function modelInputAssetForLogoWorkflow(asset) {
+  if (!asset?.logoOverlayApplied) {
     return asset
   }
 
@@ -4606,6 +4845,15 @@ function modelInputAssetForLogoWorkflow(asset, logoRequested) {
 
 function getAssetDisplaySrc(asset) {
   return asset?.savedUrl || asset?.dataUrl || asset?.fileUrl || asset?.src || ""
+}
+
+function sourceImageIdentityFields(asset) {
+  return {
+    source_saved_image_url: asset?.savedUrl || asset?.fileUrl || asset?.src || "",
+    source_saved_image_path: asset?.savedPath || "",
+    source_original_saved_image_url: asset?.originalSavedUrl || "",
+    source_original_saved_image_path: asset?.originalSavedPath || "",
+  }
 }
 
 function shareToAsset(share) {
@@ -4956,6 +5204,20 @@ function shouldUseCompanyLogo() {
   return Boolean(refs.logoOverlayEnabled?.checked)
 }
 
+function updateItineraryIdControlUI() {
+  const enabled = Boolean(refs.itineraryIdEnabled?.checked)
+  if (refs.itineraryIdInput) {
+    refs.itineraryIdInput.disabled = !enabled
+  }
+}
+
+function getExplicitItineraryId() {
+  if (!refs.itineraryIdEnabled?.checked) {
+    return ""
+  }
+  return (refs.itineraryIdInput?.value || "").trim()
+}
+
 function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
   const basePrompt = String(prompt || "").trim()
   return logoRequested ? `${basePrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : basePrompt
@@ -5178,6 +5440,8 @@ function currentFormSnapshot() {
     itineraryDescription: refs.itineraryDescriptionInput?.value || "",
     itineraryLogoEnabled: refs.itineraryLogoEnabled?.checked !== false,
     logoOverlayEnabled: refs.logoOverlayEnabled.checked,
+    itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
+    itineraryId: refs.itineraryIdInput?.value || "",
     editPrompt: refs.editPromptInput.value,
     editModel: refs.editModelInput.value,
   }
@@ -5235,11 +5499,18 @@ function applyFormSnapshot(snapshot) {
     refs.itineraryLogoEnabled.checked = snapshot.itineraryLogoEnabled !== false
   }
   refs.logoOverlayEnabled.checked = snapshot.logoOverlayEnabled !== false
+  if (refs.itineraryIdEnabled) {
+    refs.itineraryIdEnabled.checked = Boolean(snapshot.itineraryIdEnabled)
+  }
+  if (refs.itineraryIdInput) {
+    refs.itineraryIdInput.value = snapshot.itineraryId || ""
+  }
   refs.editPromptInput.value = snapshot.editPrompt || ""
   refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
   setGenerateIntent(snapshot.generateIntent || "fresh")
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateLogoControlUI()
+  updateItineraryIdControlUI()
   updatePromptCounters()
   updatePromptModeUI()
 }
@@ -5252,6 +5523,9 @@ function rememberRegenerationRequest(kind, snapshot) {
 }
 
 async function rerunLastGeneration() {
+  if (state.isBusy) {
+    return
+  }
   if (!state.lastRegenerationRequest) {
     setError("当前没有可复用的生成参数。")
     return
@@ -5769,8 +6043,7 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
     return false
   }
 
-  const usesBaseImage = shouldUseCompanyLogo() && Boolean(state.lastResultImage.logoOverlayApplied)
-  const inputAsset = modelInputAssetForLogoWorkflow(state.lastResultImage, usesBaseImage)
+  const inputAsset = modelInputAssetForLogoWorkflow(state.lastResultImage)
   const asset = cloneImageAsset(inputAsset, {
     origin: "result",
     description: usesBaseImage
@@ -6053,6 +6326,7 @@ function clearResult() {
   state.lastResultMode = null
   state.currentComparisonSource = null
   state.resultPreview = null
+  state.resultGenerationSeq += 1
   state.resultCandidates = []
   state.selectedCandidateIndex = 0
   state.rawResponsePreview = null
@@ -6070,6 +6344,101 @@ function clearResult() {
   updatePreviewAvailability()
   updateWorkflowStatus()
   scheduleWorkspacePersist()
+}
+
+function snapshotCurrentResultState() {
+  return {
+    label: refs.resultPreviewLabel.textContent,
+    imageSrc: refs.resultImage.getAttribute("src") || "",
+    imageVisible: refs.resultImage.classList.contains("visible"),
+    emptyHidden: refs.resultPreviewEmpty.classList.contains("hidden"),
+    emptyFailure: refs.resultPreviewEmpty.classList.contains("failure"),
+    emptyText: refs.resultPreviewEmpty.textContent,
+    prompt: refs.resultPrompt.textContent,
+    meta: refs.resultMeta.textContent,
+    timing: refs.resultTiming.textContent,
+    storage: refs.resultStorage.textContent,
+    logoStatus: refs.logoComposeStatus.textContent,
+    rawResponse: state.rawResponsePreview,
+    debugLines: [...state.debugLines],
+    lastResultPrompt: state.lastResultPrompt,
+    lastResultImage: cloneImageAsset(state.lastResultImage),
+    lastResultModel: state.lastResultModel,
+    lastResultMode: state.lastResultMode,
+    currentComparisonSource: cloneImageAsset(state.currentComparisonSource),
+    resultPreview: state.resultPreview ? { ...state.resultPreview } : null,
+    resultGenerationSeq: state.resultGenerationSeq,
+    resultCandidates: state.resultCandidates.map((candidate) => ({
+      ...candidate,
+      asset: cloneImageAsset(candidate.asset),
+    })),
+    selectedCandidateIndex: state.selectedCandidateIndex,
+    rawResponsePreview: state.rawResponsePreview,
+    lastFeedbackPayload: state.lastFeedbackPayload ? { ...state.lastFeedbackPayload } : null,
+    lastFeedbackRating: state.lastFeedbackRating,
+    galleryMeta: state.currentGalleryMeta ? { ...state.currentGalleryMeta } : null,
+    copyrightRisk: state.copyrightRisk ? { ...state.copyrightRisk } : null,
+  }
+}
+
+function restoreResultStateSnapshot(snapshot) {
+  if (!snapshot) {
+    return
+  }
+  refs.resultPreviewLabel.textContent = snapshot.label || "输出"
+  if (snapshot.imageSrc) {
+    refs.resultImage.src = snapshot.imageSrc
+  } else {
+    refs.resultImage.removeAttribute("src")
+  }
+  refs.resultImage.classList.toggle("visible", Boolean(snapshot.imageVisible))
+  refs.resultPreviewEmpty.classList.toggle("hidden", Boolean(snapshot.emptyHidden))
+  refs.resultPreviewEmpty.classList.toggle("failure", Boolean(snapshot.emptyFailure))
+  refs.resultPreviewEmpty.textContent = snapshot.emptyText || "生成或编辑成功后，这里会显示输出结果。"
+  refs.resultPrompt.textContent = snapshot.prompt || "还没有结果。"
+  refs.resultMeta.textContent = snapshot.meta || ""
+  refs.resultTiming.textContent = snapshot.timing || ""
+  refs.resultStorage.textContent = snapshot.storage || ""
+  refs.logoComposeStatus.textContent = snapshot.logoStatus || (refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用")
+
+  state.lastResultPrompt = snapshot.lastResultPrompt || ""
+  state.lastResultImage = cloneImageAsset(snapshot.lastResultImage)
+  state.lastResultModel = snapshot.lastResultModel || ""
+  state.lastResultMode = snapshot.lastResultMode || null
+  state.currentComparisonSource = cloneImageAsset(snapshot.currentComparisonSource)
+  state.resultPreview = snapshot.resultPreview ? { ...snapshot.resultPreview } : null
+  state.resultGenerationSeq = Number(snapshot.resultGenerationSeq || state.resultGenerationSeq)
+  state.resultCandidates = Array.isArray(snapshot.resultCandidates)
+    ? snapshot.resultCandidates.map((candidate) => ({
+        ...candidate,
+        asset: cloneImageAsset(candidate.asset),
+      }))
+    : []
+  state.selectedCandidateIndex = Number(snapshot.selectedCandidateIndex || 0)
+  state.rawResponsePreview = snapshot.rawResponsePreview || snapshot.rawResponse || null
+  state.lastFeedbackPayload = snapshot.lastFeedbackPayload ? { ...snapshot.lastFeedbackPayload } : null
+  state.lastFeedbackRating = snapshot.lastFeedbackRating || null
+  state.debugLines = Array.isArray(snapshot.debugLines) ? [...snapshot.debugLines] : []
+  state.copyrightRisk = snapshot.copyrightRisk || state.copyrightRisk
+  setGalleryEditorMeta(snapshot.galleryMeta || null)
+
+  renderRawResponsePreview()
+  renderResultCandidates()
+  restoreCopyrightRiskPanel()
+  updateOriginalDownloadButton(selectedResultCandidate())
+  updatePreviewAvailability()
+  updateResultActionSurface()
+  updateWorkflowStatus()
+  scheduleWorkspacePersist()
+}
+
+function restorePendingResultAfterCancellation() {
+  if (!state.pendingResultSnapshot) {
+    return false
+  }
+  restoreResultStateSnapshot(state.pendingResultSnapshot)
+  state.pendingResultSnapshot = null
+  return true
 }
 
 function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
@@ -6100,6 +6469,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
     metaParts.push(`参考图 ${sourceName}`)
   }
 
+  state.pendingResultSnapshot = snapshotCurrentResultState()
   refs.resultPreviewLabel.textContent = label
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
@@ -6125,6 +6495,9 @@ function candidateAsset(candidate, payload, index) {
   if (!imageSource) {
     return null
   }
+  const metadata = candidate.metadata && typeof candidate.metadata === "object" ? candidate.metadata : {}
+  const originalSavedUrl = candidate.original_saved_image_url || candidate.source_saved_image_url || metadata.source_saved_image_url || ""
+  const originalSavedPath = candidate.original_saved_image_path || candidate.source_saved_image_path || metadata.source_saved_image_path || metadata.source_image_path || ""
   return {
     name: candidate.saved_image_name || `picgen-${payload.mode}-${index + 1}-${Date.now()}.png`,
     type: candidate.saved_image_mime || (candidate.image_data_url ? inferMimeFromDataUrl(candidate.image_data_url) : ""),
@@ -6132,11 +6505,17 @@ function candidateAsset(candidate, payload, index) {
     savedUrl: candidate.saved_image_url || "",
     savedPath: candidate.saved_image_path || "",
     generatedImageId: candidate.generated_image_id || null,
+    sourceGeneratedImageId: candidate.source_generated_image_id || null,
     metadataPath: candidate.saved_metadata_path || "",
     fileUrl: candidate.saved_image_url || candidate.image_url || "",
+    originalDataUrl: "",
+    originalSavedUrl,
+    originalFileUrl: originalSavedUrl,
+    originalSavedPath,
     origin: "result",
     description: `候选 ${index + 1} · ${payload.model || ""}`,
     src: imageSource,
+    logoOverlayApplied: Boolean(candidate.logo_overlay_applied),
   }
 }
 
@@ -6193,6 +6572,28 @@ function setDownloadPendingLogo() {
   setDownloadDisabled("LOGO 成品保存中")
 }
 
+function updateSelectedCandidateStorageText(selectedCandidate = selectedResultCandidate()) {
+  if (!selectedCandidate) {
+    refs.resultStorage.textContent = ""
+    return
+  }
+  const actualSize = formatActualSize({
+    saved_image_width: selectedCandidate.saved_image_width || selectedCandidate.width || selectedCandidate.actual_width,
+    saved_image_height: selectedCandidate.saved_image_height || selectedCandidate.height || selectedCandidate.actual_height,
+  })
+  if (selectedCandidate.logo_overlay_applied) {
+    refs.resultStorage.textContent = selectedCandidate.saved_image_path
+      ? `LOGO 成品已落盘到 ${selectedCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+      : `LOGO 已在浏览器本地贴入，分享前需要重新保存${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+    return
+  }
+  refs.resultStorage.textContent = selectedCandidate.saved_image_path
+    ? `已落盘到 ${selectedCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+    : actualSize
+      ? `实际尺寸 ${actualSize}`
+      : ""
+}
+
 function updateResultActionSurface() {
   const hasResult = Boolean(state.resultPreview?.src)
   const hasImage = Boolean(state.lastResultImage)
@@ -6202,6 +6603,10 @@ function updateResultActionSurface() {
   refs.hoverVariantButton && (refs.hoverVariantButton.disabled = !hasImage)
   refs.inspectLongImageButton && (refs.inspectLongImageButton.disabled = !hasResult)
   refs.hoverShareButton && (refs.hoverShareButton.disabled = !selectedGeneratedImageId())
+  refs.showVersionsButton && (refs.showVersionsButton.disabled = !selectedGeneratedImageId())
+  if (!hasResult) {
+    refs.versionHistoryPanel?.classList.add("hidden")
+  }
   updateOriginalDownloadButton()
 }
 
@@ -6236,6 +6641,7 @@ function selectResultCandidate(index, { persist = true } = {}) {
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
   setGalleryEditorMeta(candidate)
+  updateSelectedCandidateStorageText(candidate)
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   updatePreviewAvailability()
@@ -6305,10 +6711,10 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
   )
 }
 
-async function composeLogoOverlayAfterDisplay(payload, durationMs) {
+async function composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq) {
   try {
     const composedCandidates = await composeLogoOverlayForCandidates(state.resultCandidates, true)
-    if (!composedCandidates.length || state.activeRequestController) {
+    if (!composedCandidates.length || state.activeRequestController || resultGenerationSeq !== state.resultGenerationSeq) {
       return
     }
     state.resultCandidates = composedCandidates
@@ -6325,6 +6731,9 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs) {
     refs.logoComposeStatus.textContent = selectedCandidate.logo_final_persisted ? "成品已保存" : "本地已贴图"
     scheduleWorkspacePersist()
   } catch (error) {
+    if (resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
     appendDebugLine("本地 LOGO 合成失败", { error: error.message })
     refs.logoComposeStatus.textContent = "贴图失败，可先下载原图"
     const fallbackCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
@@ -6339,6 +6748,7 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs) {
 }
 
 async function setResult(payload, durationMs, requestSource = null) {
+  state.pendingResultSnapshot = null
   const candidates = Array.isArray(payload.images) && payload.images.length
     ? payload.images
     : [payload]
@@ -6354,6 +6764,8 @@ async function setResult(payload, durationMs, requestSource = null) {
     throw new Error("上游接口没有返回可展示的图片。")
   }
 
+  const resultGenerationSeq = state.resultGenerationSeq + 1
+  state.resultGenerationSeq = resultGenerationSeq
   state.resultCandidates = enrichedCandidates
   state.selectedCandidateIndex = 0
   const isTransformMode = ["edit", "variant", "reference"].includes(payload.mode)
@@ -6457,10 +6869,11 @@ async function setResult(payload, durationMs, requestSource = null) {
   refs.logoComposeStatus.textContent = payload.logo_requested ? "原图已显示，正在贴 LOGO" : "未启用"
   if (payload.logo_requested) {
     setDownloadPendingLogo()
-    void composeLogoOverlayAfterDisplay(payload, durationMs)
+    void composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq)
   }
   void checkCopyrightRisk(payload)
   void refreshUsageSummary()
+  void refreshImageStats()
   void refreshGallery()
   void refreshGenerationJobs()
 
@@ -6715,6 +7128,8 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
 }
 
 async function checkCopyrightRisk(payload) {
+  const riskRequestSeq = state.copyrightRiskRequestSeq += 1
+  const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
     setRiskPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做版权风险提醒。")
@@ -6729,11 +7144,17 @@ async function checkCopyrightRisk(payload) {
   if (!sourceDataUrl && selectedAsset) {
     try {
       sourceDataUrl = await ensureAssetDataUrl(selectedAsset)
+      if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
     } catch (error) {
       appendDebugLine("版权检查取图失败", { error: error.message })
     }
   }
   const reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
+  if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+    return
+  }
   const images = reviewDataUrl
     ? [{
         name: selectedAsset?.name || "selected-result.jpg",
@@ -6762,8 +7183,14 @@ async function checkCopyrightRisk(payload) {
       ].filter(Boolean).join("\n"),
       images,
     })
+    if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
     setRiskPanel("已检查", result.risk_text || "未见明显风险，但商用前仍建议确认素材授权链。")
   } catch (error) {
+    if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
     appendDebugLine("版权风险检查失败", { error: error.message })
     setRiskPanel("检查失败", error.message || "版权风险检查失败，不影响图片生成结果。")
   }
@@ -6910,6 +7337,67 @@ function calculateRegionComplexity(ctx, region) {
   return count ? total / count : 0
 }
 
+function analyzeLogoBackground(ctx, placement) {
+  const x = Math.max(0, Math.floor(placement.x))
+  const y = Math.max(0, Math.floor(placement.y))
+  const width = Math.max(1, Math.min(ctx.canvas.width - x, Math.floor(placement.width)))
+  const height = Math.max(1, Math.min(ctx.canvas.height - y, Math.floor(placement.height)))
+  const imageData = ctx.getImageData(x, y, width, height)
+  const stepX = Math.max(1, Math.floor(width / 24))
+  const stepY = Math.max(1, Math.floor(height / 12))
+  let luminanceTotal = 0
+  let count = 0
+  for (let py = 0; py < height; py += stepY) {
+    for (let px = 0; px < width; px += stepX) {
+      const index = (py * width + px) * 4
+      luminanceTotal += 0.2126 * imageData.data[index]
+        + 0.7152 * imageData.data[index + 1]
+        + 0.0722 * imageData.data[index + 2]
+      count += 1
+    }
+  }
+  const complexity = calculateRegionComplexity(ctx, { x, y, width, height })
+  return {
+    luminance: count ? luminanceTotal / count : 255,
+    complexity,
+  }
+}
+
+function roundedRectPath(ctx, x, y, width, height, radius) {
+  const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2))
+  ctx.moveTo(x + safeRadius, y)
+  ctx.lineTo(x + width - safeRadius, y)
+  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius)
+  ctx.lineTo(x + width, y + height - safeRadius)
+  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height)
+  ctx.lineTo(x + safeRadius, y + height)
+  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius)
+  ctx.lineTo(x, y + safeRadius)
+  ctx.quadraticCurveTo(x, y, x + safeRadius, y)
+}
+
+function drawLogoContrastMatte(ctx, placement, analysis) {
+  const needsMatte = analysis.luminance < COMPANY_LOGO_CONTRAST_LUMINANCE_MIN
+    || analysis.complexity > COMPANY_LOGO_CONTRAST_COMPLEXITY_MAX
+  if (!needsMatte) {
+    return "none"
+  }
+  const pad = Math.max(8, Math.round(placement.height * COMPANY_LOGO_CONTRAST_PAD_RATIO))
+  const x = Math.max(0, placement.x - pad)
+  const y = Math.max(0, placement.y - Math.round(pad * 0.82))
+  const width = Math.min(ctx.canvas.width - x, placement.width + pad * 2)
+  const height = Math.min(ctx.canvas.height - y, placement.height + Math.round(pad * 1.55))
+  ctx.save()
+  ctx.shadowColor = "rgba(255, 244, 218, 0.42)"
+  ctx.shadowBlur = Math.max(16, Math.round(pad * 1.35))
+  ctx.fillStyle = "rgba(255, 244, 218, 0.34)"
+  ctx.beginPath()
+  roundedRectPath(ctx, x, y, width, height, Math.max(12, Math.round(pad * 0.72)))
+  ctx.fill()
+  ctx.restore()
+  return "soft-warm-matte"
+}
+
 async function loadCompanyLogoCanvas() {
   if (state.companyLogoCanvas) {
     return state.companyLogoCanvas
@@ -7015,6 +7503,8 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
 
   ctx.drawImage(baseImage, 0, 0, width, height)
   const placement = calculateLogoPlacement(canvas, logoCanvas)
+  const backgroundAnalysis = analyzeLogoBackground(ctx, placement)
+  const contrastMatte = drawLogoContrastMatte(ctx, placement, backgroundAnalysis)
   const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
   ctx.drawImage(scaledLogoCanvas, placement.x, placement.y)
   return {
@@ -7024,6 +7514,9 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
     placement: {
       ...placement,
       textColor: "original",
+      contrastMatte,
+      backgroundLuminance: Math.round(backgroundAnalysis.luminance),
+      backgroundComplexity: Number(backgroundAnalysis.complexity.toFixed(2)),
     },
   }
 }
@@ -7175,10 +7668,17 @@ async function ensureAssetDataUrl(asset) {
   return dataUrl
 }
 
-async function useImageFile(file) {
+function validateClientImageFile(file) {
   if (!file || !file.type.startsWith("image/")) {
     throw new Error("请选择图片文件。")
   }
+  if (file.size > CLIENT_IMAGE_UPLOAD_MAX_BYTES) {
+    throw new Error(`图片文件过大，请选择 ${formatFileSize(CLIENT_IMAGE_UPLOAD_MAX_BYTES)} 以内的图片。`)
+  }
+}
+
+async function useImageFile(file) {
+  validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
   setEditImage(
@@ -7194,9 +7694,7 @@ async function useImageFile(file) {
 }
 
 async function useMaskFile(file) {
-  if (!file || !file.type.startsWith("image/")) {
-    throw new Error("请选择图片文件。")
-  }
+  validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
   setEditMaskImage({
@@ -7209,9 +7707,7 @@ async function useMaskFile(file) {
 }
 
 async function useGenerateReferenceFile(file) {
-  if (!file || !file.type.startsWith("image/")) {
-    throw new Error("请选择图片文件。")
-  }
+  validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
   setGenerateReferenceImage(
@@ -7227,9 +7723,7 @@ async function useGenerateReferenceFile(file) {
 }
 
 async function useStyleReferenceFile(file) {
-  if (!file || !file.type.startsWith("image/")) {
-    throw new Error("请选择图片文件。")
-  }
+  validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
   setStyleReferenceImage(
@@ -7246,9 +7740,7 @@ async function useStyleReferenceFile(file) {
 }
 
 async function useMaterialReferenceFile(file) {
-  if (!file || !file.type.startsWith("image/")) {
-    throw new Error("请选择图片文件。")
-  }
+  validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
   setMaterialReferenceImage(
@@ -7277,6 +7769,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
+  const itineraryId = getExplicitItineraryId()
   const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
   let imageOptions
   let size
@@ -7317,7 +7810,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   closePreview()
   setBusy(true, "延展中", { progressLabel: "准备延展图像" })
 
-  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.lastResultImage, logoRequested))
+  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.lastResultImage))
   previewPendingResult({
     mode: "variant",
     prompt,
@@ -7332,6 +7825,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
     ensureRequestNotCancelled()
+    const sourceGeneratedImageId = requestSource.generatedImageId || state.lastResultImage?.generatedImageId || null
     const imagePart = {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
@@ -7348,6 +7842,10 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         mode: "variant",
         transport: "responses-image",
         allow_inline_fallback: true,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        ...sourceImageIdentityFields(requestSource),
         size,
         ...imageOptions,
         image: imagePart,
@@ -7364,6 +7862,10 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         prompt: requestPrompt,
         model,
         mode: "variant",
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        ...sourceImageIdentityFields(requestSource),
         size,
         ...imageOptions,
         image: imagePart,
@@ -7382,13 +7884,18 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       model,
       transport,
       logoRequested,
+      itineraryId,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
     appendDebugLine("延展请求失败", { error: error.message })
-    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    if (error.cancelled && restorePendingResultAfterCancellation()) {
+      setStatusMessage("已中断生成，上一张结果已保留。")
+    } else {
+      setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    }
   } finally {
     setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
     state.activeRequestCancelled = false
@@ -7396,6 +7903,9 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
 }
 
 async function submitGenerate() {
+  if (state.isBusy) {
+    return
+  }
   if (state.generateIntent === "variant") {
     resetDebugLog("点击生成按钮：基于当前结果延展")
     appendDebugLine("当前生成方式为延展，转入编辑接口")
@@ -7414,6 +7924,7 @@ async function submitGenerate() {
   const referenceImages = generateReferenceImages()
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
+  const itineraryId = getExplicitItineraryId()
   const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
   const baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
   const requestPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
@@ -7423,6 +7934,15 @@ async function submitGenerate() {
     appendDebugLine("参数校验失败：生成提示词为空")
     setError("生成提示词不能为空。")
     refs.generatePromptInput.focus()
+    return
+  }
+  if (refs.itineraryIdEnabled?.checked && !itineraryId) {
+    appendDebugLine("参数校验失败：行程 ID 为空")
+    setError("已勾选行程 ID，请填写 ID，或取消勾选。")
+    refs.itineraryIdInput?.focus()
+    return
+  }
+  if (rejectLegacyProgramLayoutBackgroundPrompt(prompt) || rejectLegacyProgramLayoutBackgroundPrompt(effectivePrompt)) {
     return
   }
 
@@ -7509,6 +8029,8 @@ async function submitGenerate() {
           mode: "reference",
           transport: "responses-image",
           allow_inline_fallback: true,
+          logo_requested: logoRequested,
+          itinerary_id: itineraryId,
           sample_count: referenceSampleCount,
           size,
           ...imageOptions,
@@ -7530,6 +8052,8 @@ async function submitGenerate() {
           recipe_version: promptPlan.recipe?.version || "",
           model: imageModel,
           mode: "reference",
+          logo_requested: logoRequested,
+          itinerary_id: itineraryId,
           sample_count: referenceSampleCount,
           size,
           ...imageOptions,
@@ -7549,6 +8073,7 @@ async function submitGenerate() {
         model: useResponses ? settings.responsesModel : imageModel,
         transport,
         logoRequested,
+        itineraryId,
         size,
         sampleCount: referenceSampleCount,
         ...imageOptions,
@@ -7566,6 +8091,8 @@ async function submitGenerate() {
       recipe_id: promptPlan.recipe?.id || "",
       recipe_version: promptPlan.recipe?.version || "",
       model,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
       sample_count: sampleCount,
       size,
       ...imageOptions,
@@ -7581,6 +8108,7 @@ async function submitGenerate() {
       prompt,
       model,
       logoRequested,
+      itineraryId,
       sampleCount,
       size,
       ...imageOptions,
@@ -7588,7 +8116,11 @@ async function submitGenerate() {
     })
   } catch (error) {
     appendDebugLine("生成请求失败", { error: error.message })
-    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    if (error.cancelled && restorePendingResultAfterCancellation()) {
+      setStatusMessage("已中断生成，上一张结果已保留。")
+    } else {
+      setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    }
   } finally {
     setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
     state.activeRequestCancelled = false
@@ -7596,6 +8128,9 @@ async function submitGenerate() {
 }
 
 async function submitEdit() {
+  if (state.isBusy) {
+    return
+  }
   resetDebugLog("点击编辑按钮：编辑图片")
   const prompt = refs.editPromptInput.value
   const settings = getSettings()
@@ -7604,6 +8139,7 @@ async function submitEdit() {
   const model = useResponses ? settings.responsesModel : imageModel
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
+  const itineraryId = getExplicitItineraryId()
   const requestPrompt = withEditPreservePrompt(prompt, logoRequested)
 
   if (!state.editImage) {
@@ -7633,7 +8169,7 @@ async function submitEdit() {
   closePreview()
   setBusy(true, "编辑中", { progressLabel: "准备编辑图像" })
 
-  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.editImage, logoRequested))
+  const requestSource = cloneImageAsset(modelInputAssetForLogoWorkflow(state.editImage))
   previewPendingResult({
     mode: "edit",
     prompt,
@@ -7647,6 +8183,7 @@ async function submitEdit() {
     setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
     ensureRequestNotCancelled()
+    const sourceGeneratedImageId = requestSource.generatedImageId || state.editImage?.generatedImageId || null
     const imagePart = {
       name: requestSource.name,
       type: requestSource.type || inferMimeFromDataUrl(requestSourceDataUrl),
@@ -7676,6 +8213,10 @@ async function submitEdit() {
         mode: "edit",
         transport: "responses-image",
         allow_inline_fallback: true,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        ...sourceImageIdentityFields(requestSource),
         image: imagePart,
         images: [imagePart],
       }
@@ -7694,6 +8235,10 @@ async function submitEdit() {
         prompt: requestPrompt,
         model: imageModel,
         mode: "edit",
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        ...sourceImageIdentityFields(requestSource),
         image: imagePart,
         images: [imagePart],
       }
@@ -7714,11 +8259,16 @@ async function submitEdit() {
       model,
       transport,
       logoRequested,
+      itineraryId,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
     appendDebugLine("编辑请求失败", { error: error.message })
-    setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    if (error.cancelled && restorePendingResultAfterCancellation()) {
+      setStatusMessage("已中断生成，上一张结果已保留。")
+    } else {
+      setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
+    }
   } finally {
     setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
     state.activeRequestCancelled = false
@@ -7738,10 +8288,17 @@ function clearGenerateForm() {
   refs.moderationSelect.value = "auto"
   refs.generateSampleCountInput.value = ""
   refs.logoOverlayEnabled.checked = true
+  if (refs.itineraryIdEnabled) {
+    refs.itineraryIdEnabled.checked = false
+  }
+  if (refs.itineraryIdInput) {
+    refs.itineraryIdInput.value = ""
+  }
   if (!state.lastResultImage) {
     state.generateIntent = "fresh"
   }
   updateLogoControlUI()
+  updateItineraryIdControlUI()
   updateOpenAIOptionUI()
   updatePromptCounters()
   updateGenerateIntentUI()
@@ -7963,6 +8520,7 @@ function bindEvents() {
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
+  refs.showVersionsButton?.addEventListener("click", showImageVersions)
   refs.saveGroupAssetButton?.addEventListener("click", saveCurrentResultToGroupAssets)
   refs.hoverContinueEditButton?.addEventListener("click", continueEditingFromResult)
   refs.hoverVariantButton?.addEventListener("click", startVariantFromResult)
@@ -8169,6 +8727,17 @@ function bindEvents() {
     })
     input.addEventListener("change", () => {
       updateLogoControlUI()
+      scheduleWorkspacePersist()
+    })
+  })
+
+  ;[refs.itineraryIdEnabled, refs.itineraryIdInput].filter(Boolean).forEach((input) => {
+    input.addEventListener("input", () => {
+      updateItineraryIdControlUI()
+      scheduleWorkspacePersist()
+    })
+    input.addEventListener("change", () => {
+      updateItineraryIdControlUI()
       scheduleWorkspacePersist()
     })
   })
@@ -8503,8 +9072,13 @@ async function init() {
 }
 
 async function startAuthenticatedApp() {
-  if (state.appReady) {
+  // Fast path only when the SAME user is still active. A 401 sends the user to the
+  // auth gate without resetting appReady, so without the id check a different user
+  // logging in on a shared browser would inherit the previous user's API key,
+  // history and workspace (the per-user loaders below would be skipped).
+  if (state.appReady && state.lastReadyUserId === (state.currentUser?.id ?? null)) {
     await refreshUsageSummary()
+    await refreshImageStats()
     await refreshGenerationJobs()
     startTeamChatPolling()
     await refreshTeamChatUnread()
@@ -8534,10 +9108,12 @@ async function startAuthenticatedApp() {
 
   state.persistenceReady = true
   state.appReady = true
+  state.lastReadyUserId = state.currentUser?.id ?? null
   updateWorkflowStatus()
   startTeamChatPolling()
   await refreshTeamChatUnread()
   await refreshUsageSummary()
+  await refreshImageStats()
   await refreshGenerationJobs()
   scheduleWorkspacePersist()
 }
