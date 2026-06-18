@@ -23,6 +23,13 @@ from picgen.upstream import parse_sse_json_events, stream_events_to_image_payloa
 TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
 
+def png_b64_with_dimensions(width: int, height: int) -> str:
+    image = bytearray(base64.b64decode(TINY_PNG_B64))
+    image[16:20] = width.to_bytes(4, "big")
+    image[20:24] = height.to_bytes(4, "big")
+    return base64.b64encode(image).decode("ascii")
+
+
 def test_health_endpoint_reports_ok(make_client):
     client, _, _ = make_client()
     response = client.get("/api/health")
@@ -137,6 +144,20 @@ def test_recipes_endpoint_requires_login_and_lists_prompt_recipes(make_client, s
     assert travel_recipe["mode"] == "generate"
     assert travel_recipe["prompt_suffix"]
     assert "recommended_keywords" in travel_recipe
+
+
+def test_recipes_endpoint_allows_no_auth_mode(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=False)
+    client, _, _ = make_client(settings=settings)
+
+    response = client.get("/api/recipes")
+
+    assert response.status_code == 200
+    assert {recipe["id"] for recipe in response.json()["recipes"]} >= {
+        "travel-poster-premium",
+        "hotel-texture",
+        "route-map-comic",
+    }
 
 
 def test_removed_prompt_detour_endpoints_are_not_exposed(make_client, settings_factory):
@@ -286,6 +307,30 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "n" not in upstream_payload
     assert "硬性目的地限制" in upstream_payload["prompt"]
     assert "Vatican City" in upstream_payload["prompt"]
+
+
+def test_generate_rejects_mismatched_upstream_size_without_cropping(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, resolved = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张 6 人游竖版旅行海报",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "upstream_size_mismatch"
+    assert "1088x2240" in payload["error"]
+    assert "1x1" in payload["error"]
+    assert not list(resolved.outputs_dir.rglob("*.png"))
 
 
 def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
@@ -691,7 +736,10 @@ def test_generation_jobs_endpoint_lists_current_user_jobs_only(make_client, sett
         default_api_key="sk-test",
     )
     client, fake, _ = make_client(settings=settings)
-    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_json.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}],
+        "created": 1,
+    }
 
     alice_register = client.post(
         "/api/auth/register",
@@ -1538,7 +1586,10 @@ def test_authenticated_generation_sends_success_telegram_alert(
         json={"username": "alice", "password": "correct horse battery"},
     )
     assert register.status_code == 200
-    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_json.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}],
+        "created": 1,
+    }
 
     response = client.post(
         "/api/generate",
@@ -1911,7 +1962,7 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_multipart.return_value = {
-        "data": [{"b64_json": TINY_PNG_B64}],
+        "data": [{"b64_json": png_b64_with_dimensions(1024, 1024)}],
         "created": 99,
     }
 

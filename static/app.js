@@ -24,6 +24,11 @@ const EDIT_PRESERVE_PROMPT = [
   "用户没有明确要求删除或替换的元素必须保留，包括主体构图、路线、地点、日期标签、距离标注、交通工具图标、人物/景物、文字层级、色彩气质和已有品牌安全区。",
   "如果输入图包含或预留 6 人游 LOGO，不能重绘、改造、遮挡或删除 LOGO；最终 LOGO 会由程序使用官方透明 PNG 原样贴入。",
 ].join("\n")
+const TEXT_RENDERING_FIDELITY_PROMPT = [
+  "文字渲染硬性要求：画面中出现的标题、地名、日期、序号、说明正文、贴士和所有可读文字，必须逐字使用用户提供的文字。",
+  "不得改写、翻译、替换、增删或自行纠错用户文字；不得把相近字、同音字、繁简字、英文或拼音替换进画面。",
+  "如果用户文字很多，优先保持文字准确和清晰可读，再考虑装饰；不能为了版式美观牺牲文字准确性。",
+].join("\n")
 const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
 const TEAM_CHAT_FAST_POLL_LIMIT = 8
 const TEAM_CHAT_MAX_RECENT_DMS = 8
@@ -38,6 +43,7 @@ const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
+const IMAGES_API_EXACT_SIZES = new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -564,6 +570,15 @@ const refs = {
   bugReportStatus: document.querySelector("#bugReportStatus"),
   submitBugReportButton: document.querySelector("#submitBugReportButton"),
   closeBugReportButton: document.querySelector("#closeBugReportButton"),
+  promptConfirmModal: document.querySelector("#promptConfirmModal"),
+  promptConfirmBackdrop: document.querySelector("#promptConfirmBackdrop"),
+  promptConfirmTitle: document.querySelector("#promptConfirmTitle"),
+  promptConfirmDescription: document.querySelector("#promptConfirmDescription"),
+  promptConfirmTextInput: document.querySelector("#promptConfirmTextInput"),
+  promptConfirmCheckbox: document.querySelector("#promptConfirmCheckbox"),
+  submitPromptConfirmButton: document.querySelector("#submitPromptConfirmButton"),
+  cancelPromptConfirmButton: document.querySelector("#cancelPromptConfirmButton"),
+  closePromptConfirmButton: document.querySelector("#closePromptConfirmButton"),
 }
 
 function loadJSON(key, fallbackValue) {
@@ -2036,7 +2051,7 @@ async function submitAIItineraryMap() {
     const startedAt = performance.now()
     const title = refs.itineraryTitleInput?.value.trim() || "定制旅行行程地图"
     const subtitle = refs.itinerarySubtitleInput?.value.trim() || ""
-    const description = refs.itineraryDescriptionInput?.value.trim() || ""
+    let description = refs.itineraryDescriptionInput?.value.trim() || ""
     const logoRequested = refs.itineraryLogoEnabled?.checked !== false
 
     if (!subtitle) {
@@ -2058,6 +2073,16 @@ async function submitAIItineraryMap() {
       appendDebugLine("参数校验失败：行程地图参数无效", { error: error.message })
       setError(error.message, error.details)
       return
+    }
+
+    const confirmedText = await confirmPromptBeforeRun("itinerary", description)
+    if (confirmedText === null) {
+      appendDebugLine("用户取消路线图提示词确认")
+      return
+    }
+    description = confirmedText
+    if (refs.itineraryDescriptionInput) {
+      refs.itineraryDescriptionInput.value = confirmedText
     }
 
     const requestSnapshot = currentFormSnapshot()
@@ -5218,15 +5243,101 @@ function getExplicitItineraryId() {
   return (refs.itineraryIdInput?.value || "").trim()
 }
 
-function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+function withTextRenderingFidelityPrompt(prompt) {
   const basePrompt = String(prompt || "").trim()
-  return logoRequested ? `${basePrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : basePrompt
+  return [basePrompt, TEXT_RENDERING_FIDELITY_PROMPT].filter(Boolean).join("\n\n")
+}
+
+function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
+  const requestText = String(prompt || "").trim()
+  const textLockedPrompt = withTextRenderingFidelityPrompt(requestText)
+  return logoRequested ? `${textLockedPrompt}\n\n${COMPANY_LOGO_LAYOUT_PROMPT}` : textLockedPrompt
 }
 
 function withEditPreservePrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
-  const basePrompt = String(prompt || "").trim()
+  const basePrompt = withTextRenderingFidelityPrompt(prompt)
   const logoInstruction = logoRequested ? COMPANY_LOGO_LAYOUT_PROMPT : ""
   return [basePrompt, EDIT_PRESERVE_PROMPT, logoInstruction].filter(Boolean).join("\n\n")
+}
+
+function updatePromptConfirmButtonState() {
+  if (!refs.submitPromptConfirmButton) {
+    return
+  }
+  const hasText = Boolean(refs.promptConfirmTextInput?.value.trim())
+  refs.submitPromptConfirmButton.disabled = !(refs.promptConfirmCheckbox && refs.promptConfirmCheckbox.checked && hasText)
+}
+
+function closePromptConfirmModal() {
+  refs.promptConfirmModal?.classList.add("hidden")
+  refs.promptConfirmModal?.setAttribute("aria-hidden", "true")
+  refs.promptConfirmCheckbox && (refs.promptConfirmCheckbox.checked = false)
+  document.body.classList.remove("modal-open")
+  updatePromptConfirmButtonState()
+}
+
+function openPromptConfirmModal({ title, description, text }) {
+  if (!refs.promptConfirmModal || !refs.promptConfirmTextInput) {
+    return Promise.resolve(String(text || "").trim())
+  }
+  refs.promptConfirmTitle.textContent = title || "提交前确认提示词"
+  refs.promptConfirmDescription.textContent = description || "请检查标题、地名、日期、正文和标点。"
+  refs.promptConfirmTextInput.value = String(text || "").trim()
+  if (refs.promptConfirmCheckbox) {
+    refs.promptConfirmCheckbox.checked = false
+  }
+  refs.promptConfirmModal.classList.remove("hidden")
+  refs.promptConfirmModal.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  updatePromptConfirmButtonState()
+  refs.promptConfirmTextInput.focus()
+  refs.promptConfirmTextInput.setSelectionRange(0, 0)
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      refs.submitPromptConfirmButton?.removeEventListener("click", handleSubmit)
+      refs.cancelPromptConfirmButton?.removeEventListener("click", handleCancel)
+      refs.closePromptConfirmButton?.removeEventListener("click", handleCancel)
+      refs.promptConfirmBackdrop?.removeEventListener("click", handleCancel)
+    }
+    const handleSubmit = () => {
+      const confirmedText = refs.promptConfirmTextInput.value.trim()
+      if (!refs.promptConfirmCheckbox?.checked || !confirmedText) {
+        updatePromptConfirmButtonState()
+        return
+      }
+      cleanup()
+      closePromptConfirmModal()
+      resolve(confirmedText)
+    }
+    const handleCancel = () => {
+      cleanup()
+      closePromptConfirmModal()
+      resolve(null)
+    }
+    refs.submitPromptConfirmButton?.addEventListener("click", handleSubmit)
+    refs.cancelPromptConfirmButton?.addEventListener("click", handleCancel)
+    refs.closePromptConfirmButton?.addEventListener("click", handleCancel)
+    refs.promptConfirmBackdrop?.addEventListener("click", handleCancel)
+  })
+}
+
+async function confirmPromptBeforeRun(kind, text) {
+  const labels = {
+    generate: {
+      title: "生成海报前确认提示词",
+      description: "请逐字检查海报标题、地名、日期、正文、序号和底部贴士。",
+    },
+    itinerary: {
+      title: "生成路线图前确认提示词",
+      description: "请逐字检查行程日期、地点、酒店、交通和每日说明。",
+    },
+    edit: {
+      title: "开始编辑前确认提示词",
+      description: "请逐字检查本次要修改的内容；模型会尽量只改这些文字描述的部分。",
+    },
+  }
+  return openPromptConfirmModal({ ...(labels[kind] || labels.generate), text })
 }
 
 function updateGenerateSampleCountUI() {
@@ -5384,6 +5495,10 @@ function getGenerateSize() {
   }
 
   return formatSizeValue(width, height)
+}
+
+function shouldUseResponsesForSelectedSize(size) {
+  return !IMAGES_API_EXACT_SIZES.has(String(size || "").trim() || "auto")
 }
 
 function updateVisualSizePicker(value) {
@@ -7081,9 +7196,6 @@ async function postJSON(url, payload, options = {}) {
       error: data.error || "请求失败",
       details: data.details || "",
     })
-    if (response.status === 401) {
-      enterAuthGate("login", "登录已过期，请重新登录。")
-    }
     const requestError = new Error(data.error || "请求失败")
     requestError.code = data.code || ""
     requestError.details = errorDetailsWithRequestId(data)
@@ -7114,9 +7226,6 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
     })
     const data = await response.json()
     if (!response.ok) {
-      if (response.status === 401) {
-        enterAuthGate("login", "登录已过期，请重新登录。")
-      }
       const requestError = new Error(data.error || "请求失败")
       requestError.details = errorDetailsWithRequestId(data)
       throw requestError
@@ -7761,18 +7870,19 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
   const promptPlan = buildEffectiveGeneratePrompt()
-  const prompt = promptPlan.originalPrompt
-  const effectivePrompt = promptPlan.effectivePrompt
+  let prompt = promptPlan.originalPrompt
+  let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
-  const model = useResponses ? settings.responsesModel : imageModel
-  const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
-  const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
+  let confirmedPrompt = ""
   let imageOptions
   let size
+  let forceResponsesForSize = false
+  let model = imageModel
+  let transport = "images-edit"
 
   if (!state.lastResultImage) {
     appendDebugLine("参数校验失败：没有可延展的结果图")
@@ -7787,22 +7897,39 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     return
   }
 
-  if (useResponses) {
-    if (!requireResponsesSettings(settings, "基于当前结果延展")) {
+  try {
+    imageOptions = getOpenAIImageOptions()
+    size = getGenerateSize()
+    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
+    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
+    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
+  } catch (error) {
+    appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
+    setError(error.message, error.details)
+    return
+  }
+
+  if (useResponses || forceResponsesForSize) {
+    if (!requireResponsesSettings(settings, forceResponsesForSize ? "基于当前结果延展的精确海报尺寸" : "基于当前结果延展")) {
       return
     }
   } else if (!requireEditSettings(settings, "基于当前结果延展")) {
     return
   }
 
-  try {
-    imageOptions = getOpenAIImageOptions()
-    size = getGenerateSize()
-  } catch (error) {
-    appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
-    setError(error.message, error.details)
+  const confirmedText = await confirmPromptBeforeRun("generate", effectivePrompt)
+  if (confirmedText === null) {
+    appendDebugLine("用户取消延展提示词确认")
     return
   }
+  prompt = confirmedText
+  effectivePrompt = confirmedText
+  if (promptPlan.promptMode === "free") {
+    refs.generatePromptInput.value = confirmedText
+    updatePromptCounters()
+    updateEffectivePromptPreview()
+  }
+  confirmedPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
   saveSettings()
@@ -7833,11 +7960,14 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       role: "source_image",
     }
     let result
-    if (useResponses) {
+    if (useResponses || forceResponsesForSize) {
+      if (forceResponsesForSize && !useResponses) {
+        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
+      }
       result = await postJSON("api/responses-image", {
         api_key: settings.apiKey,
         endpoint_url: settings.responsesUrl,
-        prompt: requestPrompt,
+        prompt: confirmedPrompt,
         model,
         mode: "variant",
         transport: "responses-image",
@@ -7859,7 +7989,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       result = await postJSON("api/edit", {
         api_key: settings.apiKey,
         endpoint_url: settings.editUrl,
-        prompt: requestPrompt,
+        prompt: confirmedPrompt,
         model,
         mode: "variant",
         logo_requested: logoRequested,
@@ -7916,8 +8046,8 @@ async function submitGenerate() {
   resetDebugLog("点击生成按钮：生成图片")
 
   const promptPlan = buildEffectiveGeneratePrompt()
-  const prompt = promptPlan.originalPrompt
-  const effectivePrompt = promptPlan.effectivePrompt
+  let prompt = promptPlan.originalPrompt
+  let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
@@ -7925,10 +8055,13 @@ async function submitGenerate() {
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
-  const model = referenceImages.length && useResponses ? settings.responsesModel : imageModel
-  const baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
-  const requestPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
+  let baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
+  let confirmedPrompt = ""
   const requiresReferenceTransport = referenceImages.length > 0
+  let forceResponsesForSize = false
+  let referenceViaResponses = useResponses
+  let textGenerateViaResponses = useResponses
+  let model = imageModel
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -7946,23 +8079,6 @@ async function submitGenerate() {
     return
   }
 
-  if (!requiresReferenceTransport && !settings.generateUrl) {
-    appendDebugLine("参数校验失败：生成接口 URL 为空")
-    setError("请先填写生成接口 URL。")
-    refs.generateUrlInput.focus()
-    return
-  }
-
-  if (requiresReferenceTransport) {
-    if (useResponses) {
-      if (!requireResponsesSettings(settings, "带参考图生成")) {
-        return
-      }
-    } else if (!requireEditSettings(settings, "带参考图生成")) {
-      return
-    }
-  }
-
   let size
   let imageOptions
   let sampleCount
@@ -7970,11 +8086,49 @@ async function submitGenerate() {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
     sampleCount = referenceImages.length ? 1 : getGenerateSampleCount()
+    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
+    referenceViaResponses = useResponses || forceResponsesForSize
+    textGenerateViaResponses = useResponses || forceResponsesForSize
+    model = referenceImages.length && referenceViaResponses ? settings.responsesModel : imageModel
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
     return
   }
+
+  if (requiresReferenceTransport) {
+    if (referenceViaResponses) {
+      if (!requireResponsesSettings(settings, "带参考图生成")) {
+        return
+      }
+    } else if (!requireEditSettings(settings, "带参考图生成")) {
+      return
+    }
+  } else if (textGenerateViaResponses) {
+    if (!requireResponsesSettings(settings, "精确海报尺寸生成")) {
+      return
+    }
+  } else if (!settings.generateUrl) {
+    appendDebugLine("参数校验失败：生成接口 URL 为空")
+    setError("请先填写生成接口 URL。")
+    refs.generateUrlInput.focus()
+    return
+  }
+
+  const confirmedText = await confirmPromptBeforeRun("generate", effectivePrompt)
+  if (confirmedText === null) {
+    appendDebugLine("用户取消生成提示词确认")
+    return
+  }
+  prompt = confirmedText
+  effectivePrompt = confirmedText
+  if (promptPlan.promptMode === "free") {
+    refs.generatePromptInput.value = confirmedText
+    updatePromptCounters()
+    updateEffectivePromptPreview()
+  }
+  baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
+  confirmedPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
   saveSettings()
@@ -8013,14 +8167,17 @@ async function submitGenerate() {
       }
       const requestParts = referenceParts
       const referencePart = requestParts.at(-1)
-      const transport = useResponses ? "responses-image" : "images-edit"
+      const transport = referenceViaResponses ? "responses-image" : "images-edit"
       const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
       let result
-      if (useResponses) {
+      if (referenceViaResponses) {
+        if (forceResponsesForSize && !useResponses) {
+          appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
+        }
         result = await postJSON("api/responses-image", {
           api_key: settings.apiKey,
           endpoint_url: settings.responsesUrl,
-          prompt: requestPrompt,
+          prompt: confirmedPrompt,
           original_prompt: prompt,
           prompt_mode: promptPlan.promptMode,
           recipe_id: promptPlan.recipe?.id || "",
@@ -8045,7 +8202,7 @@ async function submitGenerate() {
         result = await postJSON("api/edit", {
           api_key: settings.apiKey,
           endpoint_url: settings.editUrl,
-          prompt: requestPrompt,
+          prompt: confirmedPrompt,
           original_prompt: prompt,
           prompt_mode: promptPlan.promptMode,
           recipe_id: promptPlan.recipe?.id || "",
@@ -8070,7 +8227,7 @@ async function submitGenerate() {
       pushHistory({
         mode: "reference",
         prompt,
-        model: useResponses ? settings.responsesModel : imageModel,
+        model: referenceViaResponses ? settings.responsesModel : imageModel,
         transport,
         logoRequested,
         itineraryId,
@@ -8082,31 +8239,63 @@ async function submitGenerate() {
       return
     }
 
-    const result = await postJSON("api/generate", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.generateUrl,
-      prompt: requestPrompt,
-      original_prompt: prompt,
-      prompt_mode: promptPlan.promptMode,
-      recipe_id: promptPlan.recipe?.id || "",
-      recipe_version: promptPlan.recipe?.version || "",
-      model,
-      logo_requested: logoRequested,
-      itinerary_id: itineraryId,
-      sample_count: sampleCount,
-      size,
-      ...imageOptions,
-    }, {
-      mode: "generate",
-      progressLabel: "提交生成请求",
-      waitingLabel: "等待上游生成",
-    })
+    let result
+    let transport = "images-generate"
+    if (textGenerateViaResponses) {
+      if (forceResponsesForSize && !useResponses) {
+        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
+      }
+      transport = "responses-image"
+      result = await postJSON("api/responses-image", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.responsesUrl,
+        prompt: confirmedPrompt,
+        original_prompt: prompt,
+        prompt_mode: promptPlan.promptMode,
+        recipe_id: promptPlan.recipe?.id || "",
+        recipe_version: promptPlan.recipe?.version || "",
+        model: settings.responsesModel,
+        mode: "generate",
+        transport: "responses-image",
+        allow_inline_fallback: true,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        sample_count: sampleCount,
+        size,
+        ...imageOptions,
+      }, {
+        mode: "generate",
+        progressLabel: "提交 Responses 生成请求",
+        waitingLabel: "等待 Responses 图像流",
+      })
+    } else {
+      result = await postJSON("api/generate", {
+        api_key: settings.apiKey,
+        endpoint_url: settings.generateUrl,
+        prompt: confirmedPrompt,
+        original_prompt: prompt,
+        prompt_mode: promptPlan.promptMode,
+        recipe_id: promptPlan.recipe?.id || "",
+        recipe_version: promptPlan.recipe?.version || "",
+        model,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        sample_count: sampleCount,
+        size,
+        ...imageOptions,
+      }, {
+        mode: "generate",
+        progressLabel: "提交生成请求",
+        waitingLabel: "等待上游生成",
+      })
+    }
     await setResult({ ...result, logo_requested: logoRequested }, performance.now() - startedAt)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
       prompt,
-      model,
+      model: textGenerateViaResponses ? settings.responsesModel : model,
+      transport,
       logoRequested,
       itineraryId,
       sampleCount,
@@ -8132,7 +8321,7 @@ async function submitEdit() {
     return
   }
   resetDebugLog("点击编辑按钮：编辑图片")
-  const prompt = refs.editPromptInput.value
+  let prompt = refs.editPromptInput.value
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
@@ -8140,7 +8329,7 @@ async function submitEdit() {
   const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
-  const requestPrompt = withEditPreservePrompt(prompt, logoRequested)
+  let confirmedPrompt = ""
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -8162,6 +8351,16 @@ async function submitEdit() {
   } else if (!requireEditSettings(settings, "编辑图像")) {
     return
   }
+
+  const confirmedText = await confirmPromptBeforeRun("edit", prompt)
+  if (confirmedText === null) {
+    appendDebugLine("用户取消编辑提示词确认")
+    return
+  }
+  prompt = confirmedText
+  refs.editPromptInput.value = confirmedText
+  updatePromptCounters()
+  confirmedPrompt = withEditPreservePrompt(prompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
   saveSettings()
@@ -8208,7 +8407,7 @@ async function submitEdit() {
       const requestPayload = {
         api_key: settings.apiKey,
         endpoint_url: settings.responsesUrl,
-        prompt: requestPrompt,
+        prompt: confirmedPrompt,
         model,
         mode: "edit",
         transport: "responses-image",
@@ -8232,7 +8431,7 @@ async function submitEdit() {
       const requestPayload = {
         api_key: settings.apiKey,
         endpoint_url: settings.editUrl,
-        prompt: requestPrompt,
+        prompt: confirmedPrompt,
         model: imageModel,
         mode: "edit",
         logo_requested: logoRequested,
@@ -8636,6 +8835,8 @@ function bindEvents() {
   refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
   refs.bugReportForm?.addEventListener("submit", submitBugReport)
   refs.refreshBugReportsButton?.addEventListener("click", refreshBugReports)
+  refs.promptConfirmTextInput?.addEventListener("input", updatePromptConfirmButtonState)
+  refs.promptConfirmCheckbox?.addEventListener("change", updatePromptConfirmButtonState)
 
   refs.copyPromptButton.addEventListener("click", async () => {
     if (!state.lastResultPrompt) {
@@ -8979,6 +9180,10 @@ function bindEvents() {
 
     if (event.key === "Escape" && refs.bugReportModal && !refs.bugReportModal.classList.contains("hidden")) {
       closeBugReportModal()
+      return
+    }
+    if (event.key === "Escape" && refs.promptConfirmModal && !refs.promptConfirmModal.classList.contains("hidden")) {
+      refs.cancelPromptConfirmButton?.click()
       return
     }
 

@@ -516,6 +516,78 @@ def test_edit_prompt_preserves_user_assets_dates_routes_and_logo() -> None:
     assert "保留现有构图、路线、日期、文字、人物/景物、6 人游 LOGO 和品牌元素" in index_html
 
 
+def test_image_prompts_require_exact_user_text_rendering() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "TEXT_RENDERING_FIDELITY_PROMPT" in app_js
+    assert "必须逐字使用用户提供的文字" in app_js
+    assert "不得改写、翻译、替换、增删或自行纠错" in app_js
+    assert "withTextRenderingFidelityPrompt" in app_js
+    assert "withTextRenderingFidelityPrompt(prompt)" in app_js
+    assert "withTextRenderingFidelityPrompt(requestText)" in app_js
+    assert "confirmedPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)" in app_js
+    assert "confirmedPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)" in app_js
+    assert "confirmedPrompt = withEditPreservePrompt(prompt, logoRequested)" in app_js
+    assert "prompt: confirmedPrompt" in app_js
+    assert "prompt: requestPrompt" not in app_js
+
+
+def test_prompt_confirmation_modal_blocks_generation_until_checked() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="promptConfirmModal"' in index_html
+    assert 'id="promptConfirmTextInput"' in index_html
+    assert 'id="promptConfirmCheckbox"' in index_html
+    assert 'id="submitPromptConfirmButton"' in index_html
+    assert "openPromptConfirmModal" in app_js
+    assert "confirmPromptBeforeRun" in app_js
+    assert "refs.promptConfirmCheckbox.checked" in app_js
+    assert "submitPromptConfirmButton.disabled" in app_js
+    assert "await confirmPromptBeforeRun" in app_js
+    assert "生成海报前确认提示词" in app_js
+    assert "生成路线图前确认提示词" in app_js
+    assert "开始编辑前确认提示词" in app_js
+    assert ".prompt-confirm-modal" in styles_css
+    assert ".prompt-confirm-dialog" in styles_css
+    assert ".prompt-confirm-textarea" in styles_css
+
+
+def test_generation_post_helpers_do_not_send_upstream_401_to_login_gate() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    post_json_block = app_js[app_js.index("async function postJSON(") : app_js.index("async function postJSONSilent(")]
+    post_json_silent_block = app_js[
+        app_js.index("async function postJSONSilent(") : app_js.index("async function checkCopyrightRisk(")
+    ]
+    fetch_json_block = app_js[app_js.index("async function fetchJSON(") : app_js.index("function enterAuthGate(")]
+
+    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' in fetch_json_block
+    assert "response.status === 401" not in post_json_block
+    assert "response.status === 401" not in post_json_silent_block
+    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' not in post_json_block
+    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' not in post_json_silent_block
+
+
+def test_nonstandard_poster_sizes_use_responses_generation_instead_of_images_api() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    submit_generate_block = app_js[
+        app_js.index("async function submitGenerate()") : app_js.index("async function submitEdit()")
+    ]
+
+    assert "IMAGES_API_EXACT_SIZES" in app_js
+    assert 'new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])' in app_js
+    assert "shouldUseResponsesForSelectedSize(size)" in submit_generate_block
+    assert "forceResponsesForSize = shouldUseResponsesForSelectedSize(size)" in submit_generate_block
+    assert "referenceViaResponses = useResponses || forceResponsesForSize" in submit_generate_block
+    assert "textGenerateViaResponses = useResponses || forceResponsesForSize" in submit_generate_block
+    assert "非标准海报尺寸改走 Responses 图像工具" in submit_generate_block
+    assert 'result = await postJSON("api/responses-image"' in submit_generate_block
+    assert 'transport: "responses-image"' in submit_generate_block
+    assert 'mode: "generate"' in submit_generate_block
+    assert "size," in submit_generate_block
+
+
 def test_layout_review_fixes_keep_generation_path_quiet() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -826,7 +898,8 @@ def test_prompt_recipe_mode_keeps_precise_prompt_as_default_and_records_lineage(
     assert "original_prompt: prompt" in app_js
     assert "prompt_mode: promptPlan.promptMode" in app_js
     assert "recipe_id: promptPlan.recipe?.id" in app_js
-    assert "const requestPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)" in app_js
+    assert "confirmedPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)" in app_js
+    assert "confirmedPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)" in app_js
     assert 'id="itineraryIdEnabled"' in index_html
     assert 'id="itineraryIdInput"' in index_html
     assert "itinerary_id: itineraryId" in app_js
