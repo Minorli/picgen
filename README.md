@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.40**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.41**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,9 +14,9 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.40 主要特性
+## 0.1.41 主要特性
 
-- **海报严格尺寸验收**：普通海报和编辑图必须按用户选择的 `size` 返回；若上游返回不同尺寸，PicGen 会拒绝本次结果并提示实际尺寸。路线图仍可按行程内容推测构图尺寸。
+- **上游原图交付**：普通海报和编辑图仍会把用户选择的 `size` 传给上游；若上游返回不同尺寸，PicGen 不缩放、不裁切、不终止，按上游原始图片保存并在界面提示实际尺寸。路线图仍可按行程内容推测构图尺寸。
 - **默认最高图片质量**：OpenAI Images / Responses 图像工具默认发送 `quality: "high"`，兼容 `gpt-image-2` 的官方最高质量参数。
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -77,10 +77,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.40 .
+docker build -t minorli/picgen:0.1.41 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.40
+  minorli/picgen:0.1.41
 ```
 
 或：
@@ -95,10 +95,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.40`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.41`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.40 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.41 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -200,7 +200,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.40 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.41 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
