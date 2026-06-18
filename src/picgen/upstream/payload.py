@@ -117,6 +117,7 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
     metadata: dict[str, Any] = {}
     if size:
         metadata["size"] = size
+        metadata["requested_size"] = size
     for key in _IMAGE_OPTION_KEYS:
         value = payload.get(key)
         if value is not None and value != "":

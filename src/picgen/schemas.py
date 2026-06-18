@@ -141,6 +141,38 @@ class CopyrightRiskRequest(BaseModel):
     images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=1)
 
 
+class TextFidelityContract(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    required: list[str] = Field(default_factory=list, max_length=80)
+    forbidden: list[str] = Field(default_factory=list, max_length=80)
+
+    @field_validator("required", "forbidden", mode="after")
+    @classmethod
+    def _normalize_items(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            cleaned.append(text[:200])
+            seen.add(text)
+        return cleaned
+
+
+class TextFidelityRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    prompt: str = Field(default="", max_length=32_000)
+    context: str = Field(default="", max_length=8_000)
+    endpoint_url: str | None = None
+    model: str | None = Field(default=None, max_length=128)
+    api_key: str | None = Field(default=None, max_length=512)
+    text_contract: TextFidelityContract = Field(default_factory=TextFidelityContract)
+    images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=1)
+
+
 class AuthRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
