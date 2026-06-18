@@ -1,26 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import html
 import math
 import os
 import struct
 import tempfile
+import time
 import uuid
 import zlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .config import Settings
-from .storage import sanitize_filename_prefix, storage_url_for_path
+from .restricted_destinations import stop_has_restricted_destination
+from .storage import output_group_dir, sanitize_filename_prefix, storage_url_for_path
 
 SVG_MIME = "image/svg+xml"
 DEFAULT_CANVAS_WIDTH = 1792
 DEFAULT_CANVAS_HEIGHT = 1792
+MAX_GEOCODE_LOOKUPS_PER_PLAN = 24
+NOMINATIM_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 LOGO_HREF = "6renyou.png"
+TITLE_FONT_FAMILY = "PicGenRouteTitle"
+TITLE_FONT_RELATIVE_PATH = Path("fonts/zcool-xiaowei/ZCOOLXiaoWei-Regular.ttf")
 INSTRUCTION_STOP_PREFIXES = (
     "地点与地理校验",
     "地理校验",
@@ -43,6 +52,49 @@ INSTRUCTION_STOP_PHRASES = (
     "交通工具图标",
 )
 RGBColor = tuple[int, int, int]
+_LAST_NOMINATIM_REQUEST_AT = 0.0
+_NOMINATIM_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _candidate_static_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    env_static_dir = os.getenv("PICGEN_STATIC_DIR")
+    if env_static_dir:
+        candidates.append(Path(env_static_dir))
+    module_path = Path(__file__).resolve()
+    candidates.extend(
+        [
+            module_path.parents[2] / "static",
+            Path.cwd() / "static",
+            Path("/app/static"),
+        ]
+    )
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(resolved)
+    return deduped
+
+
+@lru_cache(maxsize=1)
+def _embedded_title_font_face_css() -> str:
+    for static_dir in _candidate_static_dirs():
+        font_path = static_dir / TITLE_FONT_RELATIVE_PATH
+        try:
+            font_bytes = font_path.read_bytes()
+        except OSError:
+            continue
+        encoded = base64.b64encode(font_bytes).decode("ascii")
+        return (
+            "/* ZCOOL XiaoWei, SIL Open Font License 1.1 */"
+            f"@font-face{{font-family:'{TITLE_FONT_FAMILY}';"
+            "src:url(data:font/ttf;base64,"
+            f"{encoded}) format('truetype');font-weight:400;font-style:normal;font-display:block}}"
+        )
+    return ""
 
 COUNTRY_LABEL_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("意大利", ("意大利", "italy", "italia")),
@@ -175,6 +227,40 @@ def _normalize_stops(stops: list[dict[str, Any]]) -> list[dict[str, Any]]:
 GeocodeFn = Callable[[str], Awaitable[list[dict[str, object]]]]
 
 
+def _geocode_cache_key(stop: dict[str, Any]) -> str:
+    name = _clean_text(stop.get("name"), limit=120).casefold()
+    country = _clean_text(stop.get("country"), limit=48).casefold()
+    return f"{name}\n{country}"
+
+
+def _geocode_query(stop: dict[str, Any]) -> str:
+    name = _clean_text(stop.get("name"), limit=120)
+    country = _clean_text(stop.get("country"), limit=48)
+    if country and country.casefold() not in name.casefold():
+        return f"{name}, {country}"
+    return name
+
+
+def _nominatim_lock_for_current_loop() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    lock = _NOMINATIM_LOCKS.get(loop_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _NOMINATIM_LOCKS[loop_id] = lock
+    return lock
+
+
+async def _wait_for_nominatim_slot() -> None:
+    global _LAST_NOMINATIM_REQUEST_AT
+
+    now = time.monotonic()
+    delay = _LAST_NOMINATIM_REQUEST_AT + NOMINATIM_MIN_REQUEST_INTERVAL_SECONDS - now
+    if delay > 0:
+        await asyncio.sleep(delay)
+    _LAST_NOMINATIM_REQUEST_AT = time.monotonic()
+
+
 async def geocode_place_with_settings(name: str, settings: Settings) -> list[dict[str, object]]:
     try:
         provider = settings.map_provider
@@ -263,14 +349,16 @@ async def _geocode_mapbox(name: str, settings: Settings) -> list[dict[str, objec
 async def _geocode_nominatim(name: str, settings: Settings) -> list[dict[str, object]]:
     if not settings.nominatim_url:
         return []
-    async with httpx.AsyncClient(timeout=settings.map_geocode_timeout_seconds) as client:
-        response = await client.get(
-            settings.nominatim_url,
-            params={"q": name, "format": "jsonv2", "limit": 5, "accept-language": "zh-CN,zh,en"},
-            headers={"User-Agent": settings.upstream_user_agent},
-        )
-        response.raise_for_status()
-        payload = response.json()
+    async with _nominatim_lock_for_current_loop():
+        await _wait_for_nominatim_slot()
+        async with httpx.AsyncClient(timeout=settings.map_geocode_timeout_seconds) as client:
+            response = await client.get(
+                settings.nominatim_url,
+                params={"q": name, "format": "jsonv2", "limit": 5, "accept-language": "zh-CN,zh,en"},
+                headers={"User-Agent": settings.upstream_user_agent},
+            )
+            response.raise_for_status()
+            payload = response.json()
     if not isinstance(payload, list):
         return []
     results: list[dict[str, object]] = []
@@ -392,9 +480,21 @@ def apply_itinerary_coordinate_estimates(
             continue
         index = _safe_index(stop.get("index"), len(raw_stops))
         stop_name = str(stop.get("name") or "").casefold()
-        selected_estimate: dict[str, Any] | None = by_index.get(index) if index is not None else None
-        if selected_estimate is None and stop_name:
-            selected_estimate = by_name.get(stop_name)
+        name_estimate = by_name.get(stop_name) if stop_name else None
+        index_estimate = by_index.get(index) if index is not None else None
+        # Prefer a name match. Only fall back to the index match if it does NOT name a
+        # different place — otherwise a single mis-numbered AI estimate would silently
+        # pin this stop to another city's coordinates. A contradicting index match is
+        # dropped so the stop stays unresolved (the customer is told) rather than wrong.
+        selected_estimate = name_estimate or index_estimate
+        if (
+            selected_estimate is index_estimate
+            and index_estimate is not None
+            and stop_name
+        ):
+            estimate_name = str(index_estimate.get("name") or "").casefold()
+            if estimate_name and estimate_name != stop_name:
+                selected_estimate = None
         if selected_estimate is None:
             completed_stops.append({**stop})
             continue
@@ -433,26 +533,37 @@ async def build_itinerary_map_plan_async(
 ) -> dict[str, Any]:
     normalized_stops = _normalize_stops(stops)
     if geocode is not None:
+        geocode_cache: dict[str, list[dict[str, object]]] = {}
+        geocode_lookup_count = 0
         for stop in normalized_stops:
             if stop["status"] == "ok":
                 continue
-            candidates = await geocode(str(stop["name"]))
+            cache_key = _geocode_cache_key(stop)
+            candidates = geocode_cache.get(cache_key)
+            if candidates is None:
+                if geocode_lookup_count >= MAX_GEOCODE_LOOKUPS_PER_PLAN:
+                    stop["geocode_skipped"] = True
+                    continue
+                candidates = await geocode(_geocode_query(stop))
+                geocode_lookup_count += 1
+                geocode_cache[cache_key] = candidates
             valid_candidates: list[dict[str, object]] = []
             for candidate in candidates[:5]:
                 lat = _float_or_none(candidate.get("lat"))
                 lng = _float_or_none(candidate.get("lng"))
                 if not _valid_lat_lng(lat, lng):
                     continue
-                valid_candidates.append(
-                    {
-                        "name": _clean_text(candidate.get("name"), limit=120) or stop["name"],
-                        "lat": lat,
-                        "lng": lng,
-                        "confidence": _float_or_none(candidate.get("confidence")) or 0.0,
-                        "address": _clean_text(candidate.get("address"), limit=180),
-                        "country": _clean_text(candidate.get("country"), limit=48),
-                    }
-                )
+                cleaned_candidate = {
+                    "name": _clean_text(candidate.get("name"), limit=120) or stop["name"],
+                    "lat": lat,
+                    "lng": lng,
+                    "confidence": _float_or_none(candidate.get("confidence")) or 0.0,
+                    "address": _clean_text(candidate.get("address"), limit=180),
+                    "country": _clean_text(candidate.get("country"), limit=48),
+                }
+                if stop_has_restricted_destination(cleaned_candidate):
+                    continue
+                valid_candidates.append(cleaned_candidate)
             if len(valid_candidates) == 1:
                 candidate = valid_candidates[0]
                 stop["lat"] = candidate["lat"]
@@ -508,33 +619,47 @@ def _project_stops(
     height: int,
     reserve_right: float = 0.0,
 ) -> list[dict[str, Any]]:
-    projected = []
+    coords: list[tuple[float, float, dict[str, Any]]] = []
     for stop in stops:
         lat = stop.get("lat")
         lng = stop.get("lng")
         if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
             continue
-        x, y = _mercator(float(lat), float(lng))
-        projected.append({**stop, "_mx": x, "_my": y})
+        coords.append((float(lat), float(lng), stop))
 
-    if not projected:
+    if not coords:
         return []
+
+    # Unwrap longitudes for antimeridian-crossing routes (e.g. Tokyo↔Honolulu) so the
+    # route takes the short Pacific path instead of wrapping the wrong way around the map.
+    lngs = [lng for _, lng, _ in coords]
+    if max(lngs) - min(lngs) > 180.0:
+        coords = [(lat, lng + 360.0 if lng < 0 else lng, stop) for lat, lng, stop in coords]
+
+    projected = []
+    for lat, lng, stop in coords:
+        mx, my = _mercator(lat, lng)
+        projected.append({**stop, "_mx": mx, "_my": my})
 
     min_x = min(stop["_mx"] for stop in projected)
     max_x = max(stop["_mx"] for stop in projected)
     min_y = min(stop["_my"] for stop in projected)
     max_y = max(stop["_my"] for stop in projected)
-    span_x = max(max_x - min_x, 0.0001)
-    span_y = max(max_y - min_y, 0.0001)
+    real_span_x = max_x - min_x
+    real_span_y = max_y - min_y
 
     margin_x = width * 0.16
     margin_top = height * 0.22
     margin_bottom = height * 0.17
     drawable_w = width - margin_x * 2 - reserve_right
     drawable_h = height - margin_top - margin_bottom
-    scale = min(drawable_w / span_x, drawable_h / span_y)
-    route_w = span_x * scale
-    route_h = span_y * scale
+    # Floor the span used for SCALING so a single-city / very-tight cluster doesn't zoom
+    # in to fill the whole poster; use the REAL span for route size so identical
+    # coordinates yield a zero-width route centered on the canvas (not the corner).
+    min_scale_span = 0.012
+    scale = min(drawable_w / max(real_span_x, min_scale_span), drawable_h / max(real_span_y, min_scale_span))
+    route_w = real_span_x * scale
+    route_h = real_span_y * scale
     offset_x = (width - reserve_right - route_w) / 2
     offset_y = margin_top + (drawable_h - route_h) / 2
 
@@ -639,10 +764,20 @@ def _country_label_from_coordinates(lat: float | None, lng: float | None) -> str
         return ""
     assert lat is not None
     assert lng is not None
+    # Bounding boxes overlap at borders, so first-match-wins mislabels border cities
+    # (Nice→Italy, Como→Switzerland). Among every box that contains the point, pick the
+    # one whose center is nearest — that resolves to the correct country.
+    best_label = ""
+    best_distance = float("inf")
     for label, min_lat, max_lat, min_lng, max_lng in COUNTRY_BOUNDING_BOXES:
         if min_lat <= lat <= max_lat and min_lng <= lng <= max_lng:
-            return label
-    return ""
+            center_lat = (min_lat + max_lat) / 2.0
+            center_lng = (min_lng + max_lng) / 2.0
+            distance = (lat - center_lat) ** 2 + (lng - center_lng) ** 2
+            if distance < best_distance:
+                best_distance = distance
+                best_label = label
+    return best_label
 
 
 def _is_composite_country_label(value: str) -> bool:
@@ -686,6 +821,8 @@ def _country_label_candidates(
     outward_y = vector_y / norm
     offset = max(70.0, min(width, height) * 0.078)
     return [
+        (x - outward_x * offset * 1.05, y - outward_y * offset * 1.05),
+        ((x + route_center[0]) / 2.0, (y + route_center[1]) / 2.0),
         (x + outward_x * offset * 1.25, y + outward_y * offset * 1.25),
         (x + outward_x * offset * 1.85, y + outward_y * offset * 1.85),
         (x - outward_y * offset * 0.85, y + outward_x * offset * 0.85),
@@ -734,7 +871,7 @@ def _country_label_nodes(
         centroid_x = sum(float(point["x"]) for point in label_points) / len(label_points)
         centroid_y = sum(float(point["y"]) for point in label_points) / len(label_points)
         font_size = 42.0 if len(label_points) >= 3 else 34.0
-        box_w = max(98.0, len(label) * font_size * 1.05)
+        box_w = _estimated_country_label_width(label, font_size)
         box_h = font_size * 1.25
         best: tuple[float, float, tuple[float, float, float, float]] | None = None
         best_score = float("inf")
@@ -745,12 +882,15 @@ def _country_label_nodes(
             height=height,
             route_center=route_center,
         ):
-            x = min(max(candidate_x, box_w / 2 + 52.0), width - box_w / 2 - 52.0)
+            side_margin = max(92.0, width * 0.105)
+            x = min(max(candidate_x, box_w / 2 + side_margin), width - box_w / 2 - side_margin)
             y = min(max(candidate_y, height * 0.22), height - 86.0)
             box = (x - box_w / 2, y - box_h, x + box_w / 2, y + box_h * 0.24)
             overlap = sum(_overlap_area(box, existing) for existing in occupied)
             distance = math.hypot(x - centroid_x, y - centroid_y)
-            score = overlap * 18.0 + distance
+            edge_clearance = min(box[0], width - box[2], box[1], height - box[3])
+            edge_penalty = max(0.0, 92.0 - edge_clearance) * 8.0
+            score = overlap * 18.0 + distance + edge_penalty
             if score < best_score:
                 best_score = score
                 best = (x, y, box)
@@ -763,6 +903,13 @@ def _country_label_nodes(
             f'class="country-label{" small" if font_size < 40 else ""}">{_svg_text(label)}</text>'
         )
     return nodes
+
+
+def _estimated_country_label_width(label: str, font_size: float) -> float:
+    width = 0.0
+    for char in label:
+        width += font_size * (1.22 if "\u4e00" <= char <= "\u9fff" else 0.68)
+    return max(118.0, width + font_size * 1.1)
 
 
 def _route_path(points: list[dict[str, Any]]) -> str:
@@ -1208,7 +1355,7 @@ def _dense_index_labels(points: list[dict[str, Any]], *, width: int, height: int
             f'<g class="map-index-badge" transform="translate({cx:.1f} {cy:.1f})">'
             f"{leader}"
             '<circle cx="0" cy="0" r="15" fill="#fff7c7" opacity="0.96"/>'
-            '<circle cx="0" cy="0" r="13" fill="none" stroke="#a85f4b" stroke-width="2"/>'
+            '<circle cx="0" cy="0" r="13" fill="none" stroke="#7f5f45" stroke-width="1.35"/>'
             f'<text x="0" y="6" text-anchor="middle" class="map-index">{index + 1}</text>'
             "</g>"
         )
@@ -1317,12 +1464,26 @@ def _box_anchor(point: dict[str, Any], box: tuple[float, float, float, float]) -
     return anchor_x, anchor_y
 
 
+def _callout_scroll_path(x: float, y: float, w: float, h: float) -> str:
+    notch = min(18.0, h * 0.34)
+    return (
+        f"M {x + notch:.1f} {y:.1f} "
+        f"C {x + 7:.1f} {y + 2:.1f} {x + 2:.1f} {y + 10:.1f} {x:.1f} {y + h / 2:.1f} "
+        f"C {x + 2:.1f} {y + h - 10:.1f} {x + 8:.1f} {y + h - 2:.1f} {x + notch:.1f} {y + h:.1f} "
+        f"L {x + w - notch:.1f} {y + h:.1f} "
+        f"C {x + w - 8:.1f} {y + h - 2:.1f} {x + w - 2:.1f} {y + h - 10:.1f} "
+        f"{x + w:.1f} {y + h / 2:.1f} "
+        f"C {x + w - 2:.1f} {y + 10:.1f} {x + w - 7:.1f} {y + 2:.1f} {x + w - notch:.1f} {y:.1f} "
+        "Z"
+    )
+
+
 def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, has_logo: bool) -> list[str]:
     dense_layout = len(points) > 12
-    min_label_w = 194.0 if dense_layout else 160.0
-    max_label_w = 258.0 if dense_layout else 230.0
+    min_label_w = 186.0 if dense_layout else 154.0
+    max_label_w = 242.0 if dense_layout else 216.0
     label_w = max(min_label_w, min(max_label_w, width * (0.18 if dense_layout else 0.13)))
-    label_h = 58.0 if dense_layout and height >= 1200 else (60.0 if height >= 1200 else 54.0)
+    label_h = 50.0 if dense_layout and height >= 1200 else (54.0 if height >= 1200 else 50.0)
     route_center = (
         sum(float(point["x"]) for point in points) / max(1, len(points)),
         sum(float(point["y"]) for point in points) / max(1, len(points)),
@@ -1368,14 +1529,15 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
         name = _svg_text(_short_text(point.get("name"), limit=12 if dense_layout else 10))
         transport = _svg_text(_short_text(point.get("transport"), limit=8))
         caption = f"{date}  {name}" if date else name
-        transport_y = label_y + (47.0 if label_h <= 56 else 50.0)
+        scroll_path = _callout_scroll_path(label_x, label_y, label_w, label_h)
+        transport_y = label_y + (43.0 if label_h <= 52 else 46.0)
         caption_fit = (
-            f' textLength="{label_w - 52.0:.1f}" lengthAdjust="spacingAndGlyphs"'
+            f' textLength="{label_w - 54.0:.1f}" lengthAdjust="spacingAndGlyphs"'
             if len(caption) > (12 if dense_layout else 10)
             else ""
         )
         transport_node = (
-            f'<text x="{label_x + 42:.1f}" y="{transport_y:.1f}" class="callout-transport">{transport}</text>'
+            f'<text x="{label_x + 39:.1f}" y="{transport_y:.1f}" class="callout-transport">{transport}</text>'
             if transport
             else ""
         )
@@ -1385,12 +1547,11 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
             f"C {(float(point['x']) + anchor_x) / 2:.1f} {float(point['y']):.1f} "
             f'{anchor_x:.1f} {(float(point["y"]) + anchor_y) / 2:.1f} {anchor_x:.1f} {anchor_y:.1f}" '
             'class="callout-leader"/>'
-            f'<rect x="{label_x:.1f}" y="{label_y:.1f}" width="{label_w:.1f}" height="{label_h:.1f}" '
-            'rx="17" class="callout-card"/>'
-            f'<circle cx="{label_x + 24:.1f}" cy="{label_y + 28:.1f}" r="15" class="callout-chip"/>'
-            f'<text x="{label_x + 24:.1f}" y="{label_y + 34:.1f}" text-anchor="middle" '
+            f'<path d="{scroll_path}" class="callout-scroll"/>'
+            f'<circle cx="{label_x + 21:.1f}" cy="{label_y + label_h / 2:.1f}" r="12" class="callout-chip"/>'
+            f'<text x="{label_x + 21:.1f}" y="{label_y + label_h / 2 + 5.0:.1f}" text-anchor="middle" '
             f'class="callout-index">{index + 1}</text>'
-            f'<text x="{label_x + 42:.1f}" y="{label_y + 27:.1f}" '
+            f'<text x="{label_x + 39:.1f}" y="{label_y + 25:.1f}" '
             f'class="callout-main"{caption_fit}>{caption}</text>'
             f"{transport_node}"
             "</g>"
@@ -1562,9 +1723,9 @@ def render_itinerary_map_svg(
         x = float(point["x"])
         y = float(point["y"])
         stop_nodes.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="14" class="route-dot-halo"/>'
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="10" class="route-dot"/>'
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" class="route-dot-core"/>'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="9.2" class="route-dot-halo"/>'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6.1" class="route-dot"/>'
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.4" class="route-dot-core"/>'
         )
         route_point_nodes.append(
             f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" class="route-dot-index">{index + 1}</text>'
@@ -1593,6 +1754,7 @@ def render_itinerary_map_svg(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img">'
     )
+    title_font_face_css = _embedded_title_font_face_css() if safe_background_url else ""
     return "\n".join(
         [
             svg_open[:-1] + f' data-density="{"dense" if dense_layout else "normal"}">',
@@ -1626,44 +1788,52 @@ def render_itinerary_map_svg(
             '<filter id="paperShadow" x="-18%" y="-18%" width="136%" height="136%">',
             '<feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#5d3a16" flood-opacity="0.12"/>',
             "</filter>",
+            '<filter id="titleBrushRough" x="-8%" y="-35%" width="116%" height="175%">',
+            '<feTurbulence type="fractalNoise" baseFrequency="0.012 0.055" numOctaves="2" seed="17" result="noise"/>',
+            '<feDisplacementMap in="SourceGraphic" in2="noise" scale="1.05" '
+            'xChannelSelector="R" yChannelSelector="G"/>',
+            "</filter>",
             "<style>",
-            ".title,.title-shadow,.title-outline,.title-highlight,.subtitle,.subtitle-outline{"
-            "font-family:'Noto Serif CJK SC','Source Han Serif SC','Songti SC','STSong','SimSun',serif;"
+            title_font_face_css,
+            ".title,.title-shadow,.title-brush,.title-gold-edge,.subtitle,.subtitle-glow{"
+            f"font-family:'{TITLE_FONT_FAMILY}','ZCOOL XiaoWei','Noto Serif CJK SC',"
+            "'Source Han Serif SC','Songti SC',serif;"
             "letter-spacing:0}",
-            ".title-shadow{font-size:76px;font-weight:900;fill:#4b2d16;opacity:.22;filter:url(#titleCast)}",
-            ".title-outline{font-size:76px;font-weight:900;fill:none;stroke:#fff0ce;stroke-width:12.5;"
-            "stroke-linejoin:round;paint-order:stroke}",
-            ".title-highlight{font-size:76px;font-weight:900;fill:none;stroke:url(#titleGold);stroke-width:3.2;"
-            "stroke-linejoin:round;opacity:.96}",
-            ".title{font-size:76px;font-weight:900;fill:url(#titleInk);paint-order:stroke;stroke:#2b190d;"
-            "stroke-width:.8;stroke-linejoin:round}",
-            ".subtitle-outline{font-size:34px;font-weight:800;fill:none;stroke:#fff0ce;stroke-width:7;"
-            "stroke-linejoin:round}",
-            ".subtitle{font-size:34px;font-weight:800;fill:#71451f;paint-order:stroke;stroke:#fff6df;"
-            "stroke-width:1.5;stroke-linejoin:round}",
-            ".title-ornament{fill:none;stroke:#9b6b35;stroke-width:2.2;stroke-linecap:round;opacity:.56}",
+            ".title-shadow{font-size:80px;font-weight:900;fill:#4b2d16;opacity:.18;filter:url(#titleCast)}",
+            ".title-wash{fill:#f0d49a;fill-opacity:.34;stroke:#b9823f;stroke-width:1.1;opacity:.62}",
+            ".title-brush{font-size:80px;font-weight:900;fill:none;stroke:#fff4d7;stroke-width:8.5;"
+            "stroke-linejoin:round;stroke-linecap:round;paint-order:stroke;opacity:.92;filter:url(#titleBrushRough)}",
+            ".title-gold-edge{font-size:80px;font-weight:900;fill:none;stroke:url(#titleGold);stroke-width:2.4;"
+            "stroke-linejoin:round;stroke-linecap:round;opacity:.82;filter:url(#titleBrushRough)}",
+            ".title{font-size:80px;font-weight:900;fill:url(#titleInk);paint-order:stroke;stroke:#2a1609;"
+            "stroke-width:.55;stroke-linejoin:round;filter:url(#titleBrushRough)}",
+            ".subtitle-glow{font-size:32px;font-weight:700;fill:none;stroke:#fff2d7;stroke-width:5;"
+            "stroke-linejoin:round;opacity:.88}",
+            ".subtitle{font-size:32px;font-weight:700;fill:#7a4c22;paint-order:stroke;stroke:#fff8e6;"
+            "stroke-width:.9;stroke-linejoin:round}",
+            ".title-ornament{fill:none;stroke:#9b6b35;stroke-width:1.7;stroke-linecap:round;opacity:.44}",
             ".country-label{font:760 46px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#735b3e;"
             "opacity:.54;letter-spacing:0;paint-order:stroke;stroke:#fff7df;stroke-width:7px;stroke-linejoin:round;"
             "stroke-opacity:.72}",
             ".country-label.small{font-size:36px;opacity:.50}",
             ".route-dot-index{font:800 10px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#ffffff}",
-            ".map-index{font:800 15px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#a85f4b}",
-            ".map-index-leader{stroke:#a85f4b;stroke-width:1.8;stroke-linecap:round;opacity:.38}",
-            ".callout-card{fill:#fffaf0;stroke:#dec89b;stroke-width:1.6;opacity:.92}",
-            ".callout-leader{fill:none;stroke:#7f6342;stroke-width:1.9;stroke-linecap:round;opacity:.48}",
-            ".callout-chip{fill:#a85f4b;stroke:#fff7e7;stroke-width:3.5}",
+            ".map-index{font:800 15px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#7f5f45}",
+            ".map-index-leader{stroke:#7f5f45;stroke-width:1.05;stroke-linecap:round;opacity:.26}",
+            ".callout-scroll{fill:#fff4df;fill-opacity:.60;stroke:#b99662;stroke-width:.85;opacity:.92}",
+            ".callout-leader{fill:none;stroke:#735a42;stroke-width:.9;stroke-linecap:round;opacity:.24}",
+            ".callout-chip{fill:#7f5f45;stroke:#fff7e7;stroke-width:2.2}",
             ".callout-index{font:800 14px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#fff8e8}",
-            ".callout-main{font:700 20px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
-            "fill:#2b2218;letter-spacing:0}",
-            ".callout-transport{font:650 15px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
-            "fill:#7b4d25;letter-spacing:0}",
-            ".route-dot-halo{fill:#fff8e4;stroke:#ffffff;stroke-width:5}",
-            ".route-dot{fill:#a85f4b;stroke:#fff7e4;stroke-width:3.5}",
+            ".callout-main{font:680 18px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
+            "fill:#2d251b;letter-spacing:0}",
+            ".callout-transport{font:620 13px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;"
+            "fill:#735033;letter-spacing:0}",
+            ".route-dot-halo{fill:#fff3d5;stroke:#ffffff;stroke-width:2.8;opacity:.88}",
+            ".route-dot{fill:#7f5f45;stroke:#fff3d5;stroke-width:2.1}",
             ".route-dot-core{fill:#ffffff;opacity:.96}",
-            ".route-casing{fill:none;stroke:#fff6df;stroke-width:16.5;stroke-linecap:round;stroke-linejoin:round}",
-            ".route-line{fill:none;stroke:#a85f4b;stroke-width:7.4;stroke-linecap:round;stroke-linejoin:round}",
-            ".route-casing.transfer{stroke-width:14.5;opacity:.90}",
-            ".route-line.transfer{stroke-width:6.2;opacity:.78}",
+            ".route-casing{fill:none;stroke:#fff4dc;stroke-width:7.8;stroke-linecap:round;stroke-linejoin:round;opacity:.72}",
+            ".route-line{fill:none;stroke:#7f5f45;stroke-width:3.8;stroke-linecap:round;stroke-linejoin:round}",
+            ".route-casing.transfer{stroke-width:6.8;opacity:.66}",
+            ".route-line.transfer{stroke-width:3.2;opacity:.62}",
             ".doodle-line{fill:none;stroke:#5f4020;stroke-width:5;stroke-linecap:round;stroke-linejoin:round;opacity:.76}",
             ".doodle-fill{fill:#e4b45b;stroke:#5f4020;stroke-width:4;stroke-linejoin:round;opacity:.62}",
             ".doodle-fill.alt{fill:#d8c978}",
@@ -1677,11 +1847,17 @@ def render_itinerary_map_svg(
             *doodle_nodes,
             logo_group,
             '<g data-layer="program-title" text-anchor="middle">',
+            f'<path d="M {width / 2 - 330:.0f} 88 C {width / 2 - 228:.0f} 66 '
+            f'{width / 2 - 122:.0f} 76 {width / 2 - 18:.0f} 76 C '
+            f'{width / 2 + 98:.0f} 77 {width / 2 + 216:.0f} 66 {width / 2 + 330:.0f} 90 '
+            f'C {width / 2 + 206:.0f} 112 {width / 2 + 118:.0f} 105 {width / 2 + 4:.0f} 112 '
+            f'C {width / 2 - 106:.0f} 118 {width / 2 - 222:.0f} 113 {width / 2 - 330:.0f} 88 Z" '
+            'class="title-wash"/>',
             f'<text x="{width / 2 + 2:.0f}" y="122" class="title-shadow">{title}</text>',
-            f'<text x="{width / 2:.0f}" y="118" class="title-outline">{title}</text>',
-            f'<text x="{width / 2:.0f}" y="118" class="title-highlight">{title}</text>',
+            f'<text x="{width / 2:.0f}" y="118" class="title-brush">{title}</text>',
+            f'<text x="{width / 2:.0f}" y="118" class="title-gold-edge">{title}</text>',
             f'<text x="{width / 2:.0f}" y="118" class="title">{title}</text>',
-            f'<text x="{width / 2:.0f}" y="166" class="subtitle-outline">{subtitle}</text>',
+            f'<text x="{width / 2:.0f}" y="166" class="subtitle-glow">{subtitle}</text>',
             f'<text x="{width / 2:.0f}" y="166" class="subtitle">{subtitle}</text>',
             f'<path d="M {width / 2 - 172:.0f} 181 C {width / 2 - 112:.0f} 171 '
             f'{width / 2 - 66:.0f} 171 {width / 2 - 24:.0f} 181" class="title-ornament"/>',
@@ -1720,8 +1896,8 @@ def save_itinerary_map_svg(
     height: int = DEFAULT_CANVAS_HEIGHT,
 ) -> dict[str, object]:
     now = datetime.now()
-    day_dir = outputs_dir / now.strftime("%Y%m%d")
     safe_prefix = sanitize_filename_prefix(filename_prefix)
+    day_dir = output_group_dir(outputs_dir, now, safe_prefix)
     base_stem = f"itinerary-map-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
     stem = f"{safe_prefix}-{base_stem}" if safe_prefix else base_stem
     image_path = day_dir / f"{stem}.svg"

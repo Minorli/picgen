@@ -195,11 +195,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return api_error_response(exc)
         should_alert = _should_alert_api_error(exc)
         alert_enabled = error_alert_notifications_enabled(resolved_settings)
+        request_id = _request_id_from_scope(request)
         response = api_error_response_with(
             status=exc.status,
             message=_public_operational_error_message(exc, alert_enabled=alert_enabled and should_alert),
             details=_public_operational_error_details(exc),
             code=exc.code,
+            request_id=request_id,
         )
         if alert_enabled and should_alert:
             response.background = BackgroundTask(
@@ -212,12 +214,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     public_message=_public_operational_error_message(exc, alert_enabled=True),
                     technical_message=exc.message,
                     details=exc.details,
+                    request_id=request_id,
                 ),
             )
         return response
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> Any:
+        request_id = _request_id_from_scope(request)
         log_event(
             logger,
             logging.ERROR,
@@ -225,6 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             method=request.method,
             path=request.url.path,
             error=type(exc).__name__,
+            request_id=request_id,
         )
         alert_enabled = error_alert_notifications_enabled(resolved_settings)
         public_message = (
@@ -238,6 +243,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             message=public_message,
             details=details,
             code="internal_error",
+            request_id=request_id,
         )
         if alert_enabled:
             response.background = BackgroundTask(
@@ -250,6 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     public_message=public_message,
                     technical_message=f"{type(exc).__name__}: {exc}",
                     details=details,
+                    request_id=request_id,
                 ),
             )
         return response
@@ -315,13 +322,15 @@ def _base_operational_message(exc: APIError) -> str:
 
 
 def _is_content_policy_error(exc: APIError) -> bool:
+    if exc.code == "upstream_content_policy":
+        return True
+    if exc.code.startswith("upstream_"):
+        return False
     haystack = f"{exc.message}\n{exc.details or ''}".lower()
     return any(
         needle in haystack
         for needle in (
             "content policy",
-            "safety",
-            "moderation",
             "not allowed",
             "disallowed",
             "policy violation",
@@ -344,9 +353,10 @@ def _build_error_alert(
     public_message: str,
     technical_message: str,
     details: str | None,
+    request_id: str | None = None,
 ) -> ErrorAlert:
     return ErrorAlert(
-        request_id=get_request_id(),
+        request_id=request_id or get_request_id(),
         method=request.method,
         path=request.url.path,
         status=status,
@@ -369,3 +379,8 @@ async def _send_error_alert(*, settings: Settings, alert: ErrorAlert) -> None:
             error=redact_sensitive_text(result.error, limit=300),
             request_id=alert.request_id,
         )
+
+
+def _request_id_from_scope(request: Request) -> str:
+    request_id = str(request.scope.get("picgen_request_id") or "").strip()
+    return request_id or get_request_id()

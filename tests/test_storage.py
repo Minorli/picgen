@@ -134,6 +134,59 @@ async def test_itinerary_map_plan_marks_ambiguous_geocoding_for_confirmation() -
     assert len(plan["stops"][0]["candidates"]) == 2
 
 
+@pytest.mark.asyncio
+async def test_itinerary_map_plan_reuses_geocode_results_for_duplicate_stops() -> None:
+    from picgen.itinerary_map import build_itinerary_map_plan_async
+
+    calls: list[str] = []
+
+    async def geocode(name: str) -> list[dict[str, object]]:
+        calls.append(name)
+        return [{"name": name, "lat": 48.8566, "lng": 2.3522, "confidence": 0.96}]
+
+    plan = await build_itinerary_map_plan_async(
+        title="欧洲旅行路线图",
+        subtitle="D1 - D3",
+        stops=[
+            {"date": "D1", "name": "巴黎"},
+            {"date": "D2", "name": "巴黎"},
+            {"date": "D3", "name": "罗马", "lat": 41.9028, "lng": 12.4964},
+        ],
+        geocode=geocode,
+    )
+
+    assert calls == ["巴黎"]
+    assert plan["status"] == "ready"
+    assert plan["stops"][0]["status"] == "ok"
+    assert plan["stops"][1]["status"] == "ok"
+    assert plan["stops"][0]["lat"] == plan["stops"][1]["lat"]
+
+
+@pytest.mark.asyncio
+async def test_itinerary_map_plan_caps_external_geocode_lookups() -> None:
+    from picgen.itinerary_map import MAX_GEOCODE_LOOKUPS_PER_PLAN, build_itinerary_map_plan_async
+
+    calls: list[str] = []
+
+    async def geocode(name: str) -> list[dict[str, object]]:
+        calls.append(name)
+        index = len(calls)
+        return [{"name": name, "lat": float(index), "lng": float(index), "confidence": 0.9}]
+
+    stops = [{"date": f"D{index}", "name": f"城市 {index}"} for index in range(1, MAX_GEOCODE_LOOKUPS_PER_PLAN + 4)]
+    plan = await build_itinerary_map_plan_async(
+        title="全球旅行路线图",
+        subtitle="D1 - D27",
+        stops=stops,
+        geocode=geocode,
+    )
+
+    assert len(calls) == MAX_GEOCODE_LOOKUPS_PER_PLAN
+    assert plan["stops"][MAX_GEOCODE_LOOKUPS_PER_PLAN - 1]["status"] == "ok"
+    assert plan["stops"][MAX_GEOCODE_LOOKUPS_PER_PLAN]["status"] == "needs_coordinates"
+    assert plan["stops"][MAX_GEOCODE_LOOKUPS_PER_PLAN]["geocode_skipped"] is True
+
+
 def test_itinerary_map_plan_applies_valid_approximate_coordinates_only() -> None:
     from picgen.itinerary_map import apply_itinerary_coordinate_estimates, build_itinerary_map_plan
 
@@ -329,6 +382,9 @@ def test_save_output_image_can_prefix_filename_with_user(tmp_path: Path) -> None
     )
 
     assert Path(payload["saved_image_path"]).name.startswith("wilson-wei-reference-")
+    saved_image = Path(payload["saved_image_path"])
+    assert saved_image.parent.name == "wilson-wei"
+    assert saved_image.parent.parent.name == datetime.now().strftime("%Y%m%d")
 
 
 def test_prune_old_outputs_removes_old_folders(tmp_path: Path) -> None:

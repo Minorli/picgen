@@ -48,6 +48,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
         incoming = request.headers.get(self.header_name, "").strip()
         request_id = incoming if 8 <= len(incoming) <= 64 else uuid.uuid4().hex[:12]
+        request.scope["picgen_request_id"] = request_id
         token = set_request_id(request_id)
         started_at = time.perf_counter()
         try:
@@ -330,16 +331,18 @@ def api_error_response_with(
     message: str,
     details: str | None,
     code: str,
+    request_id: str | None = None,
 ) -> JSONResponse:
     from .logging_config import get_request_id
 
+    resolved_request_id = request_id or get_request_id()
     return JSONResponse(
         status_code=status,
         content={
             "error": redact_sensitive_text(message, limit=1000),
             "details": redact_sensitive_text(details, limit=4000) or None,
             "code": code,
-            "request_id": get_request_id(),
+            "request_id": resolved_request_id,
         },
-        headers={"X-Request-ID": get_request_id()},
+        headers={"X-Request-ID": resolved_request_id},
     )

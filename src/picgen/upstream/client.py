@@ -7,7 +7,7 @@ import logging
 import random
 import time
 from http import HTTPStatus
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 import anyio
 import httpx
@@ -70,7 +70,11 @@ class UpstreamClient(Protocol):
 
 
 class HttpxAsyncClient:
-    """Async upstream client with connection pooling and exponential-backoff retries."""
+    """Async upstream client with connection pooling.
+
+    Non-idempotent image generation/edit POSTs are sent once to avoid duplicate
+    generations and double billing. Only idempotent image downloads retry.
+    """
 
     def __init__(
         self,
@@ -274,62 +278,45 @@ class HttpxAsyncClient:
         )
 
         started_at = time.perf_counter()
-        last_exc: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                async with self._client.stream(
-                    "POST", url, content=body_bytes, headers=headers
-                ) as response:
-                    if response.status_code >= 400:
-                        body_text = (await response.aread()).decode("utf-8", errors="replace")
-                        self._raise_for_status(
-                            response.status_code,
-                            body_text,
-                            url=url,
-                            started_at=started_at,
-                            event_prefix="upstream_responses",
-                            attempt=attempt,
-                        )
-                    content_type = response.headers.get("content-type", "")
+        try:
+            async with self._client.stream("POST", url, content=body_bytes, headers=headers) as response:
+                if response.status_code >= 400:
                     body_text = (await response.aread()).decode("utf-8", errors="replace")
-                    if "text/event-stream" in content_type or body_text.lstrip().startswith(
-                        ("event:", "data:")
-                    ):
-                        return stream_events_to_image_payload(
-                            parse_sse_json_events(body_text),
-                            url=url,
-                            started_at=started_at,
-                        )
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "upstream_responses_ok",
+                    self._raise_for_status(
+                        response.status_code,
+                        body_text,
                         url=url,
-                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-                        body_chars=len(body_text),
+                        started_at=started_at,
+                        event_prefix="upstream_responses",
+                        attempt=0,
                     )
-                    parsed = ensure_json_object(
-                        self._parse_json(body_text, "Responses 图像接口"),
-                        "Responses 图像接口",
+                content_type = response.headers.get("content-type", "")
+                body_text = (await response.aread()).decode("utf-8", errors="replace")
+                if "text/event-stream" in content_type or body_text.lstrip().startswith(("event:", "data:")):
+                    return stream_events_to_image_payload(
+                        parse_sse_json_events(body_text),
+                        url=url,
+                        started_at=started_at,
                     )
-                    if payload.get("tools"):
-                        return normalize_responses_image_payload(parsed)
-                    return parsed
-            except APIError as exc:
-                if attempt < self.max_retries and exc.status in _RETRY_STATUS:
-                    await self._sleep_for_retry(attempt, url=url, status=exc.status)
-                    continue
-                raise
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_exc = exc
-                if attempt < self.max_retries:
-                    await self._sleep_for_retry(attempt, url=url, reason=str(exc))
-                    continue
-                self._raise_network(exc, url=url, started_at=started_at, action="Responses 图像接口")
-
-        assert last_exc is not None  # for type-checker; loop guarantees this
-        self._raise_network(last_exc, url=url, started_at=started_at, action="Responses 图像接口")
-        raise RuntimeError("unreachable")  # pragma: no cover
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "upstream_responses_ok",
+                    url=url,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    body_chars=len(body_text),
+                )
+                parsed = ensure_json_object(
+                    self._parse_json(body_text, "Responses 图像接口"),
+                    "Responses 图像接口",
+                )
+                if payload.get("tools"):
+                    return normalize_responses_image_payload(parsed)
+                return parsed
+        except APIError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._raise_network(exc, url=url, started_at=started_at, action="Responses 图像接口")
 
     async def fetch_image(self, url: str, user_agent: str) -> tuple[bytes, str]:
         headers = upstream_headers(user_agent, {"Accept": "image/*"})
@@ -430,62 +417,39 @@ class HttpxAsyncClient:
         action: str,
     ) -> httpx.Response:
         started_at = time.perf_counter()
-        last_exc: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = await self._client.request(
-                    method, url, content=content, headers=headers
-                )
-            except httpx.TimeoutException as exc:
-                last_exc = exc
-                if attempt < self.max_retries:
-                    await self._sleep_for_retry(attempt, url=url, reason="timeout")
-                    continue
-                self._raise_network(exc, url=url, started_at=started_at, action=action)
-            except httpx.NetworkError as exc:
-                last_exc = exc
-                if self._is_broken_pipe(exc):
-                    raise APIError(
-                        HTTPStatus.BAD_GATEWAY,
-                        f"{action}在接收数据时断开连接",
-                        code="upstream_error",
-                    ) from exc
-                if attempt < self.max_retries:
-                    await self._sleep_for_retry(attempt, url=url, reason=str(exc))
-                    continue
-                self._raise_network(exc, url=url, started_at=started_at, action=action)
+        try:
+            response = await self._client.request(method, url, content=content, headers=headers)
+        except httpx.TimeoutException as exc:
+            self._raise_network(exc, url=url, started_at=started_at, action=action)
+        except httpx.NetworkError as exc:
+            if self._is_broken_pipe(exc):
+                raise APIError(
+                    HTTPStatus.BAD_GATEWAY,
+                    f"{action}在接收数据时断开连接",
+                    code="upstream_error",
+                ) from exc
+            self._raise_network(exc, url=url, started_at=started_at, action=action)
 
-            if response.status_code >= 400:
-                body_text = response.text
-                try:
-                    self._raise_for_status(
-                        response.status_code,
-                        body_text,
-                        url=url,
-                        started_at=started_at,
-                        event_prefix=event_prefix,
-                        attempt=attempt,
-                    )
-                except APIError as exc:
-                    if attempt < self.max_retries and exc.status in _RETRY_STATUS:
-                        await self._sleep_for_retry(attempt, url=url, status=exc.status)
-                        continue
-                    raise
-
-            log_event(
-                logger,
-                logging.INFO,
-                f"{event_prefix}_ok",
+        if response.status_code >= 400:
+            self._raise_for_status(
+                response.status_code,
+                response.text,
                 url=url,
-                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-                body_chars=len(response.text) if hasattr(response, "text") else None,
-                attempts=attempt + 1,
+                started_at=started_at,
+                event_prefix=event_prefix,
+                attempt=0,
             )
-            return response
 
-        assert last_exc is not None
-        self._raise_network(last_exc, url=url, started_at=started_at, action=action)
-        raise RuntimeError("unreachable")  # pragma: no cover
+        log_event(
+            logger,
+            logging.INFO,
+            f"{event_prefix}_ok",
+            url=url,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            body_chars=len(response.text) if hasattr(response, "text") else None,
+            attempts=1,
+        )
+        return response
 
     @staticmethod
     def _is_broken_pipe(exc: BaseException) -> bool:
@@ -536,10 +500,11 @@ class HttpxAsyncClient:
         code = classify_upstream_error(status, upstream_message, upstream_details)
         public_message = public_upstream_error_message(status, code, _action_from_event_prefix(event_prefix))
         attempts = attempt + 1
-        if status in _RETRY_STATUS and attempts >= self.max_retries + 1:
+        retryable_context = event_prefix == "upstream_image"
+        if retryable_context and status in _RETRY_STATUS and attempts >= self.max_retries + 1:
             public_message = f"{public_message} 已自动尝试 {attempts} 次，仍未成功。"
         detail_lines = [f"上游状态码：{status}", f"上游错误：{upstream_message}"]
-        if status in _RETRY_STATUS and attempts >= self.max_retries + 1:
+        if retryable_context and status in _RETRY_STATUS and attempts >= self.max_retries + 1:
             detail_lines.append(f"上游连续返回 {status}，已自动尝试 {attempts} 次后停止。")
         if upstream_details:
             detail_lines.extend(["", upstream_details])
@@ -552,7 +517,7 @@ class HttpxAsyncClient:
         url: str,
         started_at: float,
         action: str,
-    ) -> None:
+    ) -> NoReturn:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
         if isinstance(exc, httpx.TimeoutException):
             log_event(

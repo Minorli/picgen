@@ -17,9 +17,10 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
+_PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
 TEAM_CHAT_BOT_ID = "gpt-bot"
 TEAM_CHAT_BOT_NAME = "GPT-BOT"
 DEFAULT_COMPANY = "6renyou"
@@ -303,6 +304,9 @@ class AuthStore:
                         saved_image_bytes INTEGER NOT NULL DEFAULT 0,
                         logo_requested INTEGER NOT NULL DEFAULT 0,
                         logo_overlay_applied INTEGER NOT NULL DEFAULT 0,
+                        source_generated_image_id INTEGER,
+                        asset_kind TEXT NOT NULL DEFAULT 'result',
+                        version_note TEXT NOT NULL DEFAULT '',
                         first_served_at TEXT,
                         last_served_at TEXT,
                         served_count INTEGER NOT NULL DEFAULT 0,
@@ -315,7 +319,6 @@ class AuthStore:
                     CREATE INDEX IF NOT EXISTS idx_generated_images_user_id ON generated_images(user_id);
                     CREATE INDEX IF NOT EXISTS idx_generated_images_url ON generated_images(saved_image_url);
                     CREATE INDEX IF NOT EXISTS idx_generated_images_path ON generated_images(saved_image_path);
-
                     CREATE TABLE IF NOT EXISTS generated_image_metadata (
                         generated_image_id INTEGER PRIMARY KEY,
                         metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -588,7 +591,8 @@ class AuthStore:
             conn.execute(
                 """
                 UPDATE users
-                SET username = ?, password_hash = ?, role = 'admin', is_active = 1
+                SET username = ?, password_hash = ?, role = 'admin', is_active = 1,
+                    failed_login_count = 0, locked_until = NULL
                 WHERE id = ?
                 """,
                 (clean_username, hash_password(password), row["id"]),
@@ -613,8 +617,13 @@ class AuthStore:
             locked_until = _parse_datetime_text(row["locked_until"])
             if locked_until is not None and locked_until > now_dt:
                 raise AccountLockedError(username)
+            # A lock that has expired means the user "served their time"; start the
+            # failure count fresh so the next wrong password doesn't instantly re-lock
+            # (the stored count is still at the lock threshold). Without this, a user
+            # who forgot their password is throttled to one guess per lock window forever.
+            prior_failures = 0 if locked_until is not None else int(row["failed_login_count"] or 0)
             if not verify_password(password, str(row["password_hash"])):
-                failed_count = int(row["failed_login_count"] or 0) + 1
+                failed_count = prior_failures + 1
                 lock_until_text = ""
                 if failed_count >= _MAX_FAILED_LOGIN_ATTEMPTS:
                     lock_until_text = _datetime_text(now_dt + timedelta(minutes=_ACCOUNT_LOCK_MINUTES))
@@ -667,7 +676,7 @@ class AuthStore:
             email = str(user_row["email"] or "").strip() if user_row is not None else ""
             existing = conn.execute(
                 """
-                SELECT id
+                SELECT id, created_at, expires_at
                 FROM password_reset_requests
                 WHERE username_normalized = ? AND status = 'pending'
                 ORDER BY id DESC
@@ -677,6 +686,27 @@ class AuthStore:
             ).fetchone()
             if existing is not None:
                 request_id = int(existing["id"])
+                existing_created_at = _parse_datetime_text(existing["created_at"])
+                if (
+                    existing_created_at is not None
+                    and _now() - existing_created_at < timedelta(minutes=_PASSWORD_RESET_REQUEST_THROTTLE_MINUTES)
+                ):
+                    return {
+                        "id": request_id,
+                        "user_id": user_id,
+                        "username": display_username[:64],
+                        "username_normalized": normalized,
+                        "status": "pending",
+                        "matched_user": user_id is not None,
+                        "email": email[:160],
+                        "email_available": bool(user_id is not None and email),
+                        "reset_token": "",
+                        "expires_at": str(existing["expires_at"] or expires_at),
+                        "requested_ip": client_host.strip()[:128],
+                        "user_agent": user_agent.strip()[:512],
+                        "created_at": str(existing["created_at"] or now),
+                        "notification_suppressed": True,
+                    }
                 conn.execute(
                     """
                     UPDATE password_reset_requests
@@ -1329,6 +1359,14 @@ class AuthStore:
                 ),
             )
             for index, image in enumerate(images):
+                source_generated_image_id = _validated_source_generated_image_id(
+                    conn,
+                    source_id=(
+                        image.get("source_generated_image_id")
+                        or result.get("source_generated_image_id")
+                    ),
+                    user_id=job_user_id,
+                )
                 cursor = conn.execute(
                     """
                     INSERT INTO generated_images (
@@ -1349,9 +1387,12 @@ class AuthStore:
                         saved_image_bytes,
                         logo_requested,
                         logo_overlay_applied,
+                        source_generated_image_id,
+                        asset_kind,
+                        version_note,
                         created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job_id,
@@ -1371,6 +1412,9 @@ class AuthStore:
                         max(0, int(image.get("saved_image_bytes") or 0)),
                         1 if result.get("logo_requested") else 0,
                         1 if image.get("logo_overlay_applied") else 0,
+                        source_generated_image_id,
+                        str(image.get("asset_kind") or result.get("asset_kind") or "result")[:64],
+                        str(image.get("version_note") or result.get("version_note") or "")[:255],
                         now,
                     ),
                 )
@@ -1426,6 +1470,9 @@ class AuthStore:
                     saved_image_bytes,
                     logo_requested,
                     logo_overlay_applied,
+                    source_generated_image_id,
+                    asset_kind,
+                    version_note,
                     created_at
                 FROM generated_images
                 WHERE id = ? AND user_id = ?
@@ -1435,6 +1482,47 @@ class AuthStore:
         if row is None:
             return None
         return _generated_image_row_to_dict(row)
+
+    def resolve_generated_image_id_from_source(
+        self,
+        *,
+        user_id: int,
+        source_names: list[str],
+        source_urls: list[str],
+        source_paths: list[str],
+    ) -> int | None:
+        names = _clean_source_tokens(source_names, max_length=255)
+        urls = _clean_source_tokens(source_urls, max_length=1024)
+        paths = _clean_source_tokens(source_paths, max_length=1024)
+        clauses: list[str] = []
+        params: list[Any] = [user_id]
+        if names:
+            placeholders = ",".join("?" for _ in names)
+            clauses.append(f"saved_image_name IN ({placeholders})")
+            params.extend(names)
+        if urls:
+            placeholders = ",".join("?" for _ in urls)
+            clauses.append(f"saved_image_url IN ({placeholders})")
+            params.extend(urls)
+        if paths:
+            placeholders = ",".join("?" for _ in paths)
+            clauses.append(f"saved_image_path IN ({placeholders})")
+            params.extend(paths)
+        if not clauses:
+            return None
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT id
+                FROM generated_images
+                WHERE user_id = ?
+                  AND ({' OR '.join(clauses)})
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        return int(row["id"]) if row is not None else None
 
     def generated_image_detail_for_user(self, *, generated_image_id: int, user_id: int) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
@@ -1459,6 +1547,9 @@ class AuthStore:
                     gi.saved_image_bytes,
                     gi.logo_requested,
                     gi.logo_overlay_applied,
+                    gi.source_generated_image_id,
+                    gi.asset_kind,
+                    gi.version_note,
                     gi.created_at,
                     j.request_id,
                     j.endpoint_path,
@@ -1507,7 +1598,79 @@ class AuthStore:
             "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
         }
         item["metadata"] = metadata
+        _attach_original_source_fields(item, metadata)
         return item
+
+    def list_generated_image_versions_for_user(
+        self,
+        *,
+        generated_image_id: int,
+        user_id: int,
+        limit: int = 200,
+    ) -> list[dict[str, Any]] | None:
+        bounded_limit = max(1, min(int(limit or 200), 500))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    gi.*,
+                    j.request_id,
+                    j.endpoint_path,
+                    j.transport,
+                    j.prompt AS effective_prompt,
+                    j.original_prompt,
+                    j.prompt_mode,
+                    j.recipe_id,
+                    j.recipe_version,
+                    j.status,
+                    j.sample_count,
+                    j.started_at,
+                    j.completed_at,
+                    j.elapsed_ms,
+                    COALESCE(gim.metadata_json, '{}') AS metadata_json
+                FROM generated_images gi
+                JOIN generation_jobs j ON j.id = gi.job_id
+                LEFT JOIN generated_image_metadata gim ON gim.generated_image_id = gi.id
+                WHERE gi.user_id = ?
+                  AND gi.saved_image_url != ''
+                ORDER BY gi.created_at ASC, gi.id ASC
+                LIMIT ?
+                """,
+                (user_id, bounded_limit),
+            ).fetchall()
+        records = {int(row["id"]): _version_image_row_to_dict(row) for row in rows}
+        if generated_image_id not in records:
+            return None
+
+        root_id = generated_image_id
+        visited: set[int] = set()
+        while root_id not in visited:
+            visited.add(root_id)
+            parent_id = records[root_id].get("source_generated_image_id")
+            if not isinstance(parent_id, int) or parent_id not in records:
+                break
+            root_id = parent_id
+
+        children: dict[int, list[int]] = {}
+        for item_id, item in records.items():
+            parent_id = item.get("source_generated_image_id")
+            if isinstance(parent_id, int) and parent_id in records:
+                children.setdefault(parent_id, []).append(item_id)
+        for child_ids in children.values():
+            child_ids.sort(key=lambda value: (records[value].get("created_at", ""), value))
+
+        ordered: list[dict[str, Any]] = []
+        queued = [(root_id, 0)]
+        seen: set[int] = set()
+        while queued and len(ordered) < bounded_limit:
+            item_id, depth = queued.pop(0)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            item = {**records[item_id], "version_depth": depth, "is_current": item_id == generated_image_id}
+            ordered.append(item)
+            queued.extend((child_id, depth + 1) for child_id in children.get(item_id, []))
+        return ordered
 
     def replace_generated_image_asset(
         self,
@@ -1521,7 +1684,7 @@ class AuthStore:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, user_id
+                SELECT id, user_id, job_id
                 FROM generated_images
                 WHERE id = ? AND user_id = ?
                 """,
@@ -1529,6 +1692,18 @@ class AuthStore:
             ).fetchone()
             if row is None:
                 raise PermissionError("无权更新这张图片")
+            first_logo_final_for_job = False
+            if logo_overlay_applied:
+                existing_logo_final = conn.execute(
+                    """
+                    SELECT 1
+                    FROM generated_images
+                    WHERE job_id = ? AND logo_overlay_applied = 1
+                    LIMIT 1
+                    """,
+                    (int(row["job_id"]),),
+                ).fetchone()
+                first_logo_final_for_job = existing_logo_final is None
             conn.execute(
                 """
                 UPDATE generated_images
@@ -1582,6 +1757,9 @@ class AuthStore:
                     saved_image_bytes,
                     logo_requested,
                     logo_overlay_applied,
+                    source_generated_image_id,
+                    asset_kind,
+                    version_note,
                     created_at
                 FROM generated_images
                 WHERE id = ?
@@ -1605,7 +1783,9 @@ class AuthStore:
             )
         if updated is None:
             raise RuntimeError("更新后的图片记录不存在")
-        return _generated_image_row_to_dict(updated)
+        result = _generated_image_row_to_dict(updated)
+        result["_first_logo_final_for_job"] = first_logo_final_for_job
+        return result
 
     def list_gallery_items(
         self,
@@ -1672,6 +1852,7 @@ class AuthStore:
                     owner.display_name AS display_name,
                     COALESCE(meta.is_favorite, 0) AS is_favorite,
                     meta.updated_at AS gallery_updated_at,
+                    COALESCE(gim.metadata_json, '{{}}') AS metadata_json,
                     COALESCE((
                         SELECT GROUP_CONCAT(t.tag, char(31))
                         FROM gallery_image_tags t
@@ -1684,6 +1865,8 @@ class AuthStore:
                 LEFT JOIN gallery_image_metadata meta
                     ON meta.generated_image_id = gi.id
                    AND meta.user_id = ?
+                LEFT JOIN generated_image_metadata gim
+                    ON gim.generated_image_id = gi.id
                 WHERE {where_sql}
                 ORDER BY gi.created_at DESC, gi.id DESC
                 LIMIT ?
@@ -2535,6 +2718,31 @@ class AuthStore:
             for row in rows
         ]
 
+    def image_count_stats(self, *, user_id: int) -> dict[str, int]:
+        with self._lock, self._connect() as conn:
+            current_user_count = conn.execute(
+                """
+                SELECT COUNT(id)
+                FROM generated_images
+                WHERE user_id = ?
+                  AND saved_image_url != ''
+                  AND asset_kind = 'result'
+                """,
+                (user_id,),
+            ).fetchone()[0]
+            platform_count = conn.execute(
+                """
+                SELECT COUNT(id)
+                FROM generated_images
+                WHERE saved_image_url != ''
+                  AND asset_kind = 'result'
+                """,
+            ).fetchone()[0]
+        return {
+            "current_user_generated_image_count": int(current_user_count or 0),
+            "platform_generated_image_count": int(platform_count or 0),
+        }
+
     def list_active_users(self, *, exclude_user_id: int | None = None) -> list[dict[str, Any]]:
         where_clause = "WHERE is_active = 1"
         params: tuple[Any, ...] = ()
@@ -2916,6 +3124,55 @@ class AuthStore:
             ],
         }
 
+    def list_success_templates_for_user(self, *, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit or 20), 60))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    f.id,
+                    f.generated_image_id,
+                    f.reason,
+                    f.prompt,
+                    f.mode,
+                    f.model,
+                    f.saved_image_url,
+                    f.created_at
+                FROM result_feedback f
+                WHERE f.user_id = ?
+                  AND f.rating = 'good'
+                  AND f.prompt != ''
+                ORDER BY f.created_at DESC, f.id DESC
+                LIMIT ?
+                """,
+                (user_id, bounded_limit * 3),
+            ).fetchall()
+        templates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            prompt = str(row["prompt"] or "").strip()
+            normalized = " ".join(prompt.casefold().split())
+            if not prompt or normalized in seen:
+                continue
+            seen.add(normalized)
+            title = str(row["reason"] or "").strip() or _success_template_title(prompt)
+            templates.append(
+                {
+                    "id": int(row["id"]),
+                    "source": "good_feedback",
+                    "generated_image_id": int(row["generated_image_id"]) if row["generated_image_id"] else None,
+                    "title": title[:160],
+                    "prompt": prompt,
+                    "mode": str(row["mode"] or ""),
+                    "model": str(row["model"] or ""),
+                    "saved_image_url": str(row["saved_image_url"] or ""),
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+            if len(templates) >= bounded_limit:
+                break
+        return templates
+
     def record_bug_report(
         self,
         *,
@@ -3257,6 +3514,17 @@ class AuthStore:
             "recipe_id": "TEXT NOT NULL DEFAULT ''",
             "recipe_version": "TEXT NOT NULL DEFAULT ''",
         })
+        _ensure_columns(conn, "generated_images", {
+            "source_generated_image_id": "INTEGER",
+            "asset_kind": "TEXT NOT NULL DEFAULT 'result'",
+            "version_note": "TEXT NOT NULL DEFAULT ''",
+        })
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_generated_images_source
+            ON generated_images(source_generated_image_id)
+            """
+        )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_gallery_metadata_user_favorite
@@ -3323,7 +3591,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "prompt_recipes_and_lineage", now),
+            (_SCHEMA_VERSION, "image_version_lineage", now),
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -3929,6 +4197,22 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _validated_source_generated_image_id(
+    conn: sqlite3.Connection,
+    *,
+    source_id: Any,
+    user_id: int | None,
+) -> int | None:
+    parsed = _optional_int(source_id)
+    if parsed is None or parsed <= 0 or user_id is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM generated_images WHERE id = ? AND user_id = ?",
+        (parsed, user_id),
+    ).fetchone()
+    return parsed if row is not None else None
+
+
 def _result_images_for_db(result: dict[str, Any]) -> list[dict[str, Any]]:
     images = result.get("images")
     if isinstance(images, list):
@@ -3943,6 +4227,7 @@ def _result_images_for_db(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _generated_image_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    row_keys = set(row.keys())
     return {
         "id": int(row["id"]),
         "generated_image_id": int(row["id"]),
@@ -3963,8 +4248,68 @@ def _generated_image_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "saved_image_bytes": max(0, int(row["saved_image_bytes"] or 0)),
         "logo_requested": bool(row["logo_requested"]),
         "logo_overlay_applied": bool(row["logo_overlay_applied"]),
+        "source_generated_image_id": (
+            int(row["source_generated_image_id"])
+            if "source_generated_image_id" in row_keys and row["source_generated_image_id"] is not None
+            else None
+        ),
+        "asset_kind": str(row["asset_kind"] or "result") if "asset_kind" in row_keys else "result",
+        "version_note": str(row["version_note"] or "") if "version_note" in row_keys else "",
         "created_at": str(row["created_at"]),
     }
+
+
+def _clean_source_tokens(values: list[str], *, max_length: int) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = str(value or "").strip()[:max_length]
+        if not token or token in seen:
+            continue
+        cleaned.append(token)
+        seen.add(token)
+    return cleaned[:20]
+
+
+def _attach_original_source_fields(item: dict[str, Any], metadata: dict[str, Any]) -> None:
+    source_url = str(metadata.get("source_saved_image_url") or "").strip()[:1024]
+    source_path = str(
+        metadata.get("source_saved_image_path")
+        or metadata.get("source_image_path")
+        or ""
+    ).strip()[:1024]
+    item["original_saved_image_url"] = source_url
+    item["original_saved_image_path"] = source_path
+
+
+def _image_lineage_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "request_id": str(row["request_id"] or ""),
+        "endpoint_path": str(row["endpoint_path"] or ""),
+        "transport": str(row["transport"] or ""),
+        "prompt_mode": str(row["prompt_mode"] or "free"),
+        "original_prompt": str(row["original_prompt"] or row["effective_prompt"] or ""),
+        "effective_prompt": str(row["effective_prompt"] or row["prompt"] or ""),
+        "recipe_id": str(row["recipe_id"] or ""),
+        "recipe_version": str(row["recipe_version"] or ""),
+        "status": str(row["status"] or ""),
+        "sample_count": max(1, int(row["sample_count"] or 1)),
+        "started_at": str(row["started_at"] or ""),
+        "completed_at": str(row["completed_at"] or ""),
+        "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
+    }
+
+
+def _version_image_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = _generated_image_row_to_dict(row)
+    item["lineage"] = _image_lineage_from_row(row)
+    try:
+        parsed = json.loads(str(row["metadata_json"] or "{}"))
+        item["metadata"] = parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        item["metadata"] = {}
+    _attach_original_source_fields(item, item["metadata"])
+    return item
 
 
 def _generation_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -4035,9 +4380,16 @@ def normalize_gallery_tags(tags: list[str]) -> list[str]:
 
 def _gallery_image_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = _generated_image_row_to_dict(row)
+    row_keys = row.keys()
+    try:
+        parsed = json.loads(str(row["metadata_json"] or "{}")) if "metadata_json" in row_keys else {}
+        metadata = parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    item["metadata"] = metadata
+    _attach_original_source_fields(item, metadata)
     raw_tags = _row_text(row, "tags_text")
     tags = [tag for tag in raw_tags.split("\x1f") if tag] if raw_tags else []
-    row_keys = row.keys()
     item.update(
         {
             "username": _row_text(row, "username"),
@@ -4119,6 +4471,11 @@ def _user_preferences_from_row(user_id: int, row: sqlite3.Row) -> dict[str, Any]
     }
 
 
+def _success_template_title(prompt: str) -> str:
+    first_line = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
+    return first_line[:48] or "满意提示词模板"
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(_SALT_BYTES)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _HASH_ITERATIONS)
@@ -4138,11 +4495,13 @@ def verify_password(password: str, stored_hash: str) -> bool:
         if name != _HASH_NAME:
             return False
         iterations = int(iterations_text)
+        if not 1 <= iterations <= 10_000_000:
+            return False
         salt = bytes.fromhex(salt_hex)
         expected = bytes.fromhex(digest_hex)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     except (ValueError, TypeError):
         return False
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return hmac.compare_digest(actual, expected)
 
 

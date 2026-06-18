@@ -19,21 +19,20 @@ async def _build_client(transport: httpx.MockTransport, **kwargs) -> HttpxAsyncC
     return client
 
 
-async def test_run_json_retries_then_succeeds() -> None:
+async def test_run_json_does_not_retry_non_idempotent_post() -> None:
     calls = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["count"] += 1
-        if calls["count"] < 2:
-            return httpx.Response(503, text='{"error": {"message": "transient"}}')
-        return httpx.Response(200, text=json.dumps({"data": [{"b64_json": "abc"}]}))
+        return httpx.Response(503, text='{"error": {"message": "transient"}}')
 
     transport = httpx.MockTransport(handler)
     client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
     try:
-        payload = await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
-        assert payload["data"][0]["b64_json"] == "abc"
-        assert calls["count"] == 2
+        with pytest.raises(APIError) as info:
+            await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
+        assert info.value.status == 503
+        assert calls["count"] == 1
     finally:
         await client.aclose()
 
@@ -61,23 +60,27 @@ async def test_run_json_reports_retry_exhaustion_to_user() -> None:
         with pytest.raises(APIError) as info:
             await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 502
-        assert "已自动尝试 3 次" in info.value.message
-        assert "上游连续返回 502" in (info.value.details or "")
+        assert "已自动尝试" not in info.value.message
+        assert "上游连续返回" not in (info.value.details or "")
     finally:
         await client.aclose()
 
 
 async def test_run_json_translates_timeout() -> None:
+    calls = {"count": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
         raise httpx.ConnectTimeout("timeout", request=request)
 
     transport = httpx.MockTransport(handler)
-    client = await _build_client(transport, max_retries=0, retry_backoff=0.0)
+    client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
     try:
         with pytest.raises(APIError) as info:
             await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 504
         assert info.value.code == "upstream_timeout"
+        assert calls["count"] == 1
     finally:
         await client.aclose()
 
@@ -134,6 +137,30 @@ async def test_fetch_image_rejects_oversized_content_length() -> None:
         await client.aclose()
 
 
+async def test_fetch_image_retries_idempotent_download_then_succeeds() -> None:
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(503, text='{"error":{"message":"transient"}}')
+        return httpx.Response(
+            200,
+            content=b"\x89PNG\r\n\x1a\n",
+            headers={"Content-Type": "image/png"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
+    try:
+        data, mime = await client.fetch_image("https://cdn.test/img", "UA")
+        assert data.startswith(b"\x89PNG")
+        assert mime == "image/png"
+        assert calls["count"] == 2
+    finally:
+        await client.aclose()
+
+
 async def test_run_responses_parses_sse() -> None:
     sse_body = (
         b'event: response.image_generation_call.partial_image\ndata: {"partial_image_b64":"abcd"}\n\ndata: [DONE]\n\n'
@@ -156,6 +183,41 @@ async def test_run_responses_parses_sse() -> None:
             "UA",
         )
         assert payload["data"][0]["b64_json"] == "abcd"
+    finally:
+        await client.aclose()
+
+
+async def test_run_responses_preserves_multiple_image_outputs() -> None:
+    response_payload = {
+        "id": "resp_multi",
+        "created_at": 123,
+        "model": "gpt-5.5",
+        "status": "completed",
+        "output": [
+            {"type": "image_generation_call", "result": "image-one", "revised_prompt": "one"},
+            {"type": "image_generation_call", "result": "image-two", "revised_prompt": "two"},
+            {"type": "image_generation_call", "result": "image-three", "revised_prompt": "three"},
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=json.dumps(response_payload),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = await _build_client(transport, max_retries=0)
+    try:
+        payload = await client.run_responses(
+            "https://upstream.test/responses",
+            "sk-test",
+            {"stream": False, "model": "gpt-5.5", "tools": [{"type": "image_generation"}], "input": []},
+            "UA",
+        )
+        assert [item["b64_json"] for item in payload["data"]] == ["image-one", "image-two", "image-three"]
+        assert [item["revised_prompt"] for item in payload["data"]] == ["one", "two", "three"]
     finally:
         await client.aclose()
 

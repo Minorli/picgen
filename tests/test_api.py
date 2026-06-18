@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import base64
+import json
 import math
+import re
 import sqlite3
 from pathlib import Path
 
 import anyio
 import pytest
+from fastapi.testclient import TestClient
 from starlette.types import Scope
 
 from picgen.errors import APIError
 from picgen.itinerary_map import build_itinerary_map_plan, project_itinerary_points, render_itinerary_map_svg
+from picgen.main import create_app
 from picgen.middleware import BodySizeLimitMiddleware
 from picgen.notifications import NotificationResult
 from picgen.routes import _with_timing
@@ -49,6 +53,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
         smtp_username="noreply@example.com",
         smtp_password="mail-secret",
         smtp_from_email="noreply@example.com",
+        public_base_url="https://picgen.example.com",
         map_provider="mapbox",
         mapbox_token="map-secret-token",
     )
@@ -72,6 +77,22 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["map_geocoding_enabled"] is True
     assert "mail-secret" not in response.text
     assert "map-secret-token" not in response.text
+
+
+def test_config_disables_password_reset_email_without_public_base_url(make_client, settings_factory):
+    settings = settings_factory(
+        smtp_host="smtpdm.aliyun.com",
+        smtp_username="noreply@example.com",
+        smtp_password="mail-secret",
+        smtp_from_email="noreply@example.com",
+        public_base_url="",
+    )
+    client, _, _ = make_client(settings=settings)
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json()["password_reset_email_enabled"] is False
 
 
 def test_config_reports_default_geocoder_enabled(make_client):
@@ -118,6 +139,76 @@ def test_recipes_endpoint_requires_login_and_lists_prompt_recipes(make_client, s
     assert "recommended_keywords" in travel_recipe
 
 
+def test_removed_prompt_detour_endpoints_are_not_exposed(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin")
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    for path in ("/api/prompt/optimize", "/api/prompt/repetition-check", "/api/poster-layout/render"):
+        assert not any(
+            route.path == path and "POST" in (getattr(route, "methods", None) or set())
+            for route in client.app.routes
+        )
+        response = client.post(path, json={"prompt": "柏林博物馆旅行海报", "title": "柏林博物馆旅行海报"})
+        assert response.status_code in {404, 405}
+
+
+def test_success_templates_endpoint_lists_current_users_good_feedback(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    prompt = "京都红叶高级旅行海报，酒店质感，色彩克制"
+    generated = client.post("/api/generate", json={"prompt": prompt, "model": "gpt-image-2"})
+    assert generated.status_code == 200
+    good = client.post(
+        "/api/feedback",
+        json={
+            "rating": "good",
+            "reason": "这个版式可以复用",
+            "prompt": prompt,
+            "mode": "generate",
+            "model": "gpt-image-2",
+            "generated_image_id": generated.json()["generated_image_id"],
+        },
+    )
+    assert good.status_code == 200
+    bad = client.post(
+        "/api/feedback",
+        json={
+            "rating": "bad",
+            "reason": "不要作为模板",
+            "prompt": "失败提示词",
+            "mode": "generate",
+            "model": "gpt-image-2",
+            "generated_image_id": generated.json()["generated_image_id"],
+        },
+    )
+    assert bad.status_code == 200
+
+    response = client.get("/api/success-templates")
+
+    assert response.status_code == 200
+    templates = response.json()["templates"]
+    assert len(templates) == 1
+    assert templates[0]["prompt"] == prompt
+    assert templates[0]["title"] == "这个版式可以复用"
+    assert templates[0]["source"] == "good_feedback"
+    assert "失败提示词" not in response.text
+
+
 def test_request_id_is_round_tripped(make_client):
     client, _, _ = make_client()
     response = client.get("/api/health", headers={"X-Request-ID": "abc1234567"})
@@ -129,6 +220,23 @@ def test_request_id_is_generated_when_missing(make_client):
     response = client.get("/api/health")
     rid = response.headers.get("x-request-id", "")
     assert 8 <= len(rid) <= 64
+
+
+def test_unhandled_500_keeps_request_id_in_response(settings_factory):
+    settings = settings_factory(static_dir=Path("/tmp/picgen-missing-static"))
+    app = create_app(settings)
+
+    @app.get("/api/boom")
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/api/boom", headers={"X-Request-ID": "rid-unhandled-500"})
+
+    assert response.status_code == 500
+    assert response.headers["x-request-id"] == "rid-unhandled-500"
+    assert response.json()["request_id"] == "rid-unhandled-500"
 
 
 def test_security_headers_are_set(make_client):
@@ -176,6 +284,140 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
 
     upstream_payload = fake.run_json.await_args.args[2]
     assert "n" not in upstream_payload
+    assert "硬性目的地限制" in upstream_payload["prompt"]
+    assert "Vatican City" in upstream_payload["prompt"]
+
+
+def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "罗马高端旅行海报，包含梵蒂冈博物馆和圣彼得广场",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "restricted_destination"
+    assert "受限目的地" in body["error"]
+    assert "梵蒂冈" not in body["error"]
+    assert fake.run_json.await_count == 0
+
+
+def test_generate_allows_restricted_destination_exclusion_text(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": (
+                "柏林博物馆旅行海报，现代杂志风。"
+                "不得出现、标注或暗示 Vatican City、Holy See、梵蒂冈、圣座。"
+            ),
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake.run_json.await_count == 1
+    upstream_prompt = fake.run_json.await_args.args[2]["prompt"]
+    assert upstream_prompt.startswith("柏林博物馆旅行海报")
+    assert "不得出现、标注或暗示 Vatican City" in upstream_prompt
+    assert "硬性目的地限制" in upstream_prompt
+
+
+def test_generate_sends_text_heavy_poster_prompt_to_ai_upstream(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": (
+                "柏林博物馆必去榜 10家不去真的会后悔\n"
+                "01 新博物馆 纳芙蒂蒂半身像\n"
+                "02 佩加蒙博物馆 巴比伦伊什塔尔城门\n"
+                "03 博德博物馆 雕塑和拜占庭艺术\n"
+                "04 老国家美术馆 德国浪漫主义绘画"
+            ),
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake.run_json.await_count == 1
+    upstream_prompt = fake.run_json.await_args.args[2]["prompt"]
+    assert "柏林博物馆必去榜" in upstream_prompt
+    assert "04 老国家美术馆" in upstream_prompt
+    assert "硬性目的地限制" in upstream_prompt
+
+
+def test_generate_rejects_legacy_program_layout_background_prompt(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "prompt": (
+                "为一张小红书封面「柏林博物馆必去榜」生成无文字背景底图，"
+                "用于后续程序排版中文标题、副标题、双栏榜单卡片、编号、馆名和推荐语。"
+                "整体留白充足，不生成任何可读文字、字母、数字、表格、编号、标签、LOGO 或招牌。"
+            ),
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "legacy_layout_background_prompt"
+    assert "旧程序排版背景底图提示词" in body["error"]
+    assert fake.run_json.await_count == 0
+
+
+def test_itinerary_map_plan_rejects_restricted_destination_text_and_coordinates(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin")
+    client, _, _ = make_client(settings=settings)
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "routeuser", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    text_response = client.post(
+        "/api/itinerary-map/plan",
+        json={
+            "title": "意大利路线",
+            "subtitle": "9/1 - 9/5",
+            "stops": [
+                {"date": "9/1", "name": "罗马", "lat": 41.9028, "lng": 12.4964},
+                {"date": "9/2", "name": "Vatican City", "lat": 41.9029, "lng": 12.4534},
+            ],
+        },
+    )
+    coord_response = client.post(
+        "/api/itinerary-map/plan",
+        json={
+            "title": "意大利路线",
+            "subtitle": "9/1 - 9/5",
+            "stops": [
+                {"date": "9/1", "name": "罗马", "lat": 41.9028, "lng": 12.4964},
+                {"date": "9/2", "name": "无名地点", "lat": 41.9029, "lng": 12.4534},
+            ],
+        },
+    )
+
+    assert text_response.status_code == 400
+    assert text_response.json()["code"] == "restricted_destination"
+    assert coord_response.status_code == 400
+    assert coord_response.json()["code"] == "restricted_destination"
 
 
 def test_generate_records_free_prompt_lineage_without_rewriting(make_client, settings_factory):
@@ -210,7 +452,8 @@ def test_generate_records_free_prompt_lineage_without_rewriting(make_client, set
     assert payload["original_prompt"] == prompt
     assert payload["effective_prompt"] == prompt
     upstream_payload = fake.run_json.await_args.args[2]
-    assert upstream_payload["prompt"] == prompt
+    assert upstream_payload["prompt"].startswith(prompt)
+    assert "硬性目的地限制" in upstream_payload["prompt"]
 
     detail_response = client.get(f"/api/generated-images/{payload['generated_image_id']}")
     assert detail_response.status_code == 200
@@ -234,6 +477,50 @@ def test_generate_records_free_prompt_lineage_without_rewriting(make_client, set
     assert row["original_prompt"] == prompt
     assert row["prompt_mode"] == "free"
     assert row["recipe_id"] == ""
+
+
+def test_generate_adds_itinerary_id_badge_from_explicit_field_or_prompt(
+    make_client,
+    settings_factory,
+):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+
+    explicit_response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "小小国宝守护记，和大熊猫交个朋友",
+            "model": "gpt-image-2",
+            "itinerary_id": "396396",
+        },
+    )
+    assert explicit_response.status_code == 200
+    explicit_payload = fake.run_json.await_args.args[2]
+    assert "行程 ID：396396" in explicit_payload["prompt"]
+    assert "右上角" in explicit_payload["prompt"]
+    assert "左上角 LOGO" in explicit_payload["prompt"]
+
+    prompt_response = client.post(
+        "/api/generate",
+        json={
+            "prompt": "行程ID: 778899\n亲子研学海报，远观熊猫",
+            "model": "gpt-image-2",
+        },
+    )
+    assert prompt_response.status_code == 200
+    prompt_payload = fake.run_json.await_args.args[2]
+    assert "行程 ID：778899" in prompt_payload["prompt"]
+    assert "右上角" in prompt_payload["prompt"]
 
 
 def test_generate_records_recipe_lineage_and_detail_is_owner_scoped(make_client, settings_factory):
@@ -290,6 +577,74 @@ def test_generate_records_recipe_lineage_and_detail_is_owner_scoped(make_client,
     assert lineage["recipe_version"] == "2026-06-08"
     assert lineage["original_prompt"] == original_prompt
     assert lineage["effective_prompt"] == effective_prompt
+
+
+def test_edit_records_source_image_and_lists_version_chain(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_multipart.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 2}
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    original = client.post(
+        "/api/generate",
+        json={"prompt": "法国意大利瑞士高端路线海报", "model": "gpt-image-2"},
+    )
+    assert original.status_code == 200
+    original_id = original.json()["generated_image_id"]
+
+    edited = client.post(
+        "/api/edit",
+        json={
+            "prompt": "改成更温柔的羊皮纸地图风格",
+            "model": "gpt-image-2",
+            "source_generated_image_id": original_id,
+            "image": {
+                "name": "source.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+    assert edited.status_code == 200
+    edited_id = edited.json()["generated_image_id"]
+    assert edited_id != original_id
+
+    versions_response = client.get(f"/api/generated-images/{edited_id}/versions")
+    assert versions_response.status_code == 200
+    payload = versions_response.json()
+    assert payload["current_generated_image_id"] == edited_id
+    assert [item["generated_image_id"] for item in payload["versions"]] == [original_id, edited_id]
+    assert payload["versions"][0]["source_generated_image_id"] is None
+    assert payload["versions"][0]["version_depth"] == 0
+    assert payload["versions"][1]["source_generated_image_id"] == original_id
+    assert payload["versions"][1]["version_depth"] == 1
+    assert payload["versions"][1]["lineage"]["effective_prompt"] == "改成更温柔的羊皮纸地图风格"
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT source_generated_image_id FROM generated_images WHERE id = ?",
+            (edited_id,),
+        ).fetchone()
+    assert row["source_generated_image_id"] == original_id
+
+    client.post("/api/auth/logout")
+    bob = client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": "correct horse battery"},
+    )
+    assert bob.status_code == 200
+    forbidden = client.get(f"/api/generated-images/{edited_id}/versions")
+    assert forbidden.status_code == 404
 
 
 def test_generate_rejects_unknown_prompt_recipe_without_upstream_call(make_client, settings_factory):
@@ -528,6 +883,8 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert "不要生成路线图例" in content[0]["text"]
     assert "Legend" in content[0]["text"]
     assert "线型说明框" in content[0]["text"]
+    assert "硬性目的地限制" in content[0]["text"]
+    assert "Vatican City" in content[0]["text"]
     assert content[1] == {"type": "input_image", "file_id": "file_itinerary_control"}
 
     with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
@@ -1077,7 +1434,7 @@ def test_itinerary_map_svg_uses_soft_route_style_and_country_labels():
     )
 
     points_before = project_itinerary_points(plan, width=1792, height=1792)
-    svg = render_itinerary_map_svg(plan)
+    svg = render_itinerary_map_svg(plan, background_image_url=f"data:image/png;base64,{TINY_PNG_B64}")
     points_after = project_itinerary_points(plan, width=1792, height=1792)
 
     assert points_after == points_before
@@ -1087,14 +1444,42 @@ def test_itinerary_map_svg_uses_soft_route_style_and_country_labels():
     assert "法国" in svg
     assert "瑞士/法国" not in svg
     assert "日内瓦蒙特勒洛桑" in svg
-    assert "stroke:#a85f4b;stroke-width:7.4" in svg
+    assert "stroke:#7f5f45;stroke-width:3.8" in svg
     assert "stroke:#bd2f2f" not in svg
     assert "stroke-width:13" not in svg
-    assert ".route-line.transfer{stroke-width:6.2;opacity:.78}" in svg
-    assert ".route-line.transfer{stroke-width:6.2;stroke-dasharray" not in svg
+    assert ".route-line.transfer{stroke-width:3.2;opacity:.62}" in svg
+    assert ".route-line.transfer{stroke-width:3.2;stroke-dasharray" not in svg
+    assert 'class="callout-scroll"' in svg
+    assert 'class="callout-card"' not in svg
     assert 'data-layer="program-title"' in svg
-    assert 'class="title-outline"' in svg
+    assert 'id="titleBrushRough"' in svg
+    assert "@font-face{font-family:'PicGenRouteTitle'" in svg
+    assert "data:font/ttf;base64," in svg
+    assert "ZCOOL XiaoWei" in svg
+    assert 'class="title-wash"' in svg
+    assert 'class="title-brush"' in svg
+    assert 'class="title-gold-edge"' in svg
     assert 'id="titleInk"' in svg
+    assert "font-family:'PicGenRouteTitle'" in svg
+
+
+def test_itinerary_country_labels_stay_inside_portrait_canvas():
+    plan = build_itinerary_map_plan(
+        title="欧洲文化路线",
+        subtitle="9/5 - 9/12",
+        stops=[
+            {"date": "9/5", "name": "柏林", "country": "德国", "lat": 52.52, "lng": 13.405},
+            {"date": "9/7", "name": "德累斯顿", "country": "德国", "lat": 51.0504, "lng": 13.7373},
+            {"date": "9/9", "name": "布拉格", "country": "捷克", "lat": 50.0755, "lng": 14.4378},
+            {"date": "9/11", "name": "维也纳", "country": "奥地利", "lat": 48.2082, "lng": 16.3738},
+        ],
+    )
+
+    svg = render_itinerary_map_svg(plan, width=1088, height=2240)
+    match = re.search(r'<text x="([0-9.]+)" y="([0-9.]+)"[^>]*>奥地利</text>', svg)
+
+    assert match is not None
+    assert float(match.group(1)) <= 900
 
 
 def test_generate_ignores_unrecognized_client_mode(make_client, settings_factory):
@@ -1163,7 +1548,7 @@ def test_authenticated_generation_sends_success_telegram_alert(
             "prompt": "生成一张旅行海报",
             "model": "gpt-image-2",
             "size": "1088x2240",
-            "logo_requested": True,
+            "logo_requested": False,
         },
     )
 
@@ -1175,11 +1560,11 @@ def test_authenticated_generation_sends_success_telegram_alert(
     assert alert.job_id == payload["generation_job_id"]
     assert alert.generated_image_ids == [payload["generated_image_id"]]
     assert alert.saved_image_urls == [payload["saved_image_url"]]
-    assert alert.logo_requested is True
+    assert alert.logo_requested is False
     assert alert.image_count == 1
 
 
-def test_itinerary_generation_sends_logo_requested_telegram_alert(
+def test_logo_requested_generation_defers_telegram_alert_until_final_image(
     make_client,
     settings_factory,
     monkeypatch,
@@ -1220,13 +1605,7 @@ def test_itinerary_generation_sends_logo_requested_telegram_alert(
     )
 
     assert response.status_code == 200
-    assert alerts
-    alert = alerts[0]
-    assert alert.mode == "itinerary"
-    assert alert.path == "/api/generate"
-    assert alert.size == "1792x1792"
-    assert alert.logo_requested is True
-    assert alert.logo_overlay_applied is False
+    assert alerts == []
 
 
 def test_generate_accepts_three_candidates(make_client, settings_factory):
@@ -1418,6 +1797,62 @@ def test_generate_upstream_error_mentions_backend_alert_when_telegram_configured
     assert alerts[0].code == "upstream_timeout"
 
 
+def test_generate_upstream_safety_infra_error_is_not_misclassified_as_content_policy(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    alerts = []
+
+    async def _fake_send_error_alert_notification(**kwargs):
+        alerts.append(kwargs["alert"])
+        return NotificationResult(configured=True, sent=True, status="sent")
+
+    monkeypatch.setattr(
+        "picgen.main.send_error_alert_notification",
+        _fake_send_error_alert_notification,
+    )
+    settings = settings_factory(
+        default_api_key="sk-test",
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(
+            502,
+            "upstream safety gateway not allowed request forwarding",
+            json.dumps(
+                {
+                    "error": {
+                        "message": "safety gateway not allowed request forwarding",
+                        "type": "server_error",
+                        "code": "server_error",
+                    }
+                }
+            ),
+            code="upstream_error",
+        ),
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert "图片生成服务暂时不可用" in payload["error"]
+    assert "未通过上游内容审核" not in payload["error"]
+    assert "后台已收到告警" in payload["error"]
+    assert alerts
+
+
 def test_generate_fanout_tolerates_partial_failure(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
@@ -1513,7 +1948,8 @@ def test_edit_uses_images_api_and_preserves_mode(make_client, settings_factory):
     assert upstream_args[0] == "https://api.openai.com/v1/images/edits"
     fields = upstream_args[2]
     assert fields["model"] == "gpt-image-2"
-    assert fields["prompt"] == "把背景改成纯白"
+    assert fields["prompt"].startswith("把背景改成纯白")
+    assert "硬性目的地限制" in fields["prompt"]
     assert fields["size"] == "1024x1024"
     assert fields["quality"] == "high"
     assert fields["output_format"] == "png"
@@ -1769,10 +2205,10 @@ def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settin
     assert fake.run_file_upload.await_args.args[2]["filename"] == "source.png"
     upstream_payload = fake.run_responses.await_args.args[2]
     content = upstream_payload["input"][0]["content"]
-    assert content == [
-        {"type": "input_text", "text": "基于这张图重新打光"},
-        {"type": "input_image", "file_id": "file_test_input"},
-    ]
+    assert content[0]["type"] == "input_text"
+    assert content[0]["text"].startswith("基于这张图重新打光")
+    assert "硬性目的地限制" in content[0]["text"]
+    assert content[1:] == [{"type": "input_image", "file_id": "file_test_input"}]
     assert "data:image/png;base64" not in str(upstream_payload)
 
 
@@ -1818,8 +2254,11 @@ def test_responses_image_uploads_ordered_reference_images(make_client, settings_
     assert uploaded == ["style.png", "material.png"]
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["tools"][0]["n"] == 3
-    assert upstream_payload["input"][0]["content"] == [
-        {"type": "input_text", "text": "把素材做成模板风格"},
+    content = upstream_payload["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert content[0]["text"].startswith("把素材做成模板风格")
+    assert "硬性目的地限制" in content[0]["text"]
+    assert content[1:] == [
         {"type": "input_image", "file_id": "file_style"},
         {"type": "input_image", "file_id": "file_material"},
     ]
@@ -1895,6 +2334,7 @@ def test_edit_accepts_logo_reference_and_prompt_guidance(make_client, settings_f
     upstream_args = fake.run_multipart.await_args.args
     fields = upstream_args[2]
     assert "6 人游 LOGO 合成要求" in fields["prompt"]
+    assert "硬性目的地限制" in fields["prompt"]
     files = upstream_args[3]
     assert len(files) == 1
     assert files[0]["filename"] == "6renyou.png"
@@ -1971,8 +2411,11 @@ def test_responses_image_accepts_logo_reference_and_preserves_order(make_client,
     assert payload["source_image_roles"] == ["source_image", "brand_logo"]
     assert payload["source_file_ids"] == ["file_source", "file_logo"]
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["input"][0]["content"] == [
-        {"type": "input_text", "text": "在现有图片中自然加入 6 人游 LOGO"},
+    content = upstream_payload["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert content[0]["text"].startswith("在现有图片中自然加入 6 人游 LOGO")
+    assert "硬性目的地限制" in content[0]["text"]
+    assert content[1:] == [
         {"type": "input_image", "file_id": "file_source"},
         {"type": "input_image", "file_id": "file_logo"},
     ]

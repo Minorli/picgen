@@ -52,6 +52,14 @@ def sanitize_filename_prefix(value: str) -> str:
     return cleaned[:48].strip(".-_") or ""
 
 
+def output_group_dir(outputs_dir: Path, now: datetime, filename_prefix: str = "") -> Path:
+    day_dir = outputs_dir / now.strftime("%Y%m%d")
+    safe_prefix = sanitize_filename_prefix(filename_prefix)
+    if safe_prefix:
+        return day_dir / safe_prefix
+    return day_dir
+
+
 def detect_image_mime(image_bytes: bytes) -> str:
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -195,8 +203,8 @@ def save_output_image(
     filename_prefix: str = "",
 ) -> dict[str, object]:
     now = datetime.now()
-    day_dir = outputs_dir / now.strftime("%Y%m%d")
     safe_prefix = sanitize_filename_prefix(filename_prefix)
+    day_dir = output_group_dir(outputs_dir, now, safe_prefix)
     base_stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
     stem = f"{safe_prefix}-{base_stem}" if safe_prefix else base_stem
     image_path = day_dir / f"{stem}{extension_for_mime(image_mime)}"
