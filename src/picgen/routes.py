@@ -127,6 +127,14 @@ def _strict_requested_size(size: str | None) -> bool:
     cleaned = (size or "").strip()
     return bool(cleaned and cleaned != "auto")
 
+
+def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
+    quality = str(options.get("quality") or "").strip()
+    if quality and quality != "auto":
+        return options
+    return {**options, "quality": "high"}
+
+
 JSON_BODY = Body(...)
 PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。"
 RESERVED_SELF_SERVICE_USERNAMES = frozenset({"admin"})
@@ -3550,7 +3558,7 @@ async def handle_generate(
     model = (parsed.model or settings.default_model).strip() or settings.default_model
     size = (parsed.size or settings.default_size).strip() or settings.default_size
     api_key = (parsed.api_key or settings.default_api_key).strip()
-    image_options = openai_image_options(payload)
+    image_options = _highest_quality_image_options(openai_image_options(payload))
     mode = _generate_mode(parsed.mode)
     strict_size = mode != "itinerary" and _strict_requested_size(parsed.size)
     original_prompt = (parsed.original_prompt or parsed.prompt).strip()
@@ -3669,7 +3677,7 @@ async def handle_edit(
     files_for_multipart = [*image_parts, *([mask_part] if mask_part else [])]
     size = (parsed.size or "").strip()
     strict_size = _strict_requested_size(size)
-    image_options = openai_image_options(payload)
+    image_options = _highest_quality_image_options(openai_image_options(payload))
     fields: dict[str, Any] = {
         "model": model,
         "prompt": append_restricted_destination_guard(effective_prompt),
@@ -3763,7 +3771,7 @@ async def handle_responses_image(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     size = (parsed.size or settings.default_size).strip() or settings.default_size
     strict_size = _strict_requested_size(parsed.size)
-    image_options = openai_image_options(payload)
+    image_options = _highest_quality_image_options(openai_image_options(payload))
 
     _ensure_no_restricted_destination_text(parsed.prompt)
     itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
