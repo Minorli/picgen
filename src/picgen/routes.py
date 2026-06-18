@@ -3131,7 +3131,7 @@ def _image_dimensions_for_size_check(image: dict[str, Any]) -> tuple[int, int] |
     return None
 
 
-def _ensure_strict_image_size(saved: dict[str, Any], save_context: dict[str, Any]) -> None:
+def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any]) -> None:
     if not save_context.get("strict_size"):
         return
     requested_size = str(save_context.get("requested_size") or save_context.get("size") or "").strip()
@@ -3146,20 +3146,28 @@ def _ensure_strict_image_size(saved: dict[str, Any], save_context: dict[str, Any
         actual = _image_dimensions_for_size_check(image)
         if actual is None:
             continue
+        image["actual_size"] = f"{actual[0]}x{actual[1]}"
+        image["requested_size"] = requested_size
         if actual != expected:
-            mismatches.append(f"{actual[0]}x{actual[1]}")
+            actual_size = f"{actual[0]}x{actual[1]}"
+            image["size_mismatch"] = True
+            image["size_mismatch_message"] = (
+                f"上游返回尺寸为 {actual_size}，与请求尺寸 {expected[0]}x{expected[1]} 不一致。"
+                "图片已按上游原始返回保存，本地没有缩放。"
+            )
+            mismatches.append(actual_size)
+        else:
+            image["size_mismatch"] = False
     if not mismatches:
         return
 
-    actual_summary = ", ".join(dict.fromkeys(mismatches))
-    raise APIError(
-        HTTPStatus.BAD_GATEWAY,
-        f"上游返回图片尺寸不符合用户选择：请求尺寸 {expected[0]}x{expected[1]}，实际返回 {actual_summary}。",
-        json.dumps(
-            {"requested_size": f"{expected[0]}x{expected[1]}", "actual_sizes": list(dict.fromkeys(mismatches))},
-            ensure_ascii=False,
-        ),
-        code="upstream_size_mismatch",
+    saved["actual_size"] = candidates[0].get("actual_size")
+    saved["requested_size"] = requested_size
+    saved["size_mismatch"] = True
+    saved["size_mismatch_actual_sizes"] = list(dict.fromkeys(mismatches))
+    saved["size_mismatch_message"] = (
+        f"上游返回尺寸为 {', '.join(dict.fromkeys(mismatches))}，"
+        f"与请求尺寸 {expected[0]}x{expected[1]} 不一致。图片已按上游原始返回保存，本地没有缩放。"
     )
 
 
@@ -4066,7 +4074,7 @@ async def _finalize_image_response(
             compact_raw_response(upstream_response),
             code="upstream_no_image",
         )
-    _ensure_strict_image_size(saved, save_context)
+    _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
 
 

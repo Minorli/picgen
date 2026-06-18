@@ -310,7 +310,7 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "Vatican City" in upstream_payload["prompt"]
 
 
-def test_generate_rejects_mismatched_strict_poster_size(make_client, settings_factory):
+def test_generate_returns_mismatched_poster_size_from_upstream(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_json.return_value = {
@@ -329,12 +329,19 @@ def test_generate_rejects_mismatched_strict_poster_size(make_client, settings_fa
         },
     )
 
-    assert response.status_code == 502
+    assert response.status_code == 200
     payload = response.json()
-    assert payload["code"] == "upstream_size_mismatch"
-    details = json.loads(payload["details"] or "{}")
-    assert details["requested_size"] == "1088x2240"
-    assert details["actual_sizes"] == ["864x1821"]
+    assert payload["size"] == "1088x2240"
+    assert payload["requested_size"] == "1088x2240"
+    assert payload["saved_image_width"] == 864
+    assert payload["saved_image_height"] == 1821
+    assert payload["actual_size"] == "864x1821"
+    assert payload["size_mismatch"] is True
+    assert payload["images"][0]["saved_image_width"] == 864
+    assert payload["images"][0]["saved_image_height"] == 1821
+    assert payload["images"][0]["actual_size"] == "864x1821"
+    assert payload["images"][0]["size_mismatch"] is True
+    assert payload["saved_image_url"].startswith("files/outputs/")
 
 
 def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
@@ -2452,7 +2459,7 @@ def test_responses_image_records_reference_source_generation_id(make_client, set
     assert job_row["size"] == "1088x2240"
 
 
-def test_responses_image_rejects_strict_poster_size_mismatch(make_client, settings_factory):
+def test_responses_image_returns_mismatched_poster_size_from_upstream(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
@@ -2473,12 +2480,19 @@ def test_responses_image_rejects_strict_poster_size_mismatch(make_client, settin
         },
     )
 
-    assert response.status_code == 502
+    assert response.status_code == 200
     payload = response.json()
-    assert payload["code"] == "upstream_size_mismatch"
-    details = json.loads(payload["details"] or "{}")
-    assert details["requested_size"] == "1088x2240"
-    assert details["actual_sizes"] == ["1024x1536"]
+    assert payload["size"] == "1088x2240"
+    assert payload["requested_size"] == "1088x2240"
+    assert payload["saved_image_width"] == 1024
+    assert payload["saved_image_height"] == 1536
+    assert payload["actual_size"] == "1024x1536"
+    assert payload["size_mismatch"] is True
+    assert payload["images"][0]["saved_image_width"] == 1024
+    assert payload["images"][0]["saved_image_height"] == 1536
+    assert payload["images"][0]["actual_size"] == "1024x1536"
+    assert payload["images"][0]["size_mismatch"] is True
+    assert payload["saved_image_url"].startswith("files/outputs/")
 
 
 def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_factory):
