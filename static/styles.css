@@ -2981,7 +2981,8 @@ select:focus,
 .bug-report-modal,
 .change-password-modal,
 .profile-modal,
-.team-chat-modal {
+.team-chat-modal,
+.prompt-confirm-modal {
   position: fixed;
   inset: 0;
   z-index: 60;
@@ -2993,7 +2994,8 @@ select:focus,
 .bug-report-dialog,
 .change-password-dialog,
 .profile-dialog,
-.team-chat-dialog {
+.team-chat-dialog,
+.prompt-confirm-dialog {
   position: relative;
   width: min(520px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
@@ -3016,6 +3018,65 @@ select:focus,
   grid-template-rows: auto minmax(0, 1fr);
   padding: 0;
   overflow: hidden;
+}
+
+.prompt-confirm-dialog {
+  width: min(860px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+}
+
+.prompt-confirm-header,
+.prompt-confirm-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.prompt-confirm-field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.prompt-confirm-textarea {
+  width: 100%;
+  min-height: min(44vh, 440px);
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  font: inherit;
+  line-height: 1.6;
+  color: var(--text);
+  background: #fbfcfd;
+}
+
+.prompt-confirm-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 149, 104, 0.22);
+  border-radius: var(--radius);
+  background: var(--green-soft);
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.prompt-confirm-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
+}
+
+.prompt-confirm-actions {
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .team-chat-header,

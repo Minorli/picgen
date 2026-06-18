@@ -122,6 +122,11 @@ _ITINERARY_ID_RE = re.compile(
     r"\s*[:：#-]?\s*([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
 )
 
+
+def _strict_requested_size(size: str | None) -> bool:
+    cleaned = (size or "").strip()
+    return bool(cleaned and cleaned != "auto")
+
 JSON_BODY = Body(...)
 PASSWORD_RESET_REQUEST_MESSAGE = "如果账号存在且已填写邮箱，会收到重置邮件；否则管理员会看到找回申请。"
 RESERVED_SELF_SERVICE_USERNAMES = frozenset({"admin"})
@@ -1482,8 +1487,11 @@ def create_router() -> APIRouter:
         )
 
     @router.get("/api/recipes")
-    async def recipes(user: AuthUser | None = Depends(require_current_user)) -> dict[str, Any]:
-        if user is None:
+    async def recipes(
+        user: AuthUser | None = Depends(require_current_user),
+        settings: Settings = Depends(get_settings),
+    ) -> dict[str, Any]:
+        if settings.auth_enabled and user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         return {"recipes": list_prompt_recipes()}
 
@@ -3544,6 +3552,7 @@ async def handle_generate(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     image_options = openai_image_options(payload)
     mode = _generate_mode(parsed.mode)
+    strict_size = mode != "itinerary" and _strict_requested_size(parsed.size)
     original_prompt = (parsed.original_prompt or parsed.prompt).strip()
     prompt_mode = parsed.prompt_mode
     recipe_id = parsed.recipe_id or ""
@@ -3606,6 +3615,7 @@ async def handle_generate(
             "model": model,
             "endpoint_url": endpoint_url,
             "transport": "images-generate",
+            "strict_size": strict_size,
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
             **lineage_metadata,
@@ -3658,6 +3668,7 @@ async def handle_edit(
 
     files_for_multipart = [*image_parts, *([mask_part] if mask_part else [])]
     size = (parsed.size or "").strip()
+    strict_size = _strict_requested_size(size)
     image_options = openai_image_options(payload)
     fields: dict[str, Any] = {
         "model": model,
@@ -3697,6 +3708,7 @@ async def handle_edit(
             **image_metadata,
             "mask_image_name": mask_part["filename"] if mask_part else None,
             "transport": "images-edit",
+            "strict_size": strict_size,
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
             **_user_metadata(user),
@@ -3750,6 +3762,7 @@ async def handle_responses_image(
     model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
     api_key = (parsed.api_key or settings.default_api_key).strip()
     size = (parsed.size or settings.default_size).strip() or settings.default_size
+    strict_size = _strict_requested_size(parsed.size)
     image_options = openai_image_options(payload)
 
     _ensure_no_restricted_destination_text(parsed.prompt)
@@ -3851,6 +3864,7 @@ async def handle_responses_image(
             "file_upload_fallback": bool(upload_error),
             "file_upload_error": upload_error.message if upload_error else None,
             "transport": "responses-image",
+            "strict_size": strict_size,
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
             **_user_metadata(user),
