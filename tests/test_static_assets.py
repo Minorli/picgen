@@ -111,6 +111,30 @@ def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
     assert ".change-password-dialog" in styles_css
 
 
+def test_auth_login_button_shows_validation_feedback_before_native_submit_block() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert '<form id="authForm" class="auth-form" novalidate>' in index_html
+    assert "function validateAuthFormInputs()" in app_js
+    assert "用户名至少需要 2 个字符。" in app_js
+    assert "密码至少需要 8 位。" in app_js
+    assert 'refs.loginAuthButton?.addEventListener("click", validateAuthFormInputs)' in app_js
+    assert "if (!validateAuthFormInputs()) {" in app_js
+
+
+def test_image_quality_defaults_to_high_without_unsupported_xhigh() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert '<option value="high" selected>High</option>' in index_html
+    assert 'refs.qualitySelect.value = forms.quality || "high"' in app_js
+    assert 'quality: refs.qualitySelect.value || "high"' in app_js
+    assert 'refs.qualitySelect.value = snapshot.quality || "high"' in app_js
+    assert 'value="xhigh"' not in index_html
+    assert '"xhigh"' not in app_js
+
+
 def test_result_preview_zoom_and_feedback_controls_are_present() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -554,7 +578,7 @@ def test_prompt_confirmation_modal_blocks_generation_until_checked() -> None:
     assert ".prompt-confirm-textarea" in styles_css
 
 
-def test_generation_post_helpers_do_not_send_upstream_401_to_login_gate() -> None:
+def test_generation_post_helpers_only_send_local_auth_401_to_login_gate() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     post_json_block = app_js[app_js.index("async function postJSON(") : app_js.index("async function postJSONSilent(")]
     post_json_silent_block = app_js[
@@ -563,10 +587,10 @@ def test_generation_post_helpers_do_not_send_upstream_401_to_login_gate() -> Non
     fetch_json_block = app_js[app_js.index("async function fetchJSON(") : app_js.index("function enterAuthGate(")]
 
     assert 'enterAuthGate("login", "登录已过期，请重新登录。")' in fetch_json_block
-    assert "response.status === 401" not in post_json_block
-    assert "response.status === 401" not in post_json_silent_block
-    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' not in post_json_block
-    assert 'enterAuthGate("login", "登录已过期，请重新登录。")' not in post_json_silent_block
+    assert 'isLocalAuthUnauthorized(response, data)' in post_json_block
+    assert 'isLocalAuthUnauthorized(response, data)' in post_json_silent_block
+    assert 'data?.code === "unauthorized"' in app_js
+    assert 'data?.code !== "upstream_error"' in app_js
 
 
 def test_nonstandard_poster_sizes_use_responses_generation_instead_of_images_api() -> None:

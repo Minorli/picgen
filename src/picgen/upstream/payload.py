@@ -10,7 +10,7 @@ from typing import Any
 from urllib import parse
 
 from ..errors import APIError
-from ..storage import detect_image_dimensions, detect_image_mime, save_output_image
+from ..storage import detect_image_mime, save_output_image
 
 _IMAGE_OPTION_KEYS = ("quality", "background", "output_format", "output_compression", "moderation")
 _RAW_IMAGE_KEYS = frozenset({"b64_json", "result", "partial_image_b64", "image_b64"})
@@ -122,40 +122,6 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
         if value is not None and value != "":
             metadata[key] = value
     return metadata
-
-
-def parse_size_value(size: str | None) -> tuple[int, int] | None:
-    cleaned = str(size or "").strip().lower()
-    if not cleaned or cleaned == "auto" or "x" not in cleaned:
-        return None
-    width_text, height_text = cleaned.split("x", 1)
-    try:
-        width = int(width_text)
-        height = int(height_text)
-    except ValueError:
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return width, height
-
-
-def _validate_strict_output_size(image_bytes: bytes, save_context: dict[str, Any]) -> None:
-    if not save_context.get("strict_size"):
-        return
-    requested = parse_size_value(str(save_context.get("size") or ""))
-    if requested is None:
-        return
-    actual = detect_image_dimensions(image_bytes)
-    if actual is None or actual == requested:
-        return
-    requested_text = f"{requested[0]}x{requested[1]}"
-    actual_text = f"{actual[0]}x{actual[1]}"
-    raise APIError(
-        HTTPStatus.UNPROCESSABLE_ENTITY,
-        f"上游返回图片尺寸 {actual_text}，不符合用户选择的海报尺寸 {requested_text}。"
-        "请更换支持该尺寸的生成通道后重试。",
-        code="upstream_size_mismatch",
-    )
 
 
 def compact_raw_response(payload: Any) -> Any:
@@ -273,7 +239,6 @@ def _image_item_payload(
 
     saved_payload: dict[str, Any] = {}
     if image_bytes and image_mime:
-        _validate_strict_output_size(image_bytes, save_context)
         saved_payload = save_output_image(
             data_dir=data_dir,
             outputs_dir=outputs_dir,

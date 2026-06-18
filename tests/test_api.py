@@ -305,14 +305,18 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
 
     upstream_payload = fake.run_json.await_args.args[2]
     assert "n" not in upstream_payload
+    assert upstream_payload["quality"] == "high"
     assert "硬性目的地限制" in upstream_payload["prompt"]
     assert "Vatican City" in upstream_payload["prompt"]
 
 
-def test_generate_rejects_mismatched_upstream_size_without_cropping(make_client, settings_factory):
+def test_generate_preserves_mismatched_upstream_size_without_padding(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
-    client, fake, resolved = make_client(settings=settings)
-    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(864, 1821)}],
+        "created": 1,
+    }
 
     response = client.post(
         "/api/generate",
@@ -325,12 +329,17 @@ def test_generate_rejects_mismatched_upstream_size_without_cropping(make_client,
         },
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
     payload = response.json()
-    assert payload["code"] == "upstream_size_mismatch"
-    assert "1088x2240" in payload["error"]
-    assert "1x1" in payload["error"]
-    assert not list(resolved.outputs_dir.rglob("*.png"))
+    assert payload["size"] == "1088x2240"
+    assert payload["saved_image_width"] == 864
+    assert payload["saved_image_height"] == 1821
+    assert payload["metadata"]["saved_image_width"] == 864
+    assert payload["metadata"]["saved_image_height"] == 1821
+    assert "upstream_image_width" not in payload["metadata"]
+    assert "upstream_image_height" not in payload["metadata"]
+    assert "size_normalized" not in payload["metadata"]
+    assert "size_normalization_mode" not in payload["metadata"]
 
 
 def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
@@ -2222,7 +2231,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     upstream_payload = fake.run_responses.await_args.args[2]
     assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
-    assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240"}]
+    assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
 
 
 def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settings_factory):

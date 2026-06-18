@@ -4317,8 +4317,34 @@ async function regenerateFromBadFeedback() {
   await rerunLastGeneration()
 }
 
+function validateAuthFormInputs() {
+  const username = refs.authUsernameInput?.value.trim() || ""
+  const password = refs.authPasswordInput?.value || ""
+  if (!username || username.length < 2) {
+    if (refs.authError) {
+      refs.authError.textContent = "用户名至少需要 2 个字符。"
+    }
+    refs.authUsernameInput?.focus()
+    return false
+  }
+  if (!password || password.length < 8) {
+    if (refs.authError) {
+      refs.authError.textContent = "密码至少需要 8 位。"
+    }
+    refs.authPasswordInput?.focus()
+    return false
+  }
+  if (refs.authError) {
+    refs.authError.textContent = ""
+  }
+  return true
+}
+
 async function submitAuthForm(event) {
   event.preventDefault()
+  if (!validateAuthFormInputs()) {
+    return
+  }
   const username = refs.authUsernameInput.value.trim()
   const password = refs.authPasswordInput.value
   const endpoint = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login"
@@ -4713,7 +4739,7 @@ async function restoreWorkspaceState() {
   refs.generateWidthInput.value = forms.generateWidth || ""
   refs.generateHeightInput.value = forms.generateHeight || ""
   refs.generateSizePreset.value = forms.generateSizePreset || "custom"
-  refs.qualitySelect.value = forms.quality || "auto"
+  refs.qualitySelect.value = forms.quality || "high"
   refs.backgroundSelect.value = forms.background || "auto"
   refs.outputFormatSelect.value = forms.outputFormat || "png"
   refs.outputCompressionInput.value = forms.outputCompression || "100"
@@ -5518,7 +5544,7 @@ function getOpenAIImageOptions() {
   }
 
   const options = {
-    quality: refs.qualitySelect.value || "auto",
+    quality: refs.qualitySelect.value || "high",
     background: refs.backgroundSelect.value || "auto",
     output_format: outputFormat,
     moderation: refs.moderationSelect.value || "auto",
@@ -5588,7 +5614,7 @@ function applyFormSnapshot(snapshot) {
   refs.generatePromptInput.value = snapshot.generatePrompt || ""
   refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
   setGenerateSize(snapshot.generateSize || "auto")
-  refs.qualitySelect.value = snapshot.quality || "auto"
+  refs.qualitySelect.value = snapshot.quality || "high"
   refs.backgroundSelect.value = snapshot.background || "auto"
   refs.outputFormatSelect.value = snapshot.outputFormat || "png"
   refs.outputCompressionInput.value = snapshot.outputCompression || "100"
@@ -5939,6 +5965,10 @@ function errorDetailsWithRequestId(data = {}) {
     return details
   }
   return details ? `${details}\n\nrequest_id: ${requestId}` : `request_id: ${requestId}`
+}
+
+function isLocalAuthUnauthorized(response, data) {
+  return response.status === 401 && data?.code === "unauthorized" && data?.code !== "upstream_error"
 }
 
 function setStatusMessage(message = "") {
@@ -7196,6 +7226,9 @@ async function postJSON(url, payload, options = {}) {
       error: data.error || "请求失败",
       details: data.details || "",
     })
+    if (isLocalAuthUnauthorized(response, data)) {
+      enterAuthGate("login", "登录已过期，请重新登录。")
+    }
     const requestError = new Error(data.error || "请求失败")
     requestError.code = data.code || ""
     requestError.details = errorDetailsWithRequestId(data)
@@ -7226,6 +7259,9 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
     })
     const data = await response.json()
     if (!response.ok) {
+      if (isLocalAuthUnauthorized(response, data)) {
+        enterAuthGate("login", "登录已过期，请重新登录。")
+      }
       const requestError = new Error(data.error || "请求失败")
       requestError.details = errorDetailsWithRequestId(data)
       throw requestError
@@ -8480,7 +8516,7 @@ function clearGenerateForm() {
   restoreCreativeBrief({})
   clearGenerateReferenceImage()
   setGenerateSize(state.serverConfig.default_size || "auto")
-  refs.qualitySelect.value = "auto"
+  refs.qualitySelect.value = "high"
   refs.backgroundSelect.value = "auto"
   refs.outputFormatSelect.value = "png"
   refs.outputCompressionInput.value = "100"
@@ -8630,6 +8666,7 @@ function bindReferenceDropzone(dropzone, input, handler) {
 
 function bindEvents() {
   refs.authForm?.addEventListener("submit", submitAuthForm)
+  refs.loginAuthButton?.addEventListener("click", validateAuthFormInputs)
   refs.registerAuthButton?.addEventListener("click", () => {
     enterAuthGate(state.authMode === "register" ? "login" : "register")
   })
