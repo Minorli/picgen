@@ -592,8 +592,18 @@ def test_image_prompts_require_exact_user_text_rendering() -> None:
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
     assert "TEXT_RENDERING_FIDELITY_PROMPT" in app_js
+    assert "文字渲染分层要求" in app_js
     assert "必须逐字使用用户提供的文字" in app_js
     assert "不得改写、翻译、替换、增删或自行纠错" in app_js
+    assert "主标题/核心标题" in app_js
+    assert "高识别度商业美术字" in app_js
+    assert "手写标题" in app_js
+    assert "立体描边" in app_js
+    assert "金属或笔刷字效" in app_js
+    assert "不能被压成普通正文印刷字" in app_js
+    assert "正文/地名/日期/序号/说明/贴士" in app_js
+    assert "继续严格清晰逐字" in app_js
+    assert "如果用户文字很多，优先保持文字准确和清晰可读，再考虑装饰" not in app_js
     assert "VISIBLE_TEXT_CONTRACT_HEADING" in app_js
     assert "buildVisibleTextContract" in app_js
     assert "extractTextReplacementPairs" in app_js
