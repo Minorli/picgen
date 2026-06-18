@@ -1,6 +1,6 @@
 services:
   picgen:
-    image: minorli/picgen:0.1.41
+    image: minorli/picgen:0.1.42
     build:
       context: .
     ports:
