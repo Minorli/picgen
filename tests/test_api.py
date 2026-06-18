@@ -310,7 +310,7 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "Vatican City" in upstream_payload["prompt"]
 
 
-def test_generate_preserves_mismatched_upstream_size_without_padding(make_client, settings_factory):
+def test_generate_rejects_mismatched_strict_poster_size(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_json.return_value = {
@@ -329,17 +329,12 @@ def test_generate_preserves_mismatched_upstream_size_without_padding(make_client
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 502
     payload = response.json()
-    assert payload["size"] == "1088x2240"
-    assert payload["saved_image_width"] == 864
-    assert payload["saved_image_height"] == 1821
-    assert payload["metadata"]["saved_image_width"] == 864
-    assert payload["metadata"]["saved_image_height"] == 1821
-    assert "upstream_image_width" not in payload["metadata"]
-    assert "upstream_image_height" not in payload["metadata"]
-    assert "size_normalized" not in payload["metadata"]
-    assert "size_normalization_mode" not in payload["metadata"]
+    assert payload["code"] == "upstream_size_mismatch"
+    details = json.loads(payload["details"] or "{}")
+    assert details["requested_size"] == "1088x2240"
+    assert details["actual_sizes"] == ["864x1821"]
 
 
 def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
@@ -640,8 +635,8 @@ def test_edit_records_source_image_and_lists_version_chain(make_client, settings
         default_api_key="sk-test",
     )
     client, fake, resolved_settings = make_client(settings=settings)
-    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
-    fake.run_multipart.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 2}
+    fake.run_json.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 1}
+    fake.run_multipart.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 2}
 
     register_response = client.post(
         "/api/auth/register",
@@ -699,6 +694,68 @@ def test_edit_records_source_image_and_lists_version_chain(make_client, settings
     assert bob.status_code == 200
     forbidden = client.get(f"/api/generated-images/{edited_id}/versions")
     assert forbidden.status_code == 404
+
+
+def test_edit_records_source_image_and_requested_size_in_job_metadata(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 1}
+    fake.run_multipart.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 2}
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    original = client.post(
+        "/api/generate",
+        json={"prompt": "西班牙味觉地图", "model": "gpt-image-2", "size": "1088x2240"},
+    )
+    assert original.status_code == 200
+    original_id = original.json()["generated_image_id"]
+
+    edited = client.post(
+        "/api/edit",
+        json={
+            "prompt": "把“铁帆鱿鱼”改成“铁煎章鱼”，其他不要动",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+            "quality": "high",
+            "source_generated_image_id": original_id,
+            "image": {
+                "name": "source.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+    assert edited.status_code == 200
+    payload = edited.json()
+    assert payload["source_generated_image_id"] == original_id
+    assert payload["requested_size"] == "1088x2240"
+
+    upstream_fields = fake.run_multipart.await_args.args[2]
+    assert upstream_fields["size"] == "1088x2240"
+    assert upstream_fields["quality"] == "high"
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        image_row = conn.execute(
+            "SELECT source_generated_image_id FROM generated_images WHERE id = ?",
+            (payload["generated_image_id"],),
+        ).fetchone()
+        job_row = conn.execute(
+            "SELECT mode, size FROM generation_jobs WHERE id = ?",
+            (payload["generation_job_id"],),
+        ).fetchone()
+
+    assert image_row["source_generated_image_id"] == original_id
+    assert job_row["mode"] == "edit"
+    assert job_row["size"] == "1088x2240"
 
 
 def test_generate_rejects_unknown_prompt_recipe_without_upstream_call(make_client, settings_factory):
@@ -2324,6 +2381,106 @@ def test_responses_image_uploads_ordered_reference_images(make_client, settings_
     ]
 
 
+def test_responses_image_records_reference_source_generation_id(make_client, settings_factory):
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-test",
+    )
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 1}
+    fake.run_file_upload.return_value = {"id": "file_source"}
+    fake.run_responses.return_value = {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 2}
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    )
+    assert register_response.status_code == 200
+    original = client.post(
+        "/api/generate",
+        json={"prompt": "西班牙味觉地图", "model": "gpt-image-2", "size": "1088x2240"},
+    )
+    assert original.status_code == 200
+    original_id = original.json()["generated_image_id"]
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "把这张图改成更清晰的美食路线海报",
+            "model": "gpt-5.5",
+            "mode": "reference",
+            "size": "1088x2240",
+            "quality": "high",
+            "source_generated_image_id": original_id,
+            "images": [
+                {
+                    "name": "source.png",
+                    "type": "image/png",
+                    "role": "source_image",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_generated_image_id"] == original_id
+    assert payload["requested_size"] == "1088x2240"
+    assert payload["images"][0]["source_generated_image_id"] == original_id
+
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["tools"][0]["size"] == "1088x2240"
+    assert upstream_payload["tools"][0]["quality"] == "high"
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        image_row = conn.execute(
+            "SELECT source_generated_image_id FROM generated_images WHERE id = ?",
+            (payload["generated_image_id"],),
+        ).fetchone()
+        job_row = conn.execute(
+            "SELECT mode, size FROM generation_jobs WHERE id = ?",
+            (payload["generation_job_id"],),
+        ).fetchone()
+
+    assert image_row["source_generated_image_id"] == original_id
+    assert job_row["mode"] == "reference"
+    assert job_row["size"] == "1088x2240"
+
+
+def test_responses_image_rejects_strict_poster_size_mismatch(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(1024, 1536)}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "生成严格尺寸海报",
+            "model": "gpt-5.5",
+            "mode": "generate",
+            "size": "1088x2240",
+            "quality": "high",
+        },
+    )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["code"] == "upstream_size_mismatch"
+    details = json.loads(payload["details"] or "{}")
+    assert details["requested_size"] == "1088x2240"
+    assert details["actual_sizes"] == ["1024x1536"]
+
+
 def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
@@ -2358,6 +2515,54 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
     assert "版权与商标风险审查助手" in content[0]["text"]
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "output_text": (
+            "结论：不通过\n"
+            "缺失或疑似错误：铁煎章鱼\n"
+            "残留旧文字：铁帆鱿鱼"
+        ),
+    }
+
+    response = client.post(
+        "/api/text-fidelity",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/responses",
+            "prompt": "把“铁帆鱿鱼”改成“铁煎章鱼”，把“11日从头吃到尾”改成“舌尖盛宴”",
+            "text_contract": {
+                "required": ["舌尖盛宴", "铁煎章鱼"],
+                "forbidden": ["铁帆鱿鱼", "11日从头吃到尾"],
+            },
+            "images": [
+                {
+                    "name": "result.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "gpt-5.5"
+    assert payload["passed"] is False
+    assert "铁煎章鱼" in payload["fidelity_text"]
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert "文字一致性验收助手" in upstream_payload["instructions"]
+    content = upstream_payload["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert "必须出现：舌尖盛宴" in content[0]["text"]
+    assert "必须出现：铁煎章鱼" in content[0]["text"]
+    assert "不得出现：铁帆鱿鱼" in content[0]["text"]
+    assert "不得出现：11日从头吃到尾" in content[0]["text"]
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"].startswith("data:image/png;base64,")
 

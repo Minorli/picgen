@@ -29,6 +29,10 @@ const TEXT_RENDERING_FIDELITY_PROMPT = [
   "不得改写、翻译、替换、增删或自行纠错用户文字；不得把相近字、同音字、繁简字、英文或拼音替换进画面。",
   "如果用户文字很多，优先保持文字准确和清晰可读，再考虑装饰；不能为了版式美观牺牲文字准确性。",
 ].join("\n")
+const VISIBLE_TEXT_CONTRACT_HEADING = "可见文字合同（必须逐字验收）："
+const TEXT_CONTRACT_MAX_ITEMS = 48
+const TEXT_CONTRACT_LABEL_RE = /(?:主标题|副标题|标题|地区|代表名菜|日期|天数|文案|口号|小标题|行程|目的地|服务|亮点)\s*[:：]\s*([^\n]+)/giu
+const TEXT_REPLACEMENT_RE = /把\s*[“"']?([^“”"'，,；;\n]{1,80})[”"']?\s*(?:改成|替换成|换成|改为|变成)\s*[“"']?([^“”"'，,；;\n]{1,120})[”"']?/giu
 const TEAM_CHAT_MAX_MESSAGE_LENGTH = 4000
 const TEAM_CHAT_FAST_POLL_LIMIT = 8
 const TEAM_CHAT_MAX_RECENT_DMS = 8
@@ -166,6 +170,12 @@ const state = {
     hidden: true,
   },
   copyrightRiskRequestSeq: 0,
+  textFidelity: {
+    status: "等待检查",
+    text: "生成完成后自动检查用户文案。",
+    hidden: true,
+  },
+  textFidelityRequestSeq: 0,
   rawResponsePreview: null,
   debugLines: [],
   persistTimer: null,
@@ -442,6 +452,9 @@ const refs = {
   copyrightRiskPanel: document.querySelector("#copyrightRiskPanel"),
   copyrightRiskStatus: document.querySelector("#copyrightRiskStatus"),
   copyrightRiskText: document.querySelector("#copyrightRiskText"),
+  textFidelityPanel: document.querySelector("#textFidelityPanel"),
+  textFidelityStatus: document.querySelector("#textFidelityStatus"),
+  textFidelityText: document.querySelector("#textFidelityText"),
   logoOverlayEnabled: document.querySelector("#logoOverlayEnabled"),
   logoComposeStatus: document.querySelector("#logoComposeStatus"),
   itineraryIdEnabled: document.querySelector("#itineraryIdEnabled"),
@@ -1579,6 +1592,113 @@ function rejectLegacyProgramLayoutBackgroundPrompt(prompt) {
   setError(legacyProgramLayoutPromptMessage())
   refs.generatePromptInput.focus()
   return true
+}
+
+function normalizeTextContractItem(value) {
+  return String(value || "")
+    .replace(/[“”"']/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[：:，,；;、.\s]+|[：:，,；;、.\s]+$/g, "")
+}
+
+function addTextContractItem(items, value) {
+  const cleaned = normalizeTextContractItem(value)
+  if (!cleaned || cleaned.length < 2 || cleaned.length > 160) {
+    return
+  }
+  if (!items.includes(cleaned)) {
+    items.push(cleaned)
+  }
+}
+
+function extractTextReplacementPairs(prompt) {
+  const text = String(prompt || "")
+  const pairs = []
+  const seen = new Set()
+  const addPair = (fromValue, toValue) => {
+    const from = normalizeTextContractItem(fromValue)
+    const to = normalizeTextContractItem(toValue)
+    if (!from || !to || from === to) {
+      return
+    }
+    const key = `${from}\u0000${to}`
+    if (!seen.has(key)) {
+      pairs.push({ from, to })
+      seen.add(key)
+    }
+  }
+
+  const quotedPattern = /把\s*[“"']\s*([^”"']{1,200}?)\s*[”"']\s*(?:改成|替换成|换成|改为|变成)\s*[“"']\s*([^”"']{1,200}?)\s*[”"']/giu
+  for (const match of text.matchAll(quotedPattern)) {
+    addPair(match[1], match[2])
+  }
+
+  for (const line of text.split(/\n+/)) {
+    for (const match of line.matchAll(TEXT_REPLACEMENT_RE)) {
+      addPair(match[1], match[2])
+    }
+  }
+  return pairs
+}
+
+function extractLabeledVisibleText(prompt) {
+  const text = String(prompt || "")
+  const items = []
+  for (const match of text.matchAll(TEXT_CONTRACT_LABEL_RE)) {
+    const value = normalizeTextContractItem(match[1])
+    value
+      .split(/\s*[|｜]\s*|\s{2,}/)
+      .forEach((part) => addTextContractItem(items, part))
+  }
+  return items
+}
+
+function extractQuotedVisibleText(prompt) {
+  const items = []
+  for (const match of String(prompt || "").matchAll(/[“"']([^”"'\n]{2,120})[”"']/gu)) {
+    addTextContractItem(items, match[1])
+  }
+  return items
+}
+
+function buildVisibleTextContract(prompt) {
+  const required = []
+  const forbidden = []
+  const replacements = extractTextReplacementPairs(prompt)
+  replacements.forEach((pair) => {
+    addTextContractItem(forbidden, pair.from)
+    addTextContractItem(required, pair.to)
+  })
+  ;[...extractLabeledVisibleText(prompt), ...extractQuotedVisibleText(prompt)].forEach((item) => {
+    if (!forbidden.includes(item)) {
+      addTextContractItem(required, item)
+    }
+  })
+  return {
+    required: required.slice(0, TEXT_CONTRACT_MAX_ITEMS),
+    forbidden: forbidden.slice(0, TEXT_CONTRACT_MAX_ITEMS),
+    replacements,
+  }
+}
+
+function formatVisibleTextContractPrompt(contract) {
+  const required = Array.isArray(contract?.required) ? contract.required : []
+  const forbidden = Array.isArray(contract?.forbidden) ? contract.forbidden : []
+  if (!required.length && !forbidden.length) {
+    return ""
+  }
+  const lines = [
+    VISIBLE_TEXT_CONTRACT_HEADING,
+    "必须出现以下文字，逐字一致；可以做字体、描边、阴影、手写或艺术化处理，但不能换字、漏字、增字或改顺序。",
+    ...required.map((item) => `- ${item}`),
+  ]
+  if (forbidden.length) {
+    lines.push("旧文字不得继续出现；如果输入图里存在这些旧字，必须替换或清除：")
+    lines.push(...forbidden.map((item) => `- ${item}`))
+  }
+  lines.push("验收标准：成图中任一必需短语缺失、错字、同音替换、繁简误换、数字符号错误或旧文字残留，都视为失败。")
+  return lines.join("\n")
 }
 
 function updatePromptModeUI() {
@@ -4689,6 +4809,7 @@ function createWorkspaceSnapshot() {
       currentComparisonSource: state.currentComparisonSource,
       rawResponsePreview: state.rawResponsePreview,
       copyrightRisk: state.copyrightRisk,
+      textFidelity: state.textFidelity,
       resultCandidates: state.resultCandidates,
       selectedCandidateIndex: state.selectedCandidateIndex,
     },
@@ -4805,6 +4926,9 @@ async function restoreWorkspaceState() {
   if (result.copyrightRisk && typeof result.copyrightRisk === "object") {
     state.copyrightRisk = result.copyrightRisk
   }
+  if (result.textFidelity && typeof result.textFidelity === "object") {
+    state.textFidelity = result.textFidelity
+  }
 
   if (state.resultPreview?.src) {
     refs.resultPreviewLabel.textContent = result.labelText || "输出"
@@ -4821,6 +4945,7 @@ async function restoreWorkspaceState() {
     )
     renderResultCandidates()
     restoreCopyrightRiskPanel()
+    restoreTextFidelityPanel()
   }
 
   const source = snapshot.source || {}
@@ -4888,6 +5013,8 @@ function modelInputAssetForLogoWorkflow(asset) {
     fileUrl: asset.originalFileUrl || "",
     src: asset.originalDataUrl || asset.originalSavedUrl || asset.originalFileUrl || "",
     savedPath: asset.originalSavedPath || asset.savedPath || "",
+    generatedImageId: asset.generatedImageId || null,
+    sourceGeneratedImageId: asset.sourceGeneratedImageId || null,
     logoOverlayApplied: false,
     description: `未贴 LOGO 的生成主体图 · ${asset.name || "最新结果"}`,
   }
@@ -5271,7 +5398,12 @@ function getExplicitItineraryId() {
 
 function withTextRenderingFidelityPrompt(prompt) {
   const basePrompt = String(prompt || "").trim()
-  return [basePrompt, TEXT_RENDERING_FIDELITY_PROMPT].filter(Boolean).join("\n\n")
+  const textContract = buildVisibleTextContract(basePrompt)
+  return [
+    basePrompt,
+    TEXT_RENDERING_FIDELITY_PROMPT,
+    formatVisibleTextContractPrompt(textContract),
+  ].filter(Boolean).join("\n\n")
 }
 
 function withLogoLayoutPrompt(prompt, logoRequested = shouldUseCompanyLogo()) {
@@ -5995,12 +6127,33 @@ function setRiskPanel(status, text, { hidden = false } = {}) {
   scheduleWorkspacePersist()
 }
 
+function setTextFidelityPanel(status, text, { hidden = false } = {}) {
+  state.textFidelity = { status, text, hidden }
+  refs.textFidelityPanel?.classList.toggle("hidden", hidden)
+  if (refs.textFidelityStatus) {
+    refs.textFidelityStatus.textContent = status
+  }
+  if (refs.textFidelityText) {
+    refs.textFidelityText.textContent = text
+  }
+  scheduleWorkspacePersist()
+}
+
 function restoreCopyrightRiskPanel() {
   const risk = state.copyrightRisk || {}
   setRiskPanel(
     risk.status || "等待检查",
     risk.text || "生成完成后自动检查。",
     { hidden: risk.hidden !== false },
+  )
+}
+
+function restoreTextFidelityPanel() {
+  const fidelity = state.textFidelity || {}
+  setTextFidelityPanel(
+    fidelity.status || "等待检查",
+    fidelity.text || "生成完成后自动检查用户文案。",
+    { hidden: fidelity.hidden !== false },
   )
 }
 
@@ -6189,8 +6342,11 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
   }
 
   const inputAsset = modelInputAssetForLogoWorkflow(state.lastResultImage)
+  const usesBaseImage = inputAsset !== state.lastResultImage
   const asset = cloneImageAsset(inputAsset, {
     origin: "result",
+    generatedImageId: state.lastResultImage.generatedImageId,
+    sourceGeneratedImageId: state.lastResultImage.sourceGeneratedImageId || null,
     description: usesBaseImage
       ? `自动使用未贴 LOGO 的主体图 · ${inputAsset.name}`
       : `自动使用最新结果 · ${inputAsset.name}`,
@@ -6523,6 +6679,7 @@ function snapshotCurrentResultState() {
     lastFeedbackRating: state.lastFeedbackRating,
     galleryMeta: state.currentGalleryMeta ? { ...state.currentGalleryMeta } : null,
     copyrightRisk: state.copyrightRisk ? { ...state.copyrightRisk } : null,
+    textFidelity: state.textFidelity ? { ...state.textFidelity } : null,
   }
 }
 
@@ -6565,11 +6722,13 @@ function restoreResultStateSnapshot(snapshot) {
   state.lastFeedbackRating = snapshot.lastFeedbackRating || null
   state.debugLines = Array.isArray(snapshot.debugLines) ? [...snapshot.debugLines] : []
   state.copyrightRisk = snapshot.copyrightRisk || state.copyrightRisk
+  state.textFidelity = snapshot.textFidelity || state.textFidelity
   setGalleryEditorMeta(snapshot.galleryMeta || null)
 
   renderRawResponsePreview()
   renderResultCandidates()
   restoreCopyrightRiskPanel()
+  restoreTextFidelityPanel()
   updateOriginalDownloadButton(selectedResultCandidate())
   updatePreviewAvailability()
   updateResultActionSurface()
@@ -6935,8 +7094,11 @@ async function setResult(payload, durationMs, requestSource = null) {
     applySourcePreview(requestSource, payload.mode === "variant" ? "延展前" : "编辑前")
 
     if (state.lastResultImage) {
-      state.editImage = cloneImageAsset(state.lastResultImage, {
+      const followupSource = modelInputAssetForLogoWorkflow(state.lastResultImage)
+      state.editImage = cloneImageAsset(followupSource, {
         origin: "result",
+        generatedImageId: state.lastResultImage.generatedImageId,
+        sourceGeneratedImageId: state.lastResultImage.sourceGeneratedImageId || null,
         description: `下一次编辑将默认使用最新输出 · ${state.lastResultImage.name}`,
       })
     }
@@ -6947,8 +7109,11 @@ async function setResult(payload, durationMs, requestSource = null) {
     }
 
     if (payload.mode === "generate" && state.lastResultImage) {
-      state.editImage = cloneImageAsset(state.lastResultImage, {
+      const followupSource = modelInputAssetForLogoWorkflow(state.lastResultImage)
+      state.editImage = cloneImageAsset(followupSource, {
         origin: "result",
+        generatedImageId: state.lastResultImage.generatedImageId,
+        sourceGeneratedImageId: state.lastResultImage.sourceGeneratedImageId || null,
         description: `自动使用最新结果 · ${state.lastResultImage.name}`,
       })
     }
@@ -7016,7 +7181,11 @@ async function setResult(payload, durationMs, requestSource = null) {
     setDownloadPendingLogo()
     void composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq)
   }
-  void checkCopyrightRisk(payload)
+  const checks = [
+    checkCopyrightRisk(payload),
+    checkTextFidelity({ ...payload, text_contract: payload.text_contract || payload.textContract || {} }),
+  ]
+  void Promise.allSettled(checks)
   void refreshUsageSummary()
   void refreshImageStats()
   void refreshGallery()
@@ -7338,6 +7507,93 @@ async function checkCopyrightRisk(payload) {
     }
     appendDebugLine("版权风险检查失败", { error: error.message })
     setRiskPanel("检查失败", error.message || "版权风险检查失败，不影响图片生成结果。")
+  }
+}
+
+async function checkTextFidelity(payload) {
+  const contract = payload.text_contract || payload.textContract || {}
+  const required = Array.isArray(contract.required) ? contract.required.filter(Boolean) : []
+  const forbidden = Array.isArray(contract.forbidden) ? contract.forbidden.filter(Boolean) : []
+  if (!required.length && !forbidden.length) {
+    setTextFidelityPanel("未检查", "当前提示词没有抽取到明确上屏文案。", { hidden: true })
+    return
+  }
+
+  const fidelityRequestSeq = state.textFidelityRequestSeq += 1
+  const resultGenerationSeq = state.resultGenerationSeq
+  const settings = getSettings()
+  if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
+    setTextFidelityPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做文字一致性检查。")
+    return
+  }
+
+  const selectedCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
+  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, state.selectedCandidateIndex || 0)
+  let sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
+  if (!sourceDataUrl && selectedAsset) {
+    try {
+      sourceDataUrl = await ensureAssetDataUrl(selectedAsset)
+      if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
+    } catch (error) {
+      appendDebugLine("文字一致性检查取图失败", { error: error.message })
+    }
+  }
+  let reviewDataUrl = ""
+  try {
+    reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl, 1600, 0.92)
+  } catch (error) {
+    appendDebugLine("文字一致性检查缩略图失败", { error: error.message })
+    setTextFidelityPanel("检查失败", error.message || "文字一致性检查无法读取结果图。")
+    return
+  }
+  if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+    return
+  }
+  const images = reviewDataUrl
+    ? [{
+        name: selectedAsset?.name || "selected-result.jpg",
+        type: inferMimeFromDataUrl(reviewDataUrl),
+        data_url: reviewDataUrl,
+      }]
+    : []
+
+  if (!images.length) {
+    setTextFidelityPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    return
+  }
+
+  setTextFidelityPanel("检查中", "正在核对成图中文字是否逐字匹配用户输入。")
+  try {
+    const result = await postJSONSilent("api/text-fidelity", {
+      api_key: settings.apiKey,
+      endpoint_url: settings.responsesUrl,
+      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      prompt: payload.prompt || state.lastResultPrompt || "",
+      context: [
+        `模式：${payload.mode || ""}`,
+        `模型：${payload.model || ""}`,
+        `尺寸：${payload.size || ""}`,
+      ].filter(Boolean).join("\n"),
+      text_contract: { required, forbidden },
+      images,
+    })
+    if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
+    if (result.passed) {
+      setTextFidelityPanel("文字通过", result.fidelity_text || "文字一致性检查通过。")
+    } else {
+      setTextFidelityPanel("文字需复核", result.fidelity_text || "文字一致性检查未通过。")
+      setError("文字一致性检查未通过：请复核成图文字，必要时再次编辑或重生成。")
+    }
+  } catch (error) {
+    if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
+    appendDebugLine("文字一致性检查失败", { error: error.message })
+    setTextFidelityPanel("检查失败", error.message || "文字一致性检查失败，不影响图片生成结果。")
   }
 }
 
@@ -7965,6 +8221,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     updatePromptCounters()
     updateEffectivePromptPreview()
   }
+  const textContract = buildVisibleTextContract(effectivePrompt)
   confirmedPrompt = withLogoLayoutPrompt(effectivePrompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
@@ -8011,6 +8268,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
         source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
         ...sourceImageIdentityFields(requestSource),
         size,
         ...imageOptions,
@@ -8031,6 +8289,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
         source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
         ...sourceImageIdentityFields(requestSource),
         size,
         ...imageOptions,
@@ -8042,7 +8301,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         waitingLabel: "等待上游延展",
       })
     }
-    await setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    await setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "variant",
@@ -8051,6 +8310,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       transport,
       logoRequested,
       itineraryId,
+      textContract,
       size,
       ...imageOptions,
       createdAt: new Date().toISOString(),
@@ -8164,6 +8424,7 @@ async function submitGenerate() {
     updateEffectivePromptPreview()
   }
   baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
+  const textContract = buildVisibleTextContract(baseRequestPrompt)
   confirmedPrompt = withLogoLayoutPrompt(baseRequestPrompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
@@ -8203,6 +8464,8 @@ async function submitGenerate() {
       }
       const requestParts = referenceParts
       const referencePart = requestParts.at(-1)
+      const referenceLineageSource = requestSources.at(-1)
+      const sourceGeneratedImageId = referenceLineageSource?.generatedImageId || null
       const transport = referenceViaResponses ? "responses-image" : "images-edit"
       const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
       let result
@@ -8224,6 +8487,9 @@ async function submitGenerate() {
           allow_inline_fallback: true,
           logo_requested: logoRequested,
           itinerary_id: itineraryId,
+          source_generated_image_id: sourceGeneratedImageId,
+          text_contract: textContract,
+          ...sourceImageIdentityFields(referenceLineageSource),
           sample_count: referenceSampleCount,
           size,
           ...imageOptions,
@@ -8247,6 +8513,9 @@ async function submitGenerate() {
           mode: "reference",
           logo_requested: logoRequested,
           itinerary_id: itineraryId,
+          source_generated_image_id: sourceGeneratedImageId,
+          text_contract: textContract,
+          ...sourceImageIdentityFields(referenceLineageSource),
           sample_count: referenceSampleCount,
           size,
           ...imageOptions,
@@ -8258,7 +8527,7 @@ async function submitGenerate() {
           waitingLabel: "等待上游参考生成",
         })
       }
-      await setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSources.at(-1))
+      await setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
       rememberRegenerationRequest("generate", requestSnapshot)
       pushHistory({
         mode: "reference",
@@ -8267,6 +8536,8 @@ async function submitGenerate() {
         transport,
         logoRequested,
         itineraryId,
+        sourceGeneratedImageId,
+        textContract,
         size,
         sampleCount: referenceSampleCount,
         ...imageOptions,
@@ -8296,6 +8567,7 @@ async function submitGenerate() {
         allow_inline_fallback: true,
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
+        text_contract: textContract,
         sample_count: sampleCount,
         size,
         ...imageOptions,
@@ -8316,6 +8588,7 @@ async function submitGenerate() {
         model,
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
+        text_contract: textContract,
         sample_count: sampleCount,
         size,
         ...imageOptions,
@@ -8325,7 +8598,7 @@ async function submitGenerate() {
         waitingLabel: "等待上游生成",
       })
     }
-    await setResult({ ...result, logo_requested: logoRequested }, performance.now() - startedAt)
+    await setResult({ ...result, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
@@ -8334,6 +8607,7 @@ async function submitGenerate() {
       transport,
       logoRequested,
       itineraryId,
+      textContract,
       sampleCount,
       size,
       ...imageOptions,
@@ -8361,11 +8635,14 @@ async function submitEdit() {
   const settings = getSettings()
   const useResponses = settings.imageTransport === "responses"
   const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
-  const model = useResponses ? settings.responsesModel : imageModel
-  const transport = useResponses ? "responses-image" : "images-edit"
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
   let confirmedPrompt = ""
+  let size
+  let imageOptions
+  let forceResponsesForSize = false
+  let model = imageModel
+  let transport = "images-edit"
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -8380,8 +8657,20 @@ async function submitEdit() {
     return
   }
 
-  if (useResponses) {
-    if (!requireResponsesSettings(settings, "编辑图像")) {
+  try {
+    size = getGenerateSize()
+    imageOptions = getOpenAIImageOptions()
+    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
+    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
+    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
+  } catch (error) {
+    appendDebugLine("参数校验失败：编辑图片参数无效", { error: error.message })
+    setError(error.message, error.details)
+    return
+  }
+
+  if (useResponses || forceResponsesForSize) {
+    if (!requireResponsesSettings(settings, forceResponsesForSize ? "精确海报尺寸编辑" : "编辑图像")) {
       return
     }
   } else if (!requireEditSettings(settings, "编辑图像")) {
@@ -8396,6 +8685,7 @@ async function submitEdit() {
   prompt = confirmedText
   refs.editPromptInput.value = confirmedText
   updatePromptCounters()
+  const textContract = buildVisibleTextContract(prompt)
   confirmedPrompt = withEditPreservePrompt(prompt, logoRequested)
 
   const requestSnapshot = currentFormSnapshot()
@@ -8409,6 +8699,7 @@ async function submitEdit() {
     mode: "edit",
     prompt,
     model,
+    size,
     sourceName: requestSource.name || "输入图",
   })
   const startedAt = performance.now()
@@ -8439,7 +8730,10 @@ async function submitEdit() {
     }
 
     let result
-    if (useResponses) {
+    if (useResponses || forceResponsesForSize) {
+      if (forceResponsesForSize && !useResponses) {
+        appendDebugLine("非标准海报尺寸编辑改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
+      }
       const requestPayload = {
         api_key: settings.apiKey,
         endpoint_url: settings.responsesUrl,
@@ -8451,6 +8745,9 @@ async function submitEdit() {
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
         source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
+        size,
+        ...imageOptions,
         ...sourceImageIdentityFields(requestSource),
         image: imagePart,
         images: [imagePart],
@@ -8473,6 +8770,9 @@ async function submitEdit() {
         logo_requested: logoRequested,
         itinerary_id: itineraryId,
         source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
+        size,
+        ...imageOptions,
         ...sourceImageIdentityFields(requestSource),
         image: imagePart,
         images: [imagePart],
@@ -8486,7 +8786,7 @@ async function submitEdit() {
         waitingLabel: "等待上游编辑",
       })
     }
-    await setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested }, performance.now() - startedAt, requestSource)
+    await setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested, size, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("edit", requestSnapshot)
     pushHistory({
       mode: "edit",
@@ -8495,6 +8795,9 @@ async function submitEdit() {
       transport,
       logoRequested,
       itineraryId,
+      textContract,
+      size,
+      ...imageOptions,
       createdAt: new Date().toISOString(),
     })
   } catch (error) {

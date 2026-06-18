@@ -93,6 +93,7 @@ from .schemas import (
     ShareResultRequest,
     TeamChatMessageRequest,
     TeamChatReadRequest,
+    TextFidelityRequest,
     UserPreferencesRequest,
     UserProfileRequest,
 )
@@ -126,6 +127,15 @@ _ITINERARY_ID_RE = re.compile(
 def _strict_requested_size(size: str | None) -> bool:
     cleaned = (size or "").strip()
     return bool(cleaned and cleaned != "auto")
+
+
+def _parse_requested_size(size: Any) -> tuple[int, int] | None:
+    if not isinstance(size, str):
+        return None
+    match = re.fullmatch(r"\s*(\d{2,5})x(\d{2,5})\s*", size)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +173,11 @@ TEAM_CHAT_BOT_INSTRUCTIONS = (
     "你是 PicGen 团队聊天里的 GPT-BOT。用中文回复，专业、简洁、可信；群聊被 @ 时回复要艾特提问者，私聊直接回复。"
 )
 COPYRIGHT_RISK_INSTRUCTIONS = "你是图片版权与商标风险审查助手。用中文输出简短、务实、非法律意见的风险提醒。"
+TEXT_FIDELITY_INSTRUCTIONS = (
+    "你是 PicGen 的图片文字一致性验收助手。你会收到一张最终图和文字合同。"
+    "只检查图片中可读文字是否和合同一致，不评价美感，不重写文案。"
+    "必须逐字核对中文、数字、符号、英文大小写和顺序。"
+)
 
 
 def get_settings(request: Request) -> Settings:
@@ -2700,6 +2715,18 @@ def create_router() -> APIRouter:
             await _with_timing("/api/copyright-risk", handle_copyright_risk, body, settings, client, request=request)
         )
 
+    @router.post("/api/text-fidelity")
+    async def text_fidelity(
+        request: Request,
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        client: UpstreamClient = Depends(get_client),
+        _user: AuthUser | None = Depends(require_current_user),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await _with_timing("/api/text-fidelity", handle_text_fidelity, body, settings, client, request=request)
+        )
+
     return router
 
 
@@ -2721,6 +2748,37 @@ def _copyright_risk_prompt(parsed: CopyrightRiskRequest) -> str:
         f"用户提示词：{prompt or '未提供'}\n"
         f"生成上下文：{context or '未提供'}"
     )
+
+
+def _text_fidelity_prompt(parsed: TextFidelityRequest) -> str:
+    contract = parsed.text_contract
+    required_lines = [f"- 必须出现：{item}" for item in contract.required]
+    forbidden_lines = [f"- 不得出现：{item}" for item in contract.forbidden]
+    checks = "\n".join([*required_lines, *forbidden_lines]) or "- 未提供明确文字合同。"
+    return (
+        "请检查图片中文字是否满足下面的文字合同。只基于图片里可读文字判断；"
+        "如果图中对应区域模糊、缺字、错字、漏字、同音替换、顺序错误，也算不通过。\n"
+        "输出格式：\n"
+        "结论：通过/不通过\n"
+        "缺失或疑似错误：没有则写“无”，否则列短语\n"
+        "残留旧文字：没有则写“无”，否则列短语\n"
+        "说明：一句话说明。\n\n"
+        f"文字合同：\n{checks}\n\n"
+        f"用户提示词：{parsed.prompt.strip() or '未提供'}\n"
+        f"生成上下文：{parsed.context.strip() or '未提供'}"
+    )
+
+
+def _text_fidelity_passed(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    if not normalized:
+        return False
+    if "结论：通过" in normalized or "结论:通过" in normalized:
+        return True
+    failure_markers = ("结论：不通过", "结论:不通过", "不通过", "缺失", "疑似错误", "残留旧文字", "错字", "漏字")
+    if any(marker in normalized for marker in failure_markers):
+        return False
+    return False
 
 
 def _parse_team_chat_mentions(content: str) -> list[str]:
@@ -2991,6 +3049,49 @@ async def handle_copyright_risk(
     }
 
 
+async def handle_text_fidelity(
+    body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
+) -> dict[str, Any]:
+    payload = _ensure_dict(body)
+    parsed = _validate_request(TextFidelityRequest, payload)
+
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 图像接口 URL",
+    )
+    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
+    api_key = (parsed.api_key or settings.default_api_key).strip()
+    if not api_key:
+        raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
+
+    image_parts = _request_image_parts(
+        image=None,
+        images=parsed.images,
+        max_image_bytes=settings.max_image_bytes,
+    )
+    content = _responses_inline_input_content(_text_fidelity_prompt(parsed), image_parts)
+    upstream_payload = {
+        "model": model,
+        "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+        "input": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+    }
+    upstream_response = await client.run_responses(
+        endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+    )
+    fidelity_text = _extract_text_output(upstream_response) or "未能解析文字一致性检查结果。"
+    return {
+        "model": model,
+        "passed": _text_fidelity_passed(fidelity_text),
+        "fidelity_text": fidelity_text,
+        "raw_response": compact_raw_response(upstream_response),
+    }
+
+
 def _user_metadata(user: AuthUser | None) -> dict[str, Any]:
     if user is None:
         return {}
@@ -3020,6 +3121,46 @@ def _result_saved_bytes(result: dict[str, Any]) -> int:
         return total
     value = result.get("saved_image_bytes")
     return value if isinstance(value, int) else 0
+
+
+def _image_dimensions_for_size_check(image: dict[str, Any]) -> tuple[int, int] | None:
+    width = image.get("saved_image_width")
+    height = image.get("saved_image_height")
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return width, height
+    return None
+
+
+def _ensure_strict_image_size(saved: dict[str, Any], save_context: dict[str, Any]) -> None:
+    if not save_context.get("strict_size"):
+        return
+    requested_size = str(save_context.get("requested_size") or save_context.get("size") or "").strip()
+    expected = _parse_requested_size(requested_size)
+    if expected is None:
+        return
+
+    images = saved.get("images")
+    candidates = [item for item in images if isinstance(item, dict)] if isinstance(images, list) else [saved]
+    mismatches: list[str] = []
+    for image in candidates:
+        actual = _image_dimensions_for_size_check(image)
+        if actual is None:
+            continue
+        if actual != expected:
+            mismatches.append(f"{actual[0]}x{actual[1]}")
+    if not mismatches:
+        return
+
+    actual_summary = ", ".join(dict.fromkeys(mismatches))
+    raise APIError(
+        HTTPStatus.BAD_GATEWAY,
+        f"上游返回图片尺寸不符合用户选择：请求尺寸 {expected[0]}x{expected[1]}，实际返回 {actual_summary}。",
+        json.dumps(
+            {"requested_size": f"{expected[0]}x{expected[1]}", "actual_sizes": list(dict.fromkeys(mismatches))},
+            ensure_ascii=False,
+        ),
+        code="upstream_size_mismatch",
+    )
 
 
 def _should_track_generation_job(path: str) -> bool:
@@ -3925,6 +4066,7 @@ async def _finalize_image_response(
             compact_raw_response(upstream_response),
             code="upstream_no_image",
         )
+    _ensure_strict_image_size(saved, save_context)
     return {**extra, **saved}
 
 

@@ -2321,6 +2321,19 @@ select:focus,
   white-space: pre-wrap;
 }
 
+.text-fidelity-panel {
+  border-color: rgba(37, 99, 235, 0.22);
+  background: #eff6ff;
+}
+
+.text-fidelity-panel .risk-panel-title {
+  color: #1d4ed8;
+}
+
+.text-fidelity-panel .risk-panel-title strong {
+  color: #1e3a8a;
+}
+
 .logo-panel {
   display: grid;
   gap: 10px;

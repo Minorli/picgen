@@ -299,6 +299,53 @@ def test_logo_final_images_use_original_asset_for_followup_model_input() -> None
     assert "modelInputAssetForLogoWorkflow(state.editImage, logoRequested)" not in app_js
 
 
+def test_continue_edit_source_keeps_generation_lineage_and_uses_defined_base_asset_flag() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    use_start = app_js.index("function useLastResultAsEditSource")
+    use_end = app_js.index("function setMode", use_start)
+    use_block = app_js[use_start:use_end]
+    assert "const usesBaseImage = inputAsset !== state.lastResultImage" in use_block
+    assert "generatedImageId: state.lastResultImage.generatedImageId" in use_block
+    assert "sourceGeneratedImageId: state.lastResultImage.sourceGeneratedImageId || null" in use_block
+
+    result_start = app_js.index("async function setResult")
+    result_end = app_js.index("const metaLabel =", result_start)
+    result_block = app_js[result_start:result_end]
+    assert "const followupSource = modelInputAssetForLogoWorkflow(state.lastResultImage)" in result_block
+    assert "generatedImageId: state.lastResultImage.generatedImageId" in result_block
+    assert "state.editImage = cloneImageAsset(followupSource" in result_block
+    assert "sourceGeneratedImageId: state.lastResultImage.sourceGeneratedImageId || null" in result_block
+
+
+def test_edit_requests_send_selected_size_and_quality_for_strict_poster_edits() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    submit_start = app_js.index("async function submitEdit")
+    submit_end = app_js.index("function clearGenerateForm", submit_start)
+    submit_block = app_js[submit_start:submit_end]
+    assert "size = getGenerateSize()" in submit_block
+    assert "imageOptions = getOpenAIImageOptions()" in submit_block
+    assert "forceResponsesForSize = shouldUseResponsesForSelectedSize(size)" in submit_block
+    assert 'transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"' in submit_block
+    assert "size," in submit_block
+    assert "...imageOptions" in submit_block
+    assert "mode: \"edit\"" in submit_block
+
+
+def test_reference_generation_keeps_source_lineage_when_reference_is_generated_asset() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    submit_start = app_js.index("async function submitGenerate")
+    reference_start = app_js.index("const requestParts = referenceParts", submit_start)
+    reference_end = app_js.index('await setResult({ ...result, mode: "reference"', reference_start)
+    reference_block = app_js[reference_start:reference_end]
+    assert "const referenceLineageSource = requestSources.at(-1)" in reference_block
+    assert "const sourceGeneratedImageId = referenceLineageSource?.generatedImageId || null" in reference_block
+    assert "source_generated_image_id: sourceGeneratedImageId" in reference_block
+    assert "...sourceImageIdentityFields(referenceLineageSource)" in reference_block
+
+
 def test_image_centric_workspace_actions_and_brand_download_gateway_are_present() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -542,10 +589,20 @@ def test_edit_prompt_preserves_user_assets_dates_routes_and_logo() -> None:
 
 def test_image_prompts_require_exact_user_text_rendering() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
     assert "TEXT_RENDERING_FIDELITY_PROMPT" in app_js
     assert "必须逐字使用用户提供的文字" in app_js
     assert "不得改写、翻译、替换、增删或自行纠错" in app_js
+    assert "VISIBLE_TEXT_CONTRACT_HEADING" in app_js
+    assert "buildVisibleTextContract" in app_js
+    assert "extractTextReplacementPairs" in app_js
+    assert "必须出现以下文字，逐字一致" in app_js
+    assert "旧文字不得继续出现" in app_js
+    assert "TEXT_REPLACEMENT_RE" in app_js
+    assert "改成|替换成|换成|改为|变成" in app_js
+    assert "formatVisibleTextContractPrompt(textContract)" in app_js
+    assert "text_contract: textContract" in app_js
     assert "withTextRenderingFidelityPrompt" in app_js
     assert "withTextRenderingFidelityPrompt(prompt)" in app_js
     assert "withTextRenderingFidelityPrompt(requestText)" in app_js
@@ -554,6 +611,25 @@ def test_image_prompts_require_exact_user_text_rendering() -> None:
     assert "confirmedPrompt = withEditPreservePrompt(prompt, logoRequested)" in app_js
     assert "prompt: confirmedPrompt" in app_js
     assert "prompt: requestPrompt" not in app_js
+    assert 'id="textFidelityPanel"' in index_html
+    assert 'id="textFidelityStatus"' in index_html
+    assert 'id="textFidelityText"' in index_html
+
+
+def test_generated_images_run_text_fidelity_check_against_required_phrases() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "function setTextFidelityPanel" in app_js
+    assert "function restoreTextFidelityPanel" in app_js
+    assert "async function checkTextFidelity" in app_js
+    assert "api/text-fidelity" in app_js
+    assert "text_contract: payload.text_contract || payload.textContract || {}" in app_js
+    assert "文字一致性检查缩略图失败" in app_js
+    assert (
+        "checkTextFidelity({ ...payload, text_contract: payload.text_contract || payload.textContract || {} })"
+        in app_js
+    )
+    assert "void Promise.allSettled(checks)" in app_js
 
 
 def test_prompt_confirmation_modal_blocks_generation_until_checked() -> None:
