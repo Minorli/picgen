@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import httpx
+
+from picgen.config import Settings
 from picgen.notifications import (
     ErrorAlert,
     GenerationSuccessAlert,
     _build_bug_report_content,
+    _send_telegram_message,
     build_bug_report_telegram_text,
     build_error_alert_text,
     build_generation_success_alert_text,
@@ -253,6 +257,43 @@ def test_admin_telegram_text_has_clear_categories_and_titles() -> None:
     assert "Browser <script> & bot" in reset_text
     assert "###" not in reset_text
     assert "\n>" not in reset_text
+
+
+def test_telegram_notification_timeout_default_is_not_too_aggressive() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.error_alert_telegram_timeout_seconds == 15.0
+
+
+async def test_telegram_notification_failure_keeps_diagnostic_error(settings_factory, monkeypatch) -> None:
+    settings = settings_factory(
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+        error_alert_telegram_timeout_seconds=15,
+    )
+
+    class _BrokenAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ConnectTimeout("")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _BrokenAsyncClient)
+
+    result = await _send_telegram_message(settings=settings, content="hello")
+
+    assert result.configured is True
+    assert result.sent is False
+    assert result.status == "failed"
+    assert "ConnectTimeout" in result.error
+    assert result.error.strip()
 
 
 async def test_admin_notifications_use_telegram_when_configured(settings_factory, respx_mock) -> None:

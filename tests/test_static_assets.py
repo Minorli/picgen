@@ -26,10 +26,11 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert "白色底板" in app_js
     assert "logo_text_color" in app_js
     assert 'textColor: "original"' in app_js
-    assert "analyzeLogoBackground" in app_js
-    assert "drawLogoContrastMatte" in app_js
-    assert "soft-warm-matte" in app_js
-    assert "backgroundLuminance" in app_js
+    assert "drawLogoContrastMatte" not in app_js
+    assert "soft-warm-matte" not in app_js
+    assert "rgba(255, 244, 218" not in app_js
+    assert "contrastMatte" not in app_js
+    assert "ctx.drawImage(scaledLogoCanvas, placement.x, placement.y)" in app_js
     assert "官方 LOGO 缺少透明背景" in app_js
     assert 'imageSmoothingQuality = "high"' in app_js
     assert "chooseLogoTextColorForPlacement" not in app_js

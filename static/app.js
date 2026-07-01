@@ -11,9 +11,6 @@ const COMPANY_LOGO_MAX_WIDTH = 220
 const COMPANY_LOGO_MARGIN_RATIO = 0.04
 const COMPANY_LOGO_MIN_MARGIN = 16
 const COMPANY_LOGO_MAX_MARGIN = 42
-const COMPANY_LOGO_CONTRAST_LUMINANCE_MIN = 150
-const COMPANY_LOGO_CONTRAST_COMPLEXITY_MAX = 18
-const COMPANY_LOGO_CONTRAST_PAD_RATIO = 0.18
 const COMPANY_LOGO_LAYOUT_PROMPT = [
   "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留自然干净的留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
@@ -7739,67 +7736,6 @@ function calculateRegionComplexity(ctx, region) {
   return count ? total / count : 0
 }
 
-function analyzeLogoBackground(ctx, placement) {
-  const x = Math.max(0, Math.floor(placement.x))
-  const y = Math.max(0, Math.floor(placement.y))
-  const width = Math.max(1, Math.min(ctx.canvas.width - x, Math.floor(placement.width)))
-  const height = Math.max(1, Math.min(ctx.canvas.height - y, Math.floor(placement.height)))
-  const imageData = ctx.getImageData(x, y, width, height)
-  const stepX = Math.max(1, Math.floor(width / 24))
-  const stepY = Math.max(1, Math.floor(height / 12))
-  let luminanceTotal = 0
-  let count = 0
-  for (let py = 0; py < height; py += stepY) {
-    for (let px = 0; px < width; px += stepX) {
-      const index = (py * width + px) * 4
-      luminanceTotal += 0.2126 * imageData.data[index]
-        + 0.7152 * imageData.data[index + 1]
-        + 0.0722 * imageData.data[index + 2]
-      count += 1
-    }
-  }
-  const complexity = calculateRegionComplexity(ctx, { x, y, width, height })
-  return {
-    luminance: count ? luminanceTotal / count : 255,
-    complexity,
-  }
-}
-
-function roundedRectPath(ctx, x, y, width, height, radius) {
-  const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2))
-  ctx.moveTo(x + safeRadius, y)
-  ctx.lineTo(x + width - safeRadius, y)
-  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius)
-  ctx.lineTo(x + width, y + height - safeRadius)
-  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height)
-  ctx.lineTo(x + safeRadius, y + height)
-  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius)
-  ctx.lineTo(x, y + safeRadius)
-  ctx.quadraticCurveTo(x, y, x + safeRadius, y)
-}
-
-function drawLogoContrastMatte(ctx, placement, analysis) {
-  const needsMatte = analysis.luminance < COMPANY_LOGO_CONTRAST_LUMINANCE_MIN
-    || analysis.complexity > COMPANY_LOGO_CONTRAST_COMPLEXITY_MAX
-  if (!needsMatte) {
-    return "none"
-  }
-  const pad = Math.max(8, Math.round(placement.height * COMPANY_LOGO_CONTRAST_PAD_RATIO))
-  const x = Math.max(0, placement.x - pad)
-  const y = Math.max(0, placement.y - Math.round(pad * 0.82))
-  const width = Math.min(ctx.canvas.width - x, placement.width + pad * 2)
-  const height = Math.min(ctx.canvas.height - y, placement.height + Math.round(pad * 1.55))
-  ctx.save()
-  ctx.shadowColor = "rgba(255, 244, 218, 0.42)"
-  ctx.shadowBlur = Math.max(16, Math.round(pad * 1.35))
-  ctx.fillStyle = "rgba(255, 244, 218, 0.34)"
-  ctx.beginPath()
-  roundedRectPath(ctx, x, y, width, height, Math.max(12, Math.round(pad * 0.72)))
-  ctx.fill()
-  ctx.restore()
-  return "soft-warm-matte"
-}
-
 async function loadCompanyLogoCanvas() {
   if (state.companyLogoCanvas) {
     return state.companyLogoCanvas
@@ -7905,8 +7841,6 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
 
   ctx.drawImage(baseImage, 0, 0, width, height)
   const placement = calculateLogoPlacement(canvas, logoCanvas)
-  const backgroundAnalysis = analyzeLogoBackground(ctx, placement)
-  const contrastMatte = drawLogoContrastMatte(ctx, placement, backgroundAnalysis)
   const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
   ctx.drawImage(scaledLogoCanvas, placement.x, placement.y)
   return {
@@ -7916,9 +7850,6 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
     placement: {
       ...placement,
       textColor: "original",
-      contrastMatte,
-      backgroundLuminance: Math.round(backgroundAnalysis.luminance),
-      backgroundComplexity: Number(backgroundAnalysis.complexity.toFixed(2)),
     },
   }
 }
