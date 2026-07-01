@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     bug_report_webhook_timeout_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
     error_alert_telegram_bot_token: str = ""
     error_alert_telegram_chat_id: str = ""
-    error_alert_telegram_timeout_seconds: float = Field(default=3.0, ge=1.0, le=30.0)
+    error_alert_telegram_timeout_seconds: float = Field(default=15.0, ge=1.0, le=30.0)
     map_provider: str = ""
     amap_key: str = ""
     mapbox_token: str = ""

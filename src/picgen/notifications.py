@@ -100,11 +100,13 @@ async def _send_telegram_message(
             )
             response.raise_for_status()
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
+        message = str(exc).strip()
+        error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
         return NotificationResult(
             configured=True,
             sent=False,
             status="failed",
-            error=redact_sensitive_text(str(exc), limit=300),
+            error=redact_sensitive_text(error, limit=300),
         )
     return NotificationResult(configured=True, sent=True, status="sent")
 
