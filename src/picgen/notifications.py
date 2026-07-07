@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -10,6 +12,8 @@ import httpx
 
 from .config import Settings
 from .redaction import redact_sensitive_text
+
+_TELEGRAM_SEND_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -85,30 +89,50 @@ async def _send_telegram_message(
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        async with httpx.AsyncClient(
-            timeout=settings.error_alert_telegram_timeout_seconds,
-            follow_redirects=False,
-        ) as client:
-            response = await client.post(
-                url,
-                json={
-                    "chat_id": chat_id,
-                    "text": content,
-                    "disable_web_page_preview": True,
-                },
-            )
-            response.raise_for_status()
-    except Exception as exc:  # pragma: no cover - network failures depend on deployment
-        message = str(exc).strip()
-        error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-        return NotificationResult(
-            configured=True,
-            sent=False,
-            status="failed",
-            error=redact_sensitive_text(error, limit=300),
-        )
-    return NotificationResult(configured=True, sent=True, status="sent")
+    last_error = ""
+    # Production shows intermittent ConnectError to api.telegram.org; one or
+    # two quick retries recover most of those without delaying anything (the
+    # callers run this off the request path).
+    for attempt in range(_TELEGRAM_SEND_ATTEMPTS):
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.error_alert_telegram_timeout_seconds,
+                follow_redirects=False,
+            ) as client:
+                response = await client.post(
+                    url,
+                    json={
+                        "chat_id": chat_id,
+                        "text": content,
+                        "disable_web_page_preview": True,
+                    },
+                )
+                response.raise_for_status()
+            return NotificationResult(configured=True, sent=True, status="sent")
+        except httpx.HTTPStatusError as exc:
+            # Keep Telegram's own description ("message is too long", …) —
+            # without it failed notifications are undiagnosable from logs.
+            body_preview = exc.response.text.strip()[:200]
+            last_error = f"{type(exc).__name__}: {exc}"
+            if body_preview:
+                last_error = f"{last_error} | {body_preview}"
+            if exc.response.status_code < 500:
+                break
+        except httpx.RequestError as exc:
+            message = str(exc).strip()
+            last_error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+        except Exception as exc:  # pragma: no cover - defensive
+            message = str(exc).strip()
+            last_error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+            break
+        if attempt + 1 < _TELEGRAM_SEND_ATTEMPTS:
+            await asyncio.sleep(1.0 + attempt)
+    return NotificationResult(
+        configured=True,
+        sent=False,
+        status="failed",
+        error=redact_sensitive_text(last_error, limit=300),
+    )
 
 
 async def send_error_alert_notification(
@@ -150,28 +174,31 @@ def send_password_reset_email(
     if not recipient:
         return NotificationResult(configured=True, sent=False, status="missing_recipient")
 
-    message = EmailMessage()
-    from_name = settings.smtp_from_name.strip() or "PicGen"
-    from_email = settings.smtp_from_email.strip()
-    message["From"] = f"{from_name} <{from_email}>"
-    message["To"] = recipient
-    message["Subject"] = "PicGen 密码重置"
-    message.set_content(
-        "\n".join(
-            [
-                f"{username or '用户'}，你好：",
-                "",
-                "你刚刚申请重置 PicGen 登录密码。请打开下面的链接设置新密码：",
-                reset_url,
-                "",
-                f"这个链接 {expires_minutes} 分钟内有效，且只能使用一次。",
-                "如果不是你本人操作，可以忽略这封邮件。",
-                "",
-                "PicGen",
-            ]
-        )
-    )
     try:
+        # Build the message inside the try: a stored address with CR/LF (from
+        # an older, laxer validator) makes EmailMessage raise, and that must
+        # surface as a failed NotificationResult, not a 500.
+        message = EmailMessage()
+        from_name = settings.smtp_from_name.strip() or "PicGen"
+        from_email = settings.smtp_from_email.strip()
+        message["From"] = f"{from_name} <{from_email}>"
+        message["To"] = recipient
+        message["Subject"] = "PicGen 密码重置"
+        message.set_content(
+            "\n".join(
+                [
+                    f"{username or '用户'}，你好：",
+                    "",
+                    "你刚刚申请重置 PicGen 登录密码。请打开下面的链接设置新密码：",
+                    reset_url,
+                    "",
+                    f"这个链接 {expires_minutes} 分钟内有效，且只能使用一次。",
+                    "如果不是你本人操作，可以忽略这封邮件。",
+                    "",
+                    "PicGen",
+                ]
+            )
+        )
         if settings.smtp_use_tls:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(
@@ -277,6 +304,9 @@ async def send_bug_report_notification(
         ) as client:
             response = await _post_webhook(client, settings.bug_report_webhook_kind, webhook_url, report, content)
             response.raise_for_status()
+            webhook_error = _webhook_body_error(settings.bug_report_webhook_kind, response)
+            if webhook_error:
+                return NotificationResult(configured=True, sent=False, status="failed", error=webhook_error)
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
         return NotificationResult(
             configured=True,
@@ -318,6 +348,9 @@ async def send_password_reset_request_notification(
                 request_info,
             )
             response.raise_for_status()
+            webhook_error = _webhook_body_error(settings.bug_report_webhook_kind, response)
+            if webhook_error:
+                return NotificationResult(configured=True, sent=False, status="failed", error=webhook_error)
     except Exception as exc:  # pragma: no cover - network failures depend on deployment
         return NotificationResult(
             configured=True,
@@ -326,6 +359,32 @@ async def send_password_reset_request_notification(
             error=redact_sensitive_text(str(exc), limit=300),
         )
     return NotificationResult(configured=True, sent=True, status="sent")
+
+
+def _webhook_body_error(kind: str, response: httpx.Response) -> str:
+    """WeCom/ServerChan report failures as HTTP 200 with an error code in the
+    JSON body — surface those instead of recording the message as sent."""
+
+    if kind not in {"wecom", "serverchan"}:
+        return ""
+    try:
+        parsed = response.json()
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    code = parsed.get("errcode") if kind == "wecom" else parsed.get("code")
+    if code in (None, 0, "0"):
+        return ""
+    message = str(parsed.get("errmsg") or parsed.get("message") or "")[:200]
+    return redact_sensitive_text(f"webhook 返回错误 {code}: {message}", limit=300)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 async def _post_webhook(
@@ -340,7 +399,9 @@ async def _post_webhook(
             webhook_url,
             json={
                 "msgtype": "markdown",
-                "markdown": {"content": content},
+                # WeCom caps markdown.content at 4096 BYTES; Chinese text hits
+                # that far sooner than the char-based builder truncation.
+                "markdown": {"content": _truncate_utf8(content, 4000)},
             },
         )
     if kind == "serverchan":
@@ -375,7 +436,7 @@ async def _post_admin_notification(
             webhook_url,
             json={
                 "msgtype": "markdown",
-                "markdown": {"content": content},
+                "markdown": {"content": _truncate_utf8(content, 4000)},
             },
         )
     if kind == "serverchan":

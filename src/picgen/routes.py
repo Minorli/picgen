@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import difflib
 import json
 import logging
 import math
@@ -10,7 +11,7 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -439,6 +440,11 @@ def _itinerary_coordinate_span(plan: dict[str, Any]) -> tuple[float, float]:
         return 0.0, 0.0
     lats = [float(stop["lat"]) for stop in stops]
     lngs = [float(stop["lng"]) for stop in stops]
+    # Unwrap longitudes across the antimeridian exactly like the projection
+    # (_project_stops) does — otherwise an Auckland→Tonga route "spans" 306°
+    # east-west and auto-picks landscape for what projects as a portrait route.
+    if max(lngs) - min(lngs) > 180.0:
+        lngs = [lng + 360.0 if lng < 0 else lng for lng in lngs]
     lat_span = max(lats) - min(lats)
     mid_lat = (max(lats) + min(lats)) / 2
     lng_span = (max(lngs) - min(lngs)) * max(0.2, abs(math.cos(math.radians(mid_lat))))
@@ -606,10 +612,13 @@ def _should_retry_without_sample_count(exc: APIError, sample_count: int) -> bool
         return False
     if exc.status == HTTPStatus.BAD_REQUEST:
         return _error_mentions_sample_count(exc)
+    # 502/503 from gateways that cannot handle n>1 usually mean the request
+    # was rejected outright, so a retry without n is safe. A 504 means the
+    # upstream may STILL be generating — re-POSTing would double the billing
+    # for a generation that eventually completes.
     return exc.status in {
         HTTPStatus.BAD_GATEWAY,
         HTTPStatus.SERVICE_UNAVAILABLE,
-        HTTPStatus.GATEWAY_TIMEOUT,
     }
 
 
@@ -628,7 +637,13 @@ async def _fill_candidates(
     to collect rather than discarding a successful first image.
     """
 
-    deficit = sample_count - len(_candidate_items(initial))
+    existing = len(_candidate_items(initial))
+    # Zero candidates is a refusal/failure shape (content filter, gateway
+    # hiccup), not "upstream ignored n" — topping it up would silently re-run
+    # full-price generations that will most likely fail the same way.
+    if existing <= 0:
+        return initial
+    deficit = sample_count - existing
     if deficit <= 0:
         return initial
     results = await asyncio.gather(
@@ -911,7 +926,7 @@ async def _generate_itinerary_artwork(
     plan: dict[str, Any],
     settings: Settings,
     client: UpstreamClient,
-    user: AuthUser,
+    user: AuthUser | None,
     output_size: str,
     composition: dict[str, Any],
 ) -> dict[str, Any]:
@@ -978,7 +993,7 @@ async def _generate_itinerary_artwork(
             "sample_count": 1,
             "logo_requested": parsed.logo_requested,
             "logo_overlay_applied": False,
-            "filename_prefix": user.username,
+            "filename_prefix": user.username if user else "",
             "route_style": parsed.route_style,
             "size": f"{width}x{height}",
             "requested_size": composition["requested_size"],
@@ -1056,7 +1071,7 @@ async def _generate_itinerary_artwork(
             data_dir=settings.data_dir,
             outputs_dir=settings.outputs_dir,
             svg_text=svg_text,
-            filename_prefix=user.username,
+            filename_prefix=user.username if user else "",
             metadata={
                 "mode": "itinerary",
                 "prompt": parsed.title,
@@ -1201,7 +1216,7 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     plan: dict[str, Any],
     settings: Settings,
     client: UpstreamClient,
-    user: AuthUser,
+    user: AuthUser | None,
 ) -> dict[str, Any]:
     if plan.get("status") == "ready":
         return plan
@@ -1242,8 +1257,8 @@ async def _complete_itinerary_plan_with_ai_coordinates(
             status=exc.status,
             code=exc.code,
             message=redact_sensitive_text(exc.message, limit=300),
-            user_id=user.id,
-            username=user.username,
+            user_id=user.id if user else None,
+            username=user.username if user else "",
         )
         return plan
     except Exception as exc:
@@ -1252,8 +1267,8 @@ async def _complete_itinerary_plan_with_ai_coordinates(
             logging.WARNING,
             "itinerary_ai_coordinate_estimation_failed",
             error=redact_sensitive_text(str(exc), limit=300),
-            user_id=user.id,
-            username=user.username,
+            user_id=user.id if user else None,
+            username=user.username if user else "",
         )
         return plan
 
@@ -1272,8 +1287,8 @@ async def _complete_itinerary_plan_with_ai_coordinates(
         unresolved_count=len(
             [stop for stop in completed.get("stops", []) if isinstance(stop, dict) and stop.get("status") != "ok"]
         ),
-        user_id=user.id,
-        username=user.username,
+        user_id=user.id if user else None,
+        username=user.username if user else "",
     )
     return completed
 
@@ -1281,7 +1296,10 @@ async def _complete_itinerary_plan_with_ai_coordinates(
 async def handle_itinerary_map_render(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    if user is None:
+    # When auth is enabled, require_current_user has already rejected anonymous
+    # callers with 401 — user is None here only in auth-disabled deployments,
+    # where itinerary maps must work like generate/edit do.
+    if settings.auth_enabled and user is None:
         raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
     payload = _ensure_dict(body)
     parsed = _validate_request(ItineraryMapRenderRequest, payload)
@@ -1335,8 +1353,8 @@ async def handle_itinerary_map_render(
                 "itinerary_artwork_no_image",
                 message=redact_sensitive_text(exc.message, limit=300),
                 details=redact_sensitive_text(str(exc.details or ""), limit=500),
-                user_id=user.id,
-                username=user.username,
+                user_id=user.id if user else None,
+                username=user.username if user else "",
             )
             raise APIError(
                 HTTPStatus.BAD_GATEWAY,
@@ -1398,10 +1416,9 @@ async def handle_itinerary_map_render(
                 data_dir=settings.data_dir,
                 outputs_dir=settings.outputs_dir,
                 svg_text=svg_text,
-                filename_prefix=user.username,
+                filename_prefix=user.username if user else "",
                 metadata={
-                    "user_id": user.id,
-                    "username": user.username,
+                    **_user_metadata(user),
                     "mode": "itinerary",
                     "prompt": parsed.title,
                     "route_style": parsed.route_style,
@@ -1549,9 +1566,16 @@ def create_router() -> APIRouter:
                     user_agent=request.headers.get("user-agent", ""),
                 )
             )
+        # Output filenames embed a UUID, so they are safely immutable. Avatar
+        # filenames are deterministic per user (same URL after re-upload) — an
+        # immutable year-long cache would show the old avatar forever.
+        if relative_path.startswith("avatars/"):
+            cache_control = "private, no-cache"
+        else:
+            cache_control = "private, max-age=31536000, immutable"
         return FileResponse(
             target_path,
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={"Cache-Control": cache_control},
         )
 
     @router.post("/api/auth/register")
@@ -1668,18 +1692,9 @@ def create_router() -> APIRouter:
                 else:
                     reset_notification_info = _safe_admin_reset_request_info(reset_request)
             if not email_sent:
-                notification = await send_password_reset_request_notification(
-                    settings=settings,
-                    request_info=reset_notification_info,
+                _spawn_notification_task(
+                    _notify_password_reset_request(settings, reset_notification_info)
                 )
-                if notification.configured and not notification.sent:
-                    log_event(
-                        logger,
-                        logging.WARNING,
-                        "password_reset_notification_failed",
-                        status=notification.status,
-                        error=notification.error,
-                    )
         return {"status": "ok", "message": PASSWORD_RESET_REQUEST_MESSAGE}
 
     @router.post("/api/password-reset/confirm")
@@ -2586,13 +2601,15 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
         should_notify_final_image = bool(updated.pop("_first_logo_final_for_job", False))
         if parsed.logo_overlay_applied and should_notify_final_image:
-            await _send_generation_success_alert(
-                settings,
-                _build_final_image_success_alert(
-                    image=updated,
-                    user=user,
-                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-                ),
+            _spawn_notification_task(
+                _send_generation_success_alert(
+                    settings,
+                    _build_final_image_success_alert(
+                        image=updated,
+                        user=user,
+                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    ),
+                )
             )
         return {
             "status": "ok",
@@ -2750,22 +2767,152 @@ def _copyright_risk_prompt(parsed: CopyrightRiskRequest) -> str:
     )
 
 
+_TEXT_FIDELITY_OUTPUT_FORMAT = (
+    "输出格式：\n"
+    "结论：通过/不通过\n"
+    "缺失或疑似错误：没有则写“无”，否则列短语\n"
+    "残留旧文字：没有则写“无”，否则列短语\n"
+    "说明：一句话说明。\n"
+)
+
+
 def _text_fidelity_prompt(parsed: TextFidelityRequest) -> str:
     contract = parsed.text_contract
+    if len(parsed.images) >= 2:
+        # Edit-comparison mode: image 1 is the BEFORE, image 2 the AFTER.
+        # Catches the systematic drift where an AI edit silently rewrites
+        # protected body text it was told to leave alone (e.g. 镶→镀).
+        # Transcribe-then-diff: without forcing a character-by-character
+        # transcription first, vision models routinely miss single-character
+        # substitutions between two large posters.
+        return (
+            "你会收到两张图：第 1 张是修改前的原图，第 2 张是修改后的成图。\n"
+            "请先在心里把两张图的全部可读文字逐行转写出来（标题、副标题、正文每一行、地名、日期、价格、"
+            "序号、图标旁的小字、贴士），再逐行逐字对比转写结果：\n"
+            "1) 除了用户明确要求修改的内容，原图里的文字必须在成图中逐字保留；"
+            "特别注意单字替换和形近字/同音字（例如 镶/镀、嚣/器、末/未、己/已、账/帐、艘/艏），"
+            "发现任何一处都要列出来，格式如：原文“X”被改成“Y”。\n"
+            "2) 用户要求修改的部分是否已经按要求体现。\n"
+            "不要在发现第一处差异后停下：必须核对完两张图的全部文字（包括正文诗句、列表小字、"
+            "价格、底部服务条目）之后，一次性列出所有差异。\n"
+            "只要有一处未被要求却发生变化的文字，就必须判为不通过。\n"
+            f"{_TEXT_FIDELITY_OUTPUT_FORMAT}\n"
+            f"用户本次修改要求：{parsed.prompt.strip() or '未提供'}\n"
+            f"生成上下文：{parsed.context.strip() or '未提供'}"
+        )
     required_lines = [f"- 必须出现：{item}" for item in contract.required]
     forbidden_lines = [f"- 不得出现：{item}" for item in contract.forbidden]
+    if not required_lines and not forbidden_lines and parsed.prompt.strip():
+        # No explicit contract (label-based extraction found nothing — common
+        # for table/free-form prompts). Fall back to treating the full prompt
+        # as the text source instead of vacuously passing.
+        return (
+            "没有单独的文字合同。请把下面的用户提示词原文当作文字来源，检查图片中所有可读文字：\n"
+            "1) 图中来自原文的每个短语必须逐字一致；"
+            "换字、漏字、同音替换、繁简误换、数字或符号错误都算不通过（标题允许美术字造型但不允许改字）。\n"
+            "2) 原文中明显要求出现的标题、列表项、名称、价格和日期是否都出现在图中。\n"
+            "3) 左上角“6人游定制旅行 / Friends & Family”是官方 LOGO，属于正常品牌元素，不要当作问题；"
+            "图中如出现原文没有的装饰性短语，只在“说明”里提一句，不要因此判不通过，除非它与原文内容矛盾或包含错字。\n"
+            f"{_TEXT_FIDELITY_OUTPUT_FORMAT}\n"
+            f"用户提示词原文：\n{parsed.prompt.strip()}\n\n"
+            f"生成上下文：{parsed.context.strip() or '未提供'}"
+        )
     checks = "\n".join([*required_lines, *forbidden_lines]) or "- 未提供明确文字合同。"
     return (
         "请检查图片中文字是否满足下面的文字合同。只基于图片里可读文字判断；"
         "如果图中对应区域模糊、缺字、错字、漏字、同音替换、顺序错误，也算不通过。\n"
-        "输出格式：\n"
-        "结论：通过/不通过\n"
-        "缺失或疑似错误：没有则写“无”，否则列短语\n"
-        "残留旧文字：没有则写“无”，否则列短语\n"
-        "说明：一句话说明。\n\n"
+        f"{_TEXT_FIDELITY_OUTPUT_FORMAT}\n"
         f"文字合同：\n{checks}\n\n"
         f"用户提示词：{parsed.prompt.strip() or '未提供'}\n"
         f"生成上下文：{parsed.context.strip() or '未提供'}"
+    )
+
+
+_TEXT_TRANSCRIBE_SINGLE_PROMPT = (
+    "请转写这张图中的所有可读文字，用于程序自动比对。\n"
+    "每一行画面文字单独输出一行，按画面从上到下的顺序，逐字转写。\n"
+    "绝对不要纠错、不要把你认为的错字改对、不要补全、不要翻译、不要合并行、不要加任何评论；"
+    "即使某个字看起来像错别字或很少见，也必须原样写出画面里的那个字。\n"
+    "只输出文字行本身，不要任何标记、编号或说明。"
+)
+
+
+def _transcript_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _normalize_transcript_line(line: str) -> str:
+    # Ignore whitespace and punctuation-width differences so the diff only
+    # fires on actual character changes.
+    cleaned = re.sub(r"\s+", "", line)
+    for src, dst in ((",", "，"), (":", "："), (";", "；"), ("!", "！"), ("?", "？"), ("·", "・")):
+        cleaned = cleaned.replace(src, dst)
+    return cleaned
+
+
+_LOGO_TRANSCRIPT_MARKERS = ("6人游", "friends&family", "friends & family")
+
+
+def _is_logo_transcript_line(line: str) -> bool:
+    folded = line.casefold().replace(" ", "")
+    return any(marker.replace(" ", "") in folded for marker in _LOGO_TRANSCRIPT_MARKERS)
+
+
+def _transcript_diff_report(before_lines: list[str], after_lines: list[str], prompt: str) -> str:
+    """Diff two transcripts; unrequested changes to existing text fail the check.
+
+    The diff runs on the CONCATENATED text (line breaks stripped): transcripts
+    of the same poster frequently disagree on where lines split ("24h管家："
+    vs "24h" + "管家："), and a line-level diff turns that into false alarms.
+    """
+
+    prompt_normalized = _normalize_transcript_line(prompt or "")
+
+    def _full_text(lines: list[str]) -> str:
+        return "".join(
+            _normalize_transcript_line(line) for line in lines if not _is_logo_transcript_line(line)
+        )
+
+    before_text = _full_text(before_lines)
+    after_text = _full_text(after_lines)
+
+    changed: list[str] = []
+    missing: list[str] = []
+    added_chars = 0
+    matcher = difflib.SequenceMatcher(a=before_text, b=after_text, autojunk=False)
+    for op, a_start, a_end, b_start, b_end in matcher.get_opcodes():
+        if op == "equal":
+            continue
+        old = before_text[a_start:a_end]
+        new = after_text[b_start:b_end]
+        context_before = before_text[max(0, a_start - 4) : a_start]
+        context_after = before_text[a_end : a_end + 4]
+        # Changes/removals the user explicitly asked for are not violations.
+        if (old and old in prompt_normalized) or (new and new in prompt_normalized):
+            continue
+        if op == "replace":
+            changed.append(f"原文“{context_before}{old}{context_after}”被改成“{context_before}{new}{context_after}”")
+        elif op == "delete":
+            missing.append(f"{context_before}{old}{context_after}")
+        elif op == "insert":
+            added_chars += len(new)
+
+    problems = [*changed[:8], *(f"原文缺失：“{item}”" for item in missing[:5])]
+    if problems:
+        listed = "\n".join(f"- {item}" for item in problems[:10])
+        return (
+            "结论：不通过\n"
+            f"缺失或疑似错误：\n{listed}\n"
+            "残留旧文字：无\n"
+            "说明：程序对比了编辑前后的画面文字转写结果，以上文字在没有被要求修改的情况下发生了变化，请复核。"
+        )
+    note = f"成图另有约 {added_chars} 字新增文字（可能来自本次修改要求）。" if added_chars else ""
+    return (
+        "结论：通过\n"
+        "缺失或疑似错误：无\n"
+        "残留旧文字：无\n"
+        f"说明：程序对比了编辑前后的画面文字转写结果，原有文字均逐字保留。{note}"
+        "（提示：个别形近字的差异可能超出自动识别能力，重要交付请人工复核。）"
     )
 
 
@@ -2861,9 +3008,15 @@ async def _create_team_chat_bot_reply(
     recent_messages: list[dict[str, Any]],
 ) -> dict[str, Any]:
     prefix = "" if room_type == "bot" else f"@{_team_chat_display_name(user)} "
-    endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
     api_key = settings.default_api_key.strip()
-    if not api_key:
+    try:
+        endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
+    except APIError:
+        # This runs in a fire-and-forget task — raising here would swallow the
+        # reply entirely. Fall back to the same friendly bot message as the
+        # missing-key case so the user is not left waiting forever.
+        endpoint_url = ""
+    if not api_key or not endpoint_url:
         return await anyio.to_thread.run_sync(
             lambda: auth_store.create_team_chat_message(
                 room_key=room_key,
@@ -3069,6 +3222,50 @@ async def handle_text_fidelity(
         images=parsed.images,
         max_image_bytes=settings.max_image_bytes,
     )
+    if len(image_parts) >= 2:
+        # Before/after edit comparison. Asking a vision model to "spot the
+        # difference" between two posters is unreliable for single-character
+        # substitutions — it flags one run and misses the next. Instead the
+        # model only TRANSCRIBES (an easy, stable task) and the diff is
+        # computed programmatically. The two images MUST be transcribed in
+        # separate calls: in a shared context the model transcribes the second
+        # image by copying the first transcript, erasing exactly the
+        # single-character drift (镶→镀) this check exists to catch.
+        async def _transcribe(part: dict[str, Any]) -> list[str]:
+            response = await client.run_responses(
+                endpoint_url,
+                api_key,
+                {
+                    "model": model,
+                    "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": _responses_inline_input_content(_TEXT_TRANSCRIBE_SINGLE_PROMPT, [part]),
+                        }
+                    ],
+                },
+                settings.upstream_user_agent,
+            )
+            return _transcript_lines(_extract_text_output(response) or "")
+
+        before_lines, after_lines = await asyncio.gather(
+            _transcribe(image_parts[0]), _transcribe(image_parts[1])
+        )
+        if before_lines and after_lines:
+            fidelity_text = _transcript_diff_report(before_lines, after_lines, parsed.prompt)
+            return {
+                "model": model,
+                "passed": _text_fidelity_passed(fidelity_text),
+                "fidelity_text": fidelity_text,
+                "raw_response": {
+                    "before_transcript": before_lines,
+                    "after_transcript": after_lines,
+                },
+            }
+        # Transcription came back unparseable — fall through to the one-shot
+        # judgment below rather than failing the check outright.
+
     content = _responses_inline_input_content(_text_fidelity_prompt(parsed), image_parts)
     upstream_payload = {
         "model": model,
@@ -3161,7 +3358,10 @@ def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any
     if not mismatches:
         return
 
-    saved["actual_size"] = candidates[0].get("actual_size")
+    # Summarize from the first candidate that actually mismatched — candidate 0
+    # may be the compliant one, which would publish "size_mismatch: true" with
+    # an actual_size equal to the requested size.
+    saved["actual_size"] = mismatches[0]
     saved["requested_size"] = requested_size
     saved["size_mismatch"] = True
     saved["size_mismatch_actual_sizes"] = list(dict.fromkeys(mismatches))
@@ -3494,6 +3694,25 @@ def _should_send_generation_success_alert(alert: GenerationSuccessAlert) -> bool
     return not (alert.logo_requested and not alert.logo_overlay_applied)
 
 
+# Strong references to fire-and-forget notification tasks; asyncio only keeps
+# weak references, so without this a task can be garbage-collected mid-send.
+_notification_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_notification_task(coro: Coroutine[Any, Any, Any]) -> None:
+    """Send a notification off the request path.
+
+    Success/informational notifications must never delay the response: with
+    Telegram unreachable the previous inline ``await`` stalled every finished
+    generation by the full notification timeout (15s) after the image was
+    already saved.
+    """
+
+    task = asyncio.create_task(coro)
+    _notification_tasks.add(task)
+    task.add_done_callback(_notification_tasks.discard)
+
+
 async def _send_generation_success_alert(settings: Settings, alert: GenerationSuccessAlert) -> None:
     result = await send_generation_success_notification(settings=settings, alert=alert)
     if result.configured and not result.sent:
@@ -3505,6 +3724,21 @@ async def _send_generation_success_alert(settings: Settings, alert: GenerationSu
             error=redact_sensitive_text(result.error, limit=300),
             request_id=alert.request_id,
             job_id=alert.job_id,
+        )
+
+
+async def _notify_password_reset_request(settings: Settings, request_info: dict[str, Any]) -> None:
+    notification = await send_password_reset_request_notification(
+        settings=settings,
+        request_info=request_info,
+    )
+    if notification.configured and not notification.sent:
+        log_event(
+            logger,
+            logging.WARNING,
+            "password_reset_notification_failed",
+            status=notification.status,
+            error=notification.error,
         )
 
 
@@ -3614,7 +3848,7 @@ async def _with_timing(
                 )
             )
         if generation_alert is not None and _should_send_generation_success_alert(generation_alert):
-            await _send_generation_success_alert(settings, generation_alert)
+            _spawn_notification_task(_send_generation_success_alert(settings, generation_alert))
     except APIError as exc:
         error_code = exc.code
         error_message = redact_sensitive_text(exc.message, limit=1000)
@@ -3976,6 +4210,11 @@ async def handle_responses_image(
     for key in ("quality", "background", "output_format", "output_compression", "moderation"):
         if key in image_options:
             tool[key] = image_options[key]
+    if parsed.mask is not None:
+        mask_info = _validate_image_size(parsed.mask, settings.max_image_bytes)
+        mask_b64 = base64.b64encode(mask_info["data"]).decode("ascii")
+        mask_mime = str(mask_info.get("content_type") or "image/png")
+        tool["input_image_mask"] = {"image_url": f"data:{mask_mime};base64,{mask_b64}"}
 
     guarded_prompt = append_restricted_destination_guard(effective_prompt)
     upstream_payload = {
@@ -3995,9 +4234,34 @@ async def handle_responses_image(
         "tools": [tool],
     }
 
-    upstream_response = await client.run_responses(
-        endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
-    )
+    try:
+        upstream_response = await client.run_responses(
+            endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+        )
+    except APIError as exc:
+        # `n` is not part of the official image_generation tool schema; strict
+        # upstreams reject the whole request. Mirror the Images-API fallback:
+        # retry once without it when the error clearly points at the field.
+        if (
+            "n" in tool
+            and exc.status == HTTPStatus.BAD_REQUEST
+            and _error_mentions_sample_count(exc)
+        ):
+            log_event(
+                logger,
+                logging.WARNING,
+                "responses_image_sample_count_fallback",
+                endpoint_url=endpoint_url,
+                sample_count=parsed.sample_count,
+                status=exc.status,
+                message=exc.message,
+            )
+            tool.pop("n", None)
+            upstream_response = await client.run_responses(
+                endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+            )
+        else:
+            raise
     metadata = request_metadata({**payload, **image_options}, size=size)
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id

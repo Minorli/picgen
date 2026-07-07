@@ -264,6 +264,10 @@ def _image_item_payload(
     inline_data_url = None if saved_payload.get("saved_image_url") else image_data_url
 
     return {
+        # Original index within the upstream data list. DB records and the
+        # browser payload are matched on this — positional matching breaks as
+        # soon as one candidate is unsaveable and shifts the positions.
+        "candidate_index": index,
         "image_data_url": inline_data_url,
         "image_url": image_url,
         "revised_prompt": item.get("revised_prompt"),
@@ -296,20 +300,30 @@ def prepare_image_payload(
     candidate_errors: list[Exception] = []
     for index, item in enumerate(candidate_items):
         try:
-            images.append(
-                _image_item_payload(
-                    item,
-                    upstream=upstream,
-                    data_dir=data_dir,
-                    outputs_dir=outputs_dir,
-                    user_agent=user_agent,
-                    save_context=save_context,
-                    fetch_remote=fetch_remote,
-                    index=index,
-                )
+            payload = _image_item_payload(
+                item,
+                upstream=upstream,
+                data_dir=data_dir,
+                outputs_dir=outputs_dir,
+                user_agent=user_agent,
+                save_context=save_context,
+                fetch_remote=fetch_remote,
+                index=index,
             )
         except Exception as exc:
             candidate_errors.append(exc)
+            continue
+        # A data item with nothing renderable (no inline data, no URL, nothing
+        # saved) is a placeholder, not a candidate: counting it would turn a
+        # no-image upstream reply into a blank "success" and shift the ids of
+        # the real images.
+        if not (
+            payload.get("image_data_url")
+            or payload.get("image_url")
+            or payload.get("saved_image_url")
+        ):
+            continue
+        images.append(payload)
     if not images and candidate_errors:
         raise candidate_errors[0]
     first_image = images[0] if images else {}

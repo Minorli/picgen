@@ -676,8 +676,10 @@ def test_generation_post_helpers_only_send_local_auth_401_to_login_gate() -> Non
     assert 'enterAuthGate("login", "登录已过期，请重新登录。")' in fetch_json_block
     assert 'isLocalAuthUnauthorized(response, data)' in post_json_block
     assert 'isLocalAuthUnauthorized(response, data)' in post_json_silent_block
-    assert 'data?.code === "unauthorized"' in app_js
-    assert 'data?.code !== "upstream_error"' in app_js
+    # Local session expiry is code "unauthorized"; upstream 401s are classified
+    # as "upstream_error" by classify_upstream_error, so the code equality
+    # check alone keeps upstream auth failures out of the login gate.
+    assert 'response.status === 401 && data?.code === "unauthorized"' in app_js
 
 
 def test_nonstandard_poster_sizes_use_responses_generation_instead_of_images_api() -> None:

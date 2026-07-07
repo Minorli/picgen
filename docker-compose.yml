@@ -1,6 +1,6 @@
 services:
   picgen:
-    image: minorli/picgen:0.1.43
+    image: minorli/picgen:0.1.44
     build:
       context: .
     ports:
@@ -27,7 +27,7 @@ services:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"
+        - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/api/health' % os.environ.get('PICGEN_PORT', '8000'), timeout=3).read()"
       interval: 30s
       timeout: 5s
       retries: 3

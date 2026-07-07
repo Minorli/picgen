@@ -166,15 +166,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.auth_store = auth_store
 
-    if resolved_settings.cors_allow_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=resolved_settings.cors_allow_origins,
-            allow_credentials=resolved_settings.cors_allow_credentials,
-            allow_methods=["GET", "POST"],
-            allow_headers=["*"],
-            expose_headers=["X-Request-ID"],
-        )
+    # add_middleware() prepends, so the LAST addition runs OUTERMOST. Runtime
+    # order (outer → inner): CORS → RequestId → SecurityHeaders → RateLimit →
+    # ProxyAuth → BodySize.
+    # - CORS must be outermost or browser preflights (which cannot carry auth
+    #   headers) get 401'd by ProxyAuth before CORS can answer them.
+    # - BodySize innermost so chunked uploads are not buffered into memory for
+    #   requests that rate-limiting or proxy auth would reject anyway.
+    # - RateLimit stays outside ProxyAuth so token guessing burns rate budget.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved_settings.max_request_body_bytes)
 
     if resolved_settings.proxy_auth_token:
         app.add_middleware(ProxyAuthMiddleware, token=resolved_settings.proxy_auth_token)
@@ -185,9 +185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         burst=resolved_settings.rate_limit_burst,
         trust_forwarded_for=resolved_settings.trust_forwarded_for,
     )
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved_settings.max_request_body_bytes)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIdMiddleware)
+
+    if resolved_settings.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=resolved_settings.cors_allow_origins,
+            allow_credentials=resolved_settings.cors_allow_credentials,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+            expose_headers=["X-Request-ID"],
+        )
 
     @app.exception_handler(APIError)
     async def api_error_handler(request: Request, exc: APIError) -> Any:
@@ -310,6 +319,8 @@ def _base_operational_message(exc: APIError) -> str:
         return "暂时无法连接图片生成服务，请稍后再试。"
     if exc.code == "upstream_invalid_response":
         return "图片生成服务返回了无法解析的响应，请稍后再试。"
+    if exc.code == "upstream_image_too_large":
+        return "上游返回的图片超过了大小限制，请降低尺寸或质量后重试。"
     if exc.code == "upstream_no_image":
         return "路线图 AI 底图这次没有生成成功，请稍后再试。"
     if exc.code == "upstream_blocked":

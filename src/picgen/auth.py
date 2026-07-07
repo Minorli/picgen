@@ -483,8 +483,15 @@ class AuthStore:
                         ON group_saved_items(room_key, created_at);
                     """
                 )
-                self._run_schema_migrations(conn)
-                _migrate_legacy_image_sidecars(conn)
+                migrated_sidecar_paths = self._run_schema_migrations(conn)
+                migrated_sidecar_paths += _migrate_legacy_image_sidecars(conn)
+            # Delete migrated sidecar files only AFTER the transaction above has
+            # committed. Unlinking mid-transaction loses the metadata forever if
+            # the commit never happens (crash/rollback): the DB rows vanish but
+            # the files are already gone, and the next startup skips them.
+            for sidecar_path in migrated_sidecar_paths:
+                with suppress(OSError):
+                    sidecar_path.unlink()
             self._initialized = True
 
     def create_user(
@@ -563,31 +570,44 @@ class AuthStore:
                 (normalized,),
             ).fetchone()
             if row is None:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO users (
-                        username,
-                        username_normalized,
-                        password_hash,
-                        role,
-                        is_active,
-                        company,
-                        department,
-                        created_at
+                try:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO users (
+                            username,
+                            username_normalized,
+                            password_hash,
+                            role,
+                            is_active,
+                            company,
+                            department,
+                            created_at
+                        )
+                        VALUES (?, ?, ?, 'admin', 1, '', '', ?)
+                        """,
+                        (clean_username, normalized, hash_password(password), now),
                     )
-                    VALUES (?, ?, ?, 'admin', 1, '', '', ?)
-                    """,
-                    (clean_username, normalized, hash_password(password), now),
-                )
-                return _auth_user_from_values(
-                    user_id=_require_lastrowid(cursor),
-                    username=clean_username,
-                    created_at=now,
-                    role="admin",
-                    is_active=True,
-                    company="",
-                    department="",
-                )
+                except sqlite3.IntegrityError:
+                    # Another uvicorn worker bootstrapping the same fresh DB won
+                    # the INSERT between our SELECT and here (the threading lock
+                    # cannot serialize across processes). Fall through to the
+                    # UPDATE path against the row that now exists.
+                    row = conn.execute(
+                        "SELECT * FROM users WHERE username_normalized = ?",
+                        (normalized,),
+                    ).fetchone()
+                    if row is None:  # pragma: no cover - defensive
+                        raise
+                else:
+                    return _auth_user_from_values(
+                        user_id=_require_lastrowid(cursor),
+                        username=clean_username,
+                        created_at=now,
+                        role="admin",
+                        is_active=True,
+                        company="",
+                        department="",
+                    )
             conn.execute(
                 """
                 UPDATE users
@@ -617,23 +637,28 @@ class AuthStore:
             locked_until = _parse_datetime_text(row["locked_until"])
             if locked_until is not None and locked_until > now_dt:
                 raise AccountLockedError(username)
-            # A lock that has expired means the user "served their time"; start the
-            # failure count fresh so the next wrong password doesn't instantly re-lock
-            # (the stored count is still at the lock threshold). Without this, a user
-            # who forgot their password is throttled to one guess per lock window forever.
-            prior_failures = 0 if locked_until is not None else int(row["failed_login_count"] or 0)
             if not verify_password(password, str(row["password_hash"])):
-                failed_count = prior_failures + 1
-                lock_until_text = ""
-                if failed_count >= _MAX_FAILED_LOGIN_ATTEMPTS:
-                    lock_until_text = _datetime_text(now_dt + timedelta(minutes=_ACCOUNT_LOCK_MINUTES))
+                lock_until_text = _datetime_text(now_dt + timedelta(minutes=_ACCOUNT_LOCK_MINUTES))
+                # Atomic increment: a read-modify-write in Python loses counts
+                # when several workers process wrong passwords concurrently
+                # (PBKDF2 keeps the window wide open). An expired lock means the
+                # user served their time — restart the count at 1 so they are
+                # not re-locked by the very next wrong guess.
                 conn.execute(
                     """
                     UPDATE users
-                    SET failed_login_count = ?, locked_until = ?
+                    SET failed_login_count = CASE
+                            WHEN locked_until IS NOT NULL THEN 1
+                            ELSE COALESCE(failed_login_count, 0) + 1
+                        END,
+                        locked_until = CASE
+                            WHEN locked_until IS NOT NULL THEN NULL
+                            WHEN COALESCE(failed_login_count, 0) + 1 >= ? THEN ?
+                            ELSE NULL
+                        END
                     WHERE id = ?
                     """,
-                    (failed_count, lock_until_text or None, row["id"]),
+                    (_MAX_FAILED_LOGIN_ATTEMPTS, lock_until_text, row["id"]),
                 )
                 conn.commit()
                 raise InvalidCredentialsError(username)
@@ -1359,6 +1384,11 @@ class AuthStore:
                 ),
             )
             for index, image in enumerate(images):
+                # Use the candidate's original upstream index when the payload
+                # carries it; the response side matches records to images by
+                # this value, so a positional fallback would misattach ids
+                # whenever an unsaveable candidate shifted the positions.
+                candidate_index = int(image.get("candidate_index", index) or 0)
                 source_generated_image_id = _validated_source_generated_image_id(
                     conn,
                     source_id=(
@@ -1397,7 +1427,7 @@ class AuthStore:
                     (
                         job_id,
                         job_user_id,
-                        int(image.get("candidate_index", index) or 0),
+                        candidate_index,
                         str(result.get("mode") or image.get("mode") or "")[:64],
                         str(result.get("model") or image.get("model") or "")[:128],
                         str(result.get("prompt") or image.get("prompt") or "")[:32_000],
@@ -1426,7 +1456,7 @@ class AuthStore:
                     migrated_from_path="",
                     now=now,
                 )
-                created.append({"id": generated_image_id, "candidate_index": index})
+                created.append({"id": generated_image_id, "candidate_index": candidate_index})
         return created
 
     def fail_generation_job(
@@ -1610,8 +1640,31 @@ class AuthStore:
     ) -> list[dict[str, Any]] | None:
         bounded_limit = max(1, min(int(limit or 200), 500))
         with self._lock, self._connect() as conn:
+            # Scope the fetch to the requested image's LINEAGE (ancestors, then
+            # everything below each ancestor). A flat per-user query with LIMIT
+            # ordered oldest-first stopped covering newer images as soon as a
+            # user's library outgrew the limit — version history then 404'd for
+            # every image after the first `limit`.
             rows = conn.execute(
                 """
+                WITH RECURSIVE
+                ancestors(id) AS (
+                    SELECT id FROM generated_images WHERE id = ? AND user_id = ?
+                    UNION
+                    SELECT parent.id
+                    FROM generated_images parent
+                    JOIN generated_images child ON child.source_generated_image_id = parent.id
+                    JOIN ancestors a ON child.id = a.id
+                    WHERE parent.user_id = ?
+                ),
+                lineage(id) AS (
+                    SELECT id FROM ancestors
+                    UNION
+                    SELECT child.id
+                    FROM generated_images child
+                    JOIN lineage l ON child.source_generated_image_id = l.id
+                    WHERE child.user_id = ?
+                )
                 SELECT
                     gi.*,
                     j.request_id,
@@ -1631,12 +1684,13 @@ class AuthStore:
                 FROM generated_images gi
                 JOIN generation_jobs j ON j.id = gi.job_id
                 LEFT JOIN generated_image_metadata gim ON gim.generated_image_id = gi.id
-                WHERE gi.user_id = ?
+                WHERE gi.id IN (SELECT id FROM lineage)
+                  AND gi.user_id = ?
                   AND gi.saved_image_url != ''
                 ORDER BY gi.created_at ASC, gi.id ASC
                 LIMIT ?
                 """,
-                (user_id, bounded_limit),
+                (generated_image_id, user_id, user_id, user_id, user_id, bounded_limit),
             ).fetchall()
         records = {int(row["id"]): _version_image_row_to_dict(row) for row in rows}
         if generated_image_id not in records:
@@ -1988,6 +2042,7 @@ class AuthStore:
                     owner.display_name AS display_name,
                     COALESCE(meta.is_favorite, 0) AS is_favorite,
                     meta.updated_at AS gallery_updated_at,
+                    COALESCE(gim.metadata_json, '{}') AS metadata_json,
                     COALESCE((
                         SELECT GROUP_CONCAT(t.tag, char(31))
                         FROM gallery_image_tags t
@@ -2000,6 +2055,8 @@ class AuthStore:
                 LEFT JOIN gallery_image_metadata meta
                     ON meta.generated_image_id = gi.id
                    AND meta.user_id = ?
+                LEFT JOIN generated_image_metadata gim
+                    ON gim.generated_image_id = gi.id
                 WHERE gi.id = ?
                 """,
                 (user_id, user_id, generated_image_id),
@@ -3458,7 +3515,7 @@ class AuthStore:
             return int(cursor.rowcount or 0)
 
     @staticmethod
-    def _run_schema_migrations(conn: sqlite3.Connection) -> None:
+    def _run_schema_migrations(conn: sqlite3.Connection) -> list[Path]:
         _ensure_columns(conn, "users", {
             "role": "TEXT NOT NULL DEFAULT 'user'",
             "is_active": "INTEGER NOT NULL DEFAULT 1",
@@ -3544,7 +3601,7 @@ class AuthStore:
             """
         )
         _ensure_generated_image_metadata_table(conn)
-        _migrate_legacy_image_sidecars(conn)
+        migrated_sidecar_paths = _migrate_legacy_image_sidecars(conn)
         conn.execute("UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''")
         conn.execute("UPDATE users SET is_active = 1 WHERE is_active IS NULL")
         conn.execute(
@@ -3593,6 +3650,7 @@ class AuthStore:
             """,
             (_SCHEMA_VERSION, "image_version_lineage", now),
         )
+        return migrated_sidecar_paths
 
     def _connect(self) -> sqlite3.Connection:
         self.initialize()
@@ -4145,7 +4203,10 @@ def _is_registered_sidecar_for_image(*, metadata_path: Path, image_path: Path) -
     )
 
 
-def _migrate_legacy_image_sidecars(conn: sqlite3.Connection) -> int:
+def _migrate_legacy_image_sidecars(conn: sqlite3.Connection) -> list[Path]:
+    """Copy legacy sidecar JSON into the DB; return the file paths to delete
+    once the caller's transaction has committed."""
+
     _ensure_generated_image_metadata_table(conn)
     rows = conn.execute(
         """
@@ -4160,7 +4221,7 @@ def _migrate_legacy_image_sidecars(conn: sqlite3.Connection) -> int:
           AND gim.generated_image_id IS NULL
         """
     ).fetchall()
-    migrated = 0
+    migrated_paths: list[Path] = []
     now = _now_text()
     for row in rows:
         metadata_path = Path(str(row["saved_metadata_path"] or ""))
@@ -4182,10 +4243,8 @@ def _migrate_legacy_image_sidecars(conn: sqlite3.Connection) -> int:
             migrated_from_path=str(metadata_path),
             now=now,
         )
-        with suppress(OSError):
-            metadata_path.unlink()
-        migrated += 1
-    return migrated
+        migrated_paths.append(metadata_path)
+    return migrated_paths
 
 
 def _optional_int(value: Any) -> int | None:

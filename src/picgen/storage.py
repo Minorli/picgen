@@ -48,6 +48,11 @@ def sanitize_filename(name: str) -> str:
 
 
 def sanitize_filename_prefix(value: str) -> str:
+    # An empty prefix must stay empty — sanitize_filename's "image.png"
+    # fallback would otherwise become a literal "image.png/" output folder
+    # for anonymous (auth-disabled) saves.
+    if not value.strip():
+        return ""
     cleaned = sanitize_filename(value).strip(".-_")
     return cleaned[:48].strip(".-_") or ""
 
@@ -238,6 +243,17 @@ def save_output_image(
     }
 
 
+def _is_within_outputs(path: Path, outputs_dir: Path) -> bool:
+    """The derived-image path can originate from a client-supplied string when
+    the DB record has no saved path; never adopt a directory outside outputs."""
+
+    try:
+        path.resolve().relative_to(outputs_dir.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def save_derived_output_image(
     *,
     data_dir: Path,
@@ -250,7 +266,7 @@ def save_derived_output_image(
     suffix: str,
 ) -> dict[str, object]:
     source_path = Path(source_image_path) if source_image_path else None
-    if source_path is not None and source_path.is_file():
+    if source_path is not None and source_path.is_file() and _is_within_outputs(source_path, outputs_dir):
         day_dir = source_path.parent
         source_stem = source_path.stem
     else:
@@ -314,7 +330,11 @@ def prune_old_outputs(outputs_dir: Path, retention_days: int) -> int:
             day = datetime.strptime(entry.name, "%Y%m%d")
         except ValueError:
             continue
-        if day < cutoff:
+        # A day-folder's newest file can be written just before the next
+        # midnight, so compare the folder's END of day against the cutoff.
+        # Comparing its start (midnight) would delete files up to a day early —
+        # with retention_days=1 an image saved at 23:59 would die minutes later.
+        if day + timedelta(days=1) <= cutoff:
             shutil.rmtree(entry, ignore_errors=True)
             removed += 1
             log_event(logger, logging.INFO, "storage_pruned", folder=str(entry))

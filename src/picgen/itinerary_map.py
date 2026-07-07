@@ -5,6 +5,7 @@ import base64
 import html
 import math
 import os
+import re
 import struct
 import tempfile
 import time
@@ -15,6 +16,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib import parse
 
 import httpx
 
@@ -80,7 +82,7 @@ def _candidate_static_dirs() -> list[Path]:
 
 
 @lru_cache(maxsize=1)
-def _embedded_title_font_face_css() -> str:
+def _embedded_title_font_face_css_cached() -> str:
     for static_dir in _candidate_static_dirs():
         font_path = static_dir / TITLE_FONT_RELATIVE_PATH
         try:
@@ -95,6 +97,16 @@ def _embedded_title_font_face_css() -> str:
             f"{encoded}) format('truetype');font-weight:400;font-style:normal;font-display:block}}"
         )
     return ""
+
+
+def _embedded_title_font_face_css() -> str:
+    # Only cache SUCCESS: a transient read failure (missing volume, bad cwd at
+    # first render) must not permanently strip the title font from every
+    # poster this process renders afterwards.
+    css = _embedded_title_font_face_css_cached()
+    if not css:
+        _embedded_title_font_face_css_cached.cache_clear()
+    return css
 
 COUNTRY_LABEL_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("意大利", ("意大利", "italy", "italia")),
@@ -313,7 +325,9 @@ async def _geocode_amap(name: str, settings: Settings) -> list[dict[str, object]
 async def _geocode_mapbox(name: str, settings: Settings) -> list[dict[str, object]]:
     async with httpx.AsyncClient(timeout=settings.map_geocode_timeout_seconds) as client:
         response = await client.get(
-            f"https://api.mapbox.com/geocoding/v5/mapbox.places/{name}.json",
+            # Percent-encode the whole name: "/", "?", "#" in a stop name would
+            # otherwise become URL structure and query the wrong text (or 404).
+            f"https://api.mapbox.com/geocoding/v5/mapbox.places/{parse.quote(name, safe='')}.json",
             params={"access_token": settings.mapbox_token, "limit": 5, "language": "zh"},
         )
         response.raise_for_status()
@@ -507,7 +521,10 @@ def apply_itinerary_coordinate_estimates(
             "geocoded": True,
             "geocoded_name": selected_estimate["name"] or stop.get("name", ""),
             "geocoded_address": selected_estimate["note"],
-            "country": selected_estimate["country"],
+            # Never let an estimate WITHOUT a country wipe the user's explicit
+            # one — the coordinate-box fallback that then kicks in mislabels
+            # border cities (e.g. 都灵 → 法国).
+            "country": selected_estimate["country"] or str(stop.get("country") or ""),
             "coordinate_source": source,
             "approximate": True,
         }
@@ -573,7 +590,7 @@ async def build_itinerary_map_plan_async(
                 stop["geocoded"] = True
                 stop["geocoded_name"] = candidate["name"]
                 stop["geocoded_address"] = candidate["address"]
-                stop["country"] = candidate["country"]
+                stop["country"] = candidate["country"] or str(stop.get("country") or "")
             elif valid_candidates:
                 stop["status"] = "ambiguous"
                 stop["candidates"] = valid_candidates
@@ -753,10 +770,25 @@ def _country_label_from_text(value: Any) -> str:
     folded = str(value or "").casefold()
     if not folded:
         return ""
+    # Among all alias hits pick the LONGEST alias: plain first-match returned
+    # 印度 for "Indiana, United States" ("india" ⊂ "indiana") and 韩国 for
+    # "North Korea" ("korea" beats "north korea" by table order). ASCII aliases
+    # additionally require word boundaries so substrings inside longer words
+    # don't count at all.
+    best_label = ""
+    best_alias_len = 0
     for label, aliases in COUNTRY_LABEL_ALIASES:
-        if any(alias.casefold() in folded for alias in aliases):
-            return label
-    return ""
+        for alias in aliases:
+            alias_folded = alias.casefold()
+            if alias_folded.isascii():
+                if not re.search(rf"\b{re.escape(alias_folded)}\b", folded):
+                    continue
+            elif alias_folded not in folded:
+                continue
+            if len(alias_folded) > best_alias_len:
+                best_alias_len = len(alias_folded)
+                best_label = label
+    return best_label
 
 
 def _country_label_from_coordinates(lat: float | None, lng: float | None) -> str:
@@ -766,7 +798,10 @@ def _country_label_from_coordinates(lat: float | None, lng: float | None) -> str
     assert lng is not None
     # Bounding boxes overlap at borders, so first-match-wins mislabels border cities
     # (Nice→Italy, Como→Switzerland). Among every box that contains the point, pick the
-    # one whose center is nearest — that resolves to the correct country.
+    # one whose center is nearest. NOTE: this is still box-based, not polygon-based —
+    # cities that sit deep inside a NEIGHBOUR's box (e.g. Turin, well within the France
+    # box) resolve wrong by any box metric. The user's explicit country always takes
+    # precedence in _country_label_for_stop, which is the reliable path for such stops.
     best_label = ""
     best_distance = float("inf")
     for label, min_lat, max_lat, min_lng, max_lng in COUNTRY_BOUNDING_BOXES:
@@ -840,6 +875,7 @@ def _country_label_nodes(
     width: int,
     height: int,
     has_logo: bool,
+    avoid_boxes: list[tuple[float, float, float, float]] | None = None,
 ) -> list[str]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for point in points:
@@ -859,6 +895,10 @@ def _country_label_nodes(
     ]
     if has_logo:
         occupied.append((46.0, 44.0, min(392.0, width * 0.34), 182.0))
+    # The callout scrolls were placed moments earlier by an independent pass;
+    # without their boxes here, big country names routinely land half-buried
+    # under a date/name scroll.
+    occupied.extend(avoid_boxes or [])
     point_pad_x = max(120.0, width * 0.07)
     point_pad_y = max(58.0, height * 0.038)
     for point in points:
@@ -1478,7 +1518,16 @@ def _callout_scroll_path(x: float, y: float, w: float, h: float) -> str:
     )
 
 
-def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, has_logo: bool) -> list[str]:
+def _callout_labels(
+    points: list[dict[str, Any]],
+    *,
+    width: int,
+    height: int,
+    has_logo: bool,
+) -> tuple[list[str], list[tuple[float, float, float, float]]]:
+    """Return the callout SVG nodes AND the boxes they occupy, so later layout
+    passes (country labels) can avoid drawing underneath them."""
+
     dense_layout = len(points) > 12
     min_label_w = 186.0 if dense_layout else 154.0
     max_label_w = 242.0 if dense_layout else 216.0
@@ -1493,8 +1542,16 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
     ]
     if has_logo:
         occupied.append((46.0, 46.0, min(390.0, width * 0.34), 178.0))
+    # Keep scrolls off the numbered route dots of OTHER stops — without these
+    # pads a callout can sit right on top of a neighbouring marker (visible on
+    # dense multi-country routes in production).
+    dot_pad = 34.0
+    for point in points:
+        px, py = float(point["x"]), float(point["y"])
+        occupied.append((px - dot_pad, py - dot_pad, px + dot_pad, py + dot_pad))
 
     nodes: list[str] = []
+    callout_boxes: list[tuple[float, float, float, float]] = []
     for index, point in enumerate(points):
         best: tuple[float, float, tuple[float, float, float, float]] | None = None
         best_score = float("inf")
@@ -1524,8 +1581,12 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
 
         label_x, label_y, box = best
         occupied.append(box)
+        callout_boxes.append(box)
         anchor_x, anchor_y = _box_anchor(point, box)
-        date = _svg_text(_short_text(point.get("date"), limit=7))
+        # limit=10 keeps a full ISO date ("2026-07-07") intact — 7 mangled it
+        # into "2026-0…" despite the recipe promising complete dates. Overlong
+        # captions are compressed to the scroll width via textLength below.
+        date = _svg_text(_short_text(point.get("date"), limit=10))
         name = _svg_text(_short_text(point.get("name"), limit=12 if dense_layout else 10))
         transport = _svg_text(_short_text(point.get("transport"), limit=8))
         caption = f"{date}  {name}" if date else name
@@ -1533,7 +1594,7 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
         transport_y = label_y + (43.0 if label_h <= 52 else 46.0)
         caption_fit = (
             f' textLength="{label_w - 54.0:.1f}" lengthAdjust="spacingAndGlyphs"'
-            if len(caption) > (12 if dense_layout else 10)
+            if len(caption) >= (12 if dense_layout else 10)
             else ""
         )
         transport_node = (
@@ -1556,7 +1617,7 @@ def _callout_labels(points: list[dict[str, Any]], *, width: int, height: int, ha
             f"{transport_node}"
             "</g>"
         )
-    return nodes
+    return nodes, callout_boxes
 
 
 def _poster_land_path(points: list[dict[str, Any]], *, width: int, height: int) -> str:
@@ -1688,9 +1749,14 @@ def render_itinerary_map_svg(
     )
     land_path = _poster_land_path(points, width=width, height=height)
     background = (
+        # preserveAspectRatio="none": the AI paints terrain at the control
+        # PNG's locked pixel coordinates, and the route/dots are drawn at those
+        # exact coordinates. "slice" would crop a background whose aspect ratio
+        # differs from the canvas (upstream size mismatches happen), shifting
+        # every painted city away from its dot. Stretching keeps alignment.
         '<g data-layer="ai-stylized-map-background">'
         f'<image href="{_svg_text(safe_background_url)}" x="0" y="0" width="{width}" height="{height}" '
-        'preserveAspectRatio="xMidYMid slice" opacity="0.96"/>'
+        'preserveAspectRatio="none" opacity="0.96"/>'
         "</g>"
         if safe_background_url
         else ""
@@ -1730,8 +1796,14 @@ def render_itinerary_map_svg(
         route_point_nodes.append(
             f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" class="route-dot-index">{index + 1}</text>'
         )
-    label_nodes = _callout_labels(points, width=width, height=height, has_logo=reserve_logo)
-    country_nodes = _country_label_nodes(points, width=width, height=height, has_logo=reserve_logo)
+    label_nodes, callout_boxes = _callout_labels(points, width=width, height=height, has_logo=reserve_logo)
+    country_nodes = _country_label_nodes(
+        points,
+        width=width,
+        height=height,
+        has_logo=reserve_logo,
+        avoid_boxes=callout_boxes,
+    )
     index_nodes = (
         _dense_index_labels(points, width=width, height=height)
         if dense_layout and len(points) > len(label_nodes)

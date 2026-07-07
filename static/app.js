@@ -641,12 +641,25 @@ function workspaceStorageKey() {
   return scopedStorageKey(WORKSPACE_KEY)
 }
 
+// 部署方启用 PICGEN_PROXY_AUTH_TOKEN 时，在浏览器控制台执行
+// localStorage.setItem("picgen-proxy-token", "<token>") 后刷新即可。
+// 不设置则不发送该头，行为与之前完全一致。
+function proxyTokenHeaders() {
+  try {
+    const token = window.localStorage.getItem("picgen-proxy-token") || ""
+    return token ? { "X-Proxy-Token": token } : {}
+  } catch {
+    return {}
+  }
+}
+
 async function fetchJSON(url, options = {}) {
   const response = await fetch(url, {
     credentials: "same-origin",
     ...options,
     headers: {
       ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...proxyTokenHeaders(),
       ...(options.headers || {}),
     },
   })
@@ -668,6 +681,21 @@ async function fetchJSON(url, options = {}) {
 
 function enterAuthGate(mode = state.authMode || "login", message = "") {
   state.authMode = mode === "register" ? "register" : "login"
+  // 会话过期常发生在聊天/资料弹窗打开时；这些弹窗是 .desktop-shell 的
+  // 兄弟节点，不随 auth-gate 隐藏，不关掉会盖在登录表单上面。
+  ;[
+    refs.teamChatModal,
+    refs.profileModal,
+    refs.bugReportModal,
+    refs.changePasswordModal,
+    refs.promptConfirmModal,
+  ].forEach((modal) => {
+    if (modal && !modal.classList.contains("hidden")) {
+      modal.classList.add("hidden")
+      modal.setAttribute("aria-hidden", "true")
+    }
+  })
+  document.body.classList.remove("modal-open", "chat-open")
   document.body.classList.add("auth-gate")
   document.body.classList.remove("app-shell")
   refs.authOverlay?.setAttribute("aria-hidden", "false")
@@ -823,7 +851,19 @@ async function checkAuthSession({ showLogin = true } = {}) {
     enterAppShell()
     return true
   }
-  const { response, data } = await fetchJSON("/api/me", { cache: "no-store" })
+  let response
+  let data
+  try {
+    ;({ response, data } = await fetchJSON("/api/me", { cache: "no-store" }))
+  } catch {
+    // 启动时服务不可达不能变成未处理的 rejection 把 init() 打断；
+    // 先落到登录页，手动登录仍然可用。
+    setCurrentUser(null)
+    if (showLogin) {
+      enterAuthGate("login", "暂时连不上服务器，请稍后重试登录。")
+    }
+    return false
+  }
   if (!response.ok) {
     setCurrentUser(null)
     if (showLogin) {
@@ -2203,6 +2243,16 @@ async function submitAIItineraryMap() {
       refs.itineraryDescriptionInput.value = confirmedText
     }
 
+    // 站点解析必须在 setBusy/previewPendingResult 之前：一旦占位面板把
+    // 当前结果清掉，这里 return 会让面板永远停在"等待上游返回"。
+    const coordinateStops = parseItineraryCoordinateStops(description)
+    const routeStops = coordinateStops.length ? coordinateStops : parseItineraryTextStops(description)
+    if (!routeStops.length) {
+      setError(itineraryCoordinateHelpText())
+      refs.itineraryDescriptionInput?.focus()
+      return
+    }
+
     const requestSnapshot = currentFormSnapshot()
     saveSettings()
     setError("")
@@ -2218,14 +2268,6 @@ async function submitAIItineraryMap() {
       model: "responses-itinerary-artwork",
       size,
     })
-
-    const coordinateStops = parseItineraryCoordinateStops(description)
-    const routeStops = coordinateStops.length ? coordinateStops : parseItineraryTextStops(description)
-    if (!routeStops.length) {
-      setError(itineraryCoordinateHelpText())
-      refs.itineraryDescriptionInput?.focus()
-      return
-    }
     const settings = getSettings()
     const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5"
     const result = await postJSON("api/itinerary-map/render", {
@@ -2304,7 +2346,12 @@ function resetItineraryMapExample() {
 }
 
 async function copyDetailedItineraryTemplate() {
-  await navigator.clipboard.writeText(DETAILED_ITINERARY_TEMPLATE)
+  try {
+    await navigator.clipboard.writeText(DETAILED_ITINERARY_TEMPLATE)
+  } catch {
+    setError("浏览器不允许复制到剪贴板。")
+    return
+  }
   setStatusMessage("精细行程模板已复制。")
 }
 
@@ -2747,8 +2794,12 @@ async function refreshGallery() {
     return
   }
   const params = new URLSearchParams()
-  const query = refs.gallerySearchInput?.value.trim() || state.gallerySearch || ""
-  const favoriteOnly = Boolean(refs.galleryFavoriteOnlyInput?.checked || state.galleryFavoriteOnly)
+  // 控件存在时以控件为准（包括“空”）；用 || 合并旧状态会导致清空搜索框、
+  // 取消勾选收藏后旧筛选悄悄复活。
+  const query = refs.gallerySearchInput ? refs.gallerySearchInput.value.trim() : state.gallerySearch || ""
+  const favoriteOnly = refs.galleryFavoriteOnlyInput
+    ? refs.galleryFavoriteOnlyInput.checked
+    : Boolean(state.galleryFavoriteOnly)
   state.gallerySearch = query
   state.galleryFavoriteOnly = favoriteOnly
   if (query) {
@@ -3632,7 +3683,10 @@ function useGroupAssetAsReference(asset) {
     state.generateReferenceImage = null
     state.materialReferenceImage = null
     state.styleReferenceImage = {
-      dataUrl: asset.saved_image_url,
+      // dataUrl must stay empty: ensureAssetDataUrl returns it verbatim when
+      // truthy, and a "/files/..." URL here would be sent as base64 payload
+      // and rejected by the backend. savedUrl drives the fetch-and-convert.
+      dataUrl: "",
       file: null,
       name: asset.title || "group-asset.png",
       type: "image/png",
@@ -4082,8 +4136,10 @@ async function refreshTeamChatMembers() {
 }
 
 async function refreshTeamChatMessages({ append = false } = {}) {
+  // 返回是否成功：调用方只有在成功时才清空状态栏，否则这里刚写入的
+  // 错误提示会被 0ms 后的 setTeamChatStatus("") 抹掉，失败看起来像空房间。
   if (!state.currentUser || !refs.teamChatMessages) {
-    return
+    return false
   }
   const requestedRoomKey = currentTeamChatRoomKey()
   const params = teamChatRoomParams()
@@ -4093,11 +4149,11 @@ async function refreshTeamChatMessages({ append = false } = {}) {
   try {
     const { response, data } = await fetchJSON(`/api/team-chat/messages?${params.toString()}`, { cache: "no-store" })
     if (requestedRoomKey !== currentTeamChatRoomKey()) {
-      return
+      return true
     }
     if (!response.ok) {
       setTeamChatStatus(data.error || "消息读取失败", true)
-      return
+      return false
     }
     const messages = Array.isArray(data.messages)
       ? data.messages.filter((message) => !message.room_key || message.room_key === requestedRoomKey)
@@ -4107,8 +4163,10 @@ async function refreshTeamChatMessages({ append = false } = {}) {
     if (!refs.teamChatModal?.classList.contains("hidden")) {
       await markCurrentTeamChatRead()
     }
+    return true
   } catch {
     setTeamChatStatus("消息读取失败", true)
+    return false
   }
 }
 
@@ -4187,8 +4245,9 @@ async function switchTeamChatRoom(nextRoom) {
   renderTeamChatMessages()
   await refreshTeamChatGroupContext()
   setTeamChatStatus("读取消息中")
-  await refreshTeamChatMessages()
-  setTeamChatStatus("")
+  if (await refreshTeamChatMessages()) {
+    setTeamChatStatus("")
+  }
   refs.teamChatMessageInput?.focus()
 }
 
@@ -4217,8 +4276,9 @@ async function openTeamChatModal() {
   await refreshTeamChatMembers()
   updateTeamChatRoomHeader()
   await refreshTeamChatGroupContext()
-  await refreshTeamChatMessages()
-  setTeamChatStatus("")
+  if (await refreshTeamChatMessages()) {
+    setTeamChatStatus("")
+  }
   refs.teamChatMessageInput?.focus()
 }
 
@@ -4612,6 +4672,8 @@ async function submitPasswordResetConfirm(event) {
 async function logout() {
   try {
     await fetchJSON("/api/auth/logout", { method: "POST" })
+  } catch {
+    // 网络断开时也要完成本地登出，且不能留下未处理的 rejection。
   } finally {
     window.clearTimeout(state.persistTimer)
     state.persistTimer = null
@@ -4883,10 +4945,16 @@ async function restoreWorkspaceState() {
   if (refs.itineraryLogoEnabled) {
     refs.itineraryLogoEnabled.checked = forms.itineraryLogoEnabled !== false
   }
-  syncSizePresetFromInputs()
-
-  if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
-    setGenerateSize(state.serverConfig.default_size || "auto")
+  if (forms.generateSizePreset === "auto" && !refs.generateWidthInput.value && !refs.generateHeightInput.value) {
+    // “自动比例”的快照是空宽高 + preset=auto。先跑 syncSizePresetFromInputs
+    // 会把空输入判成 custom，再被下面的默认值填成固定 1088x2240 ——
+    // 用户选的自动档就这样在每次刷新后被悄悄改掉。
+    setGenerateSize("auto")
+  } else {
+    syncSizePresetFromInputs()
+    if (!refs.generateWidthInput.value || !refs.generateHeightInput.value) {
+      setGenerateSize(state.serverConfig.default_size || "auto")
+    }
   }
 
   refs.editPromptInput.value = forms.editPrompt || ""
@@ -5266,6 +5334,11 @@ function currentUserPreferencesPayload() {
     size = getGenerateSize()
   } catch {
     size = getSizeSnapshotValue()
+  }
+  // 半填状态下快照可能是 "custom" 这类占位字符串；存进服务端偏好后
+  // 下次登录会被静默解析成 1024x1024。只持久化合法的尺寸值。
+  if (size !== "auto" && !/^\d+x\d+$/.test(size)) {
+    size = ""
   }
   return {
     default_model: refs.generateModelInput.value.trim(),
@@ -5667,11 +5740,6 @@ function updateVisualSizePicker(value) {
 
 function getOpenAIImageOptions() {
   const outputFormat = refs.outputFormatSelect.value || "png"
-  const outputCompression = Number.parseInt(refs.outputCompressionInput.value, 10)
-
-  if (!Number.isInteger(outputCompression) || outputCompression < 0 || outputCompression > 100) {
-    throw new Error("输出压缩质量必须在 0 到 100 之间。")
-  }
 
   const options = {
     quality: refs.qualitySelect.value || "high",
@@ -5680,7 +5748,13 @@ function getOpenAIImageOptions() {
     moderation: refs.moderationSelect.value || "auto",
   }
 
+  // 只有 jpeg/webp 才发送压缩质量；png 下该输入框是禁用的，用户清空后
+  // 无法再编辑，如果照样校验会把整个生成流程卡死在一个灰色字段上。
   if (["jpeg", "webp"].includes(outputFormat)) {
+    const outputCompression = Number.parseInt(refs.outputCompressionInput.value, 10)
+    if (!Number.isInteger(outputCompression) || outputCompression < 0 || outputCompression > 100) {
+      throw new Error("输出压缩质量必须在 0 到 100 之间。")
+    }
     options.output_compression = outputCompression
   }
 
@@ -6098,7 +6172,7 @@ function errorDetailsWithRequestId(data = {}) {
 }
 
 function isLocalAuthUnauthorized(response, data) {
-  return response.status === 401 && data?.code === "unauthorized" && data?.code !== "upstream_error"
+  return response.status === 401 && data?.code === "unauthorized"
 }
 
 function setStatusMessage(message = "") {
@@ -6678,6 +6752,14 @@ function snapshotCurrentResultState() {
     galleryMeta: state.currentGalleryMeta ? { ...state.currentGalleryMeta } : null,
     copyrightRisk: state.copyrightRisk ? { ...state.copyrightRisk } : null,
     textFidelity: state.textFidelity ? { ...state.textFidelity } : null,
+    download: refs.downloadButton
+      ? {
+          href: refs.downloadButton.getAttribute("href") || "",
+          filename: refs.downloadButton.getAttribute("download") || "",
+          logoReady: refs.downloadButton.classList.contains("download-ready-logo"),
+          label: refs.downloadButton.textContent,
+        }
+      : null,
   }
 }
 
@@ -6727,7 +6809,18 @@ function restoreResultStateSnapshot(snapshot) {
   renderResultCandidates()
   restoreCopyrightRiskPanel()
   restoreTextFidelityPanel()
-  updateOriginalDownloadButton(selectedResultCandidate())
+  // 恢复主下载按钮：previewPendingResult 会禁用它，取消生成后如果不
+  // 恢复，旧结果虽然回来了但下载按钮永远是死链（单候选时没有候选条，
+  // 也就没有任何入口能重新点亮它）。
+  if (snapshot.download && snapshot.download.href) {
+    setDownloadAvailable(snapshot.download.href, snapshot.download.filename, {
+      logoReady: snapshot.download.logoReady,
+      candidate: selectedResultCandidate(),
+    })
+  } else {
+    setDownloadDisabled()
+    updateOriginalDownloadButton(selectedResultCandidate())
+  }
   updatePreviewAvailability()
   updateResultActionSurface()
   updateWorkflowStatus()
@@ -7327,57 +7420,78 @@ async function postJSON(url, payload, options = {}) {
     })
   }, 5000)
 
-  let response
-  try {
-    appendDebugLine("fetch 已发出，等待本地服务响应", { requestId })
-    setProgressPhase("waiting", options.waitingLabel || "等待上游生成")
-    response = await fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-      signal: options.signal || controller.signal,
-    })
-  } catch (error) {
-    appendDebugLine("fetch 失败", {
-      requestId,
-      elapsedMs: Math.round(performance.now() - startedAt),
-      error: error.name === "AbortError"
-        ? state.activeRequestCancelled ? "用户已中断当前生成" : "请求超时或被中断"
-        : error.message,
-    })
-    if (error.name === "AbortError") {
-      const requestError = new Error(state.activeRequestCancelled
-        ? "用户已中断当前生成。"
-        : "请求等待超时。请查看本地服务终端日志，确认后端是否卡在上游接口。")
-      requestError.cancelled = state.activeRequestCancelled
-      throw requestError
+  // 把中断控制权保持到响应体读完为止：以前一收到响应头就清掉
+  // activeRequestController，之后如果代理在传输大体积 Base64 响应途中
+  // 卡死，超时不再生效、"中断生成"也点不动，页面会永远停在忙碌状态。
+  const translateAbort = (error) => {
+    if (error.name !== "AbortError") {
+      return error
     }
-    throw error
+    const requestError = new Error(state.activeRequestCancelled
+      ? "用户已中断当前生成。"
+      : "请求等待超时。请查看本地服务终端日志，确认后端是否卡在上游接口。")
+    requestError.cancelled = state.activeRequestCancelled
+    return requestError
+  }
+  const markFailureUnlessCancelled = (error) => {
+    // 用户主动取消走快照恢复；超时/网络失败必须把"等待上游返回"的
+    // 占位面板标记为失败，否则面板会永远显示进行中。
+    if (!error.cancelled) {
+      setPendingResultFailure(error.message, error.details || "")
+    }
+    return error
+  }
+
+  let response
+  let data
+  try {
+    try {
+      appendDebugLine("fetch 已发出，等待本地服务响应", { requestId })
+      setProgressPhase("waiting", options.waitingLabel || "等待上游生成")
+      response = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...proxyTokenHeaders(),
+        },
+        body: JSON.stringify(payload),
+        signal: options.signal || controller.signal,
+      })
+    } catch (error) {
+      appendDebugLine("fetch 失败", {
+        requestId,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        error: error.name === "AbortError"
+          ? state.activeRequestCancelled ? "用户已中断当前生成" : "请求超时或被中断"
+          : error.message,
+      })
+      throw markFailureUnlessCancelled(translateAbort(error))
+    }
+
+    appendDebugLine("本地服务已返回响应头", {
+      requestId,
+      status: response.status,
+      ok: response.ok,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    })
+    setProgressPhase("receiving", "处理上游响应")
+
+    try {
+      data = await response.json()
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw markFailureUnlessCancelled(translateAbort(error))
+      }
+      appendDebugLine("响应体不是有效 JSON", { requestId })
+      throw markFailureUnlessCancelled(new Error("本地服务返回了无法解析的响应。"))
+    }
   } finally {
     window.clearTimeout(timeoutId)
     window.clearTimeout(waitingNoticeId)
     if (state.activeRequestController === controller) {
       state.activeRequestController = null
     }
-  }
-
-  appendDebugLine("本地服务已返回响应头", {
-    requestId,
-    status: response.status,
-    ok: response.ok,
-    elapsedMs: Math.round(performance.now() - startedAt),
-  })
-  setProgressPhase("receiving", "处理上游响应")
-
-  let data
-  try {
-    data = await response.json()
-  } catch {
-    appendDebugLine("响应体不是有效 JSON", { requestId })
-    throw new Error("本地服务返回了无法解析的响应。")
   }
 
   appendDebugLine("响应 JSON 解析完成", {
@@ -7420,11 +7534,19 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
       credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
+        ...proxyTokenHeaders(),
       },
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
-    const data = await response.json()
+    // 代理/重启期间可能返回 HTML 错误页；裸 response.json() 会把
+    // SyntaxError 原文透传到面板上，也会绕过 401 的会话过期处理。
+    let data = {}
+    try {
+      data = await response.json()
+    } catch {
+      data = {}
+    }
     if (!response.ok) {
       if (isLocalAuthUnauthorized(response, data)) {
         enterAuthGate("login", "登录已过期，请重新登录。")
@@ -7463,7 +7585,16 @@ async function checkCopyrightRisk(payload) {
       appendDebugLine("版权检查取图失败", { error: error.message })
     }
   }
-  const reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
+  let reviewDataUrl = ""
+  try {
+    reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
+  } catch (error) {
+    // 图片解码失败时必须复位面板：否则上一张图的“已检查”结论会一直
+    // 挂在新图上，看起来像新图已通过检查。
+    appendDebugLine("版权检查图片预处理失败", { error: error.message })
+    setRiskPanel("未检查", "当前图片无法解码用于版权检查。")
+    return
+  }
   if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
     return
   }
@@ -7512,8 +7643,14 @@ async function checkTextFidelity(payload) {
   const contract = payload.text_contract || payload.textContract || {}
   const required = Array.isArray(contract.required) ? contract.required.filter(Boolean) : []
   const forbidden = Array.isArray(contract.forbidden) ? contract.forbidden.filter(Boolean) : []
-  if (!required.length && !forbidden.length) {
-    setTextFidelityPanel("未检查", "当前提示词没有抽取到明确上屏文案。", { hidden: true })
+  // 编辑模式即使没有契约也要检查：用"编辑前 vs 编辑后"对比防止正文被
+  // 偷偷换字。其它模式在契约为空时退回"以完整提示词为文字来源"（后端
+  // 支持），只有连提示词都没有时才跳过——以前契约抽取不到标签（表格、
+  // 自由排版提示词很常见）就直接放行，生产上的错字正是这样漏掉的。
+  const editCompare = payload.mode === "edit" && Boolean(state.currentComparisonSource)
+  const fidelityPrompt = payload.prompt || state.lastResultPrompt || ""
+  if (!required.length && !forbidden.length && !editCompare && !fidelityPrompt.trim()) {
+    setTextFidelityPanel("未检查", "当前提示词没有可核对的上屏文案。", { hidden: true })
     return
   }
 
@@ -7538,9 +7675,11 @@ async function checkTextFidelity(payload) {
       appendDebugLine("文字一致性检查取图失败", { error: error.message })
     }
   }
+  // 前后对比模式要辨认单个汉字的差异，分辨率降得太低会把形近字抹平。
+  const fidelityMaxEdge = editCompare ? 2048 : 1600
   let reviewDataUrl = ""
   try {
-    reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl, 1600, 0.92)
+    reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl, fidelityMaxEdge, 0.95)
   } catch (error) {
     appendDebugLine("文字一致性检查缩略图失败", { error: error.message })
     setTextFidelityPanel("检查失败", error.message || "文字一致性检查无法读取结果图。")
@@ -7562,13 +7701,36 @@ async function checkTextFidelity(payload) {
     return
   }
 
-  setTextFidelityPanel("检查中", "正在核对成图中文字是否逐字匹配用户输入。")
+  if (editCompare) {
+    // 前后对比模式：第 1 张 = 编辑前，第 2 张 = 编辑后。后端会核对
+    // 未被要求修改的文字是否逐字保留。
+    try {
+      const beforeRaw = await ensureAssetDataUrl(state.currentComparisonSource)
+      const beforeReview = await downscaleDataUrlForRisk(beforeRaw, fidelityMaxEdge, 0.95)
+      if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
+      if (beforeReview) {
+        images.unshift({
+          name: "edit-source.jpg",
+          type: inferMimeFromDataUrl(beforeReview),
+          data_url: beforeReview,
+        })
+      }
+    } catch (error) {
+      appendDebugLine("文字一致性检查读取编辑前图失败，退回单图检查", { error: error.message })
+    }
+  }
+
+  setTextFidelityPanel("检查中", images.length >= 2
+    ? "正在对比编辑前后的画面文字，未要求修改的部分必须逐字保留。"
+    : "正在核对成图中文字是否逐字匹配用户输入。")
   try {
     const result = await postJSONSilent("api/text-fidelity", {
       api_key: settings.apiKey,
       endpoint_url: settings.responsesUrl,
       model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
-      prompt: payload.prompt || state.lastResultPrompt || "",
+      prompt: fidelityPrompt,
       context: [
         `模式：${payload.mode || ""}`,
         `模型：${payload.model || ""}`,
@@ -8857,6 +9019,9 @@ function bindReferenceDropzone(dropzone, input, handler) {
   })
   input.addEventListener("change", async (event) => {
     const file = event.target.files?.[0]
+    // 清空 value：不清的话通过“继续编辑”或拖拽换图后，再点选同一个文件
+    // 不会触发 change 事件，看起来像选择没生效。
+    event.target.value = ""
     if (!file) {
       return
     }
@@ -9292,6 +9457,7 @@ function bindEvents() {
   })
   refs.editImageInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0]
+    event.target.value = ""
     if (!file) {
       return
     }
@@ -9317,6 +9483,7 @@ function bindEvents() {
   })
   refs.editMaskInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0]
+    event.target.value = ""
     if (!file) {
       return
     }
@@ -9517,7 +9684,7 @@ async function init() {
   clearSourcePreview("原图")
 
   try {
-    const response = await fetch("api/config", { cache: "no-store" })
+    const response = await fetch("api/config", { cache: "no-store", headers: proxyTokenHeaders() })
     state.serverConfig = await response.json()
   } catch {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"

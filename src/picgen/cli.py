@@ -29,11 +29,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("PICGEN_WORKERS", "1")),
         help="Number of uvicorn worker processes (production)",
     )
-    parser.add_argument("--log-level", default=os.environ.get("PICGEN_LOG_LEVEL", "INFO"))
+    # Default None so we can tell "flag given" from "fall back to env/.env";
+    # explicit flags are exported to the environment below to survive the
+    # re-import of picgen.main in uvicorn worker processes.
+    parser.add_argument("--log-level", default=None)
     parser.add_argument(
         "--log-format",
         choices=("console", "json"),
-        default=os.environ.get("PICGEN_LOG_FORMAT", "console"),
+        default=None,
     )
     parser.add_argument(
         "--access-log",
@@ -56,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _mask_secret(value: str) -> str:
     if not value:
         return ""
-    if len(value) <= 6:
+    if len(value) <= 8:
         return "***"
     return f"{value[:4]}…{value[-2:]}"
 
@@ -118,14 +121,25 @@ def _print_config(settings: Settings) -> None:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    configure_logging(args.log_level, args.log_format)
-    logger = get_logger("picgen.cli")
 
     try:
         settings = Settings.from_env()
     except Exception as exc:
         print(f"配置解析失败: {exc}", file=sys.stderr)
         return 2
+
+    log_level = (args.log_level or settings.log_level).strip().upper()
+    log_format = args.log_format or settings.log_format
+    if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        print(f"配置解析失败: 未知日志级别 {args.log_level}", file=sys.stderr)
+        return 2
+    # picgen.main reconfigures logging from Settings at import time (which is
+    # how every uvicorn worker boots), so explicit CLI flags only take effect
+    # if they are visible in the environment those imports read.
+    os.environ["PICGEN_LOG_LEVEL"] = log_level
+    os.environ["PICGEN_LOG_FORMAT"] = log_format
+    configure_logging(log_level, log_format)
+    logger = get_logger("picgen.cli")
 
     if args.print_config:
         _print_config(settings)
@@ -154,7 +168,7 @@ def main() -> int:
                 "port": args.port,
                 "workers": args.workers,
                 "reload": args.reload,
-                "log_format": args.log_format,
+                "log_format": log_format,
             }
         },
     )
@@ -165,7 +179,7 @@ def main() -> int:
         port=args.port,
         reload=args.reload,
         workers=args.workers if not args.reload else None,
-        log_level=args.log_level.lower(),
+        log_level=log_level.lower(),
         access_log=args.access_log,
         proxy_headers=settings.trust_forwarded_for,
         forwarded_allow_ips="*" if settings.trust_forwarded_for else None,
