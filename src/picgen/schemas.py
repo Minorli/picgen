@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -115,6 +115,10 @@ class ResponsesImageRequest(_ImageOptions):
     size: str | None = Field(default=None, max_length=64)
     image: FilePayload | None = None
     images: list[FilePayload] = Field(default_factory=list, max_length=16)
+    # Edit mask forwarded to the image_generation tool as input_image_mask.
+    # The frontend has always sent this on masked edits routed through the
+    # Responses channel; dropping it silently repainted protected regions.
+    mask: FilePayload | None = None
     mode: str | None = Field(default=None, max_length=64)
     sample_count: int = Field(default=1, ge=1, le=3)
     allow_inline_fallback: bool = True
@@ -170,7 +174,11 @@ class TextFidelityRequest(BaseModel):
     model: str | None = Field(default=None, max_length=128)
     api_key: str | None = Field(default=None, max_length=512)
     text_contract: TextFidelityContract = Field(default_factory=TextFidelityContract)
-    images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=1)
+    # 1 image: check the result against the contract/prompt.
+    # 2 images: BEFORE/AFTER comparison for edits — every piece of text in the
+    # first image must survive verbatim in the second unless the prompt asked
+    # for the change.
+    images: list[FilePayload] = Field(default_factory=list, min_length=1, max_length=2)
 
 
 class AuthRequest(BaseModel):
@@ -330,7 +338,13 @@ class UserProfileRequest(BaseModel):
     @field_validator("email", mode="after")
     @classmethod
     def _validate_email(cls, value: str) -> str:
-        if value and ("@" not in value or "." not in value.rsplit("@", 1)[-1]):
+        if not value:
+            return value
+        # Whitespace/control characters would be stored and later crash SMTP
+        # header construction (EmailMessage rejects CR/LF in "To").
+        if any(char.isspace() or ord(char) < 32 for char in value):
+            raise ValueError("邮箱格式不正确")
+        if "@" not in value or "." not in value.rsplit("@", 1)[-1]:
             raise ValueError("邮箱格式不正确")
         return value
 
@@ -351,7 +365,7 @@ class FeedbackRequest(BaseModel):
     model: str = Field(default="", max_length=128)
     saved_image_path: str = Field(default="", max_length=1024)
     saved_image_url: str = Field(default="", max_length=1024)
-    generated_image_id: int | None = Field(default=None, ge=1)
+    generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
 
     @field_validator("reason", "prompt", "mode", "model", "saved_image_path", "saved_image_url", mode="after")
     @classmethod
@@ -376,14 +390,14 @@ class BugReportRequest(BaseModel):
 class ShareResultRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    recipient_ids: list[int] = Field(min_length=1, max_length=50)
+    recipient_ids: list[Annotated[int, Field(ge=1, le=_SQLITE_MAX_INT)]] = Field(min_length=1, max_length=50)
     prompt: str = Field(default="", max_length=32_000)
     mode: str = Field(default="", max_length=64)
     model: str = Field(default="", max_length=128)
     rating: Literal["", "good", "ok", "bad"] = ""
     saved_image_path: str = Field(default="", max_length=1024)
     saved_image_url: str = Field(default="", max_length=1024)
-    generated_image_id: int | None = Field(default=None, ge=1)
+    generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
     note: str = Field(default="", max_length=1000)
 
     @field_validator("recipient_ids", mode="after")
@@ -436,7 +450,7 @@ class GroupAnnouncementRequest(OrganizationUnitRequest):
 class GroupSavedItemRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    generated_image_id: int = Field(ge=1)
+    generated_image_id: int = Field(ge=1, le=_SQLITE_MAX_INT)
     title: str = Field(default="", max_length=160)
     note: str = Field(default="", max_length=1000)
 
@@ -472,7 +486,7 @@ class GalleryUpdateRequest(BaseModel):
 class FinalImageRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    generated_image_id: int = Field(ge=1)
+    generated_image_id: int = Field(ge=1, le=_SQLITE_MAX_INT)
     image: FilePayload
     source_saved_image_path: str = Field(default="", max_length=1024)
     source_saved_image_url: str = Field(default="", max_length=1024)

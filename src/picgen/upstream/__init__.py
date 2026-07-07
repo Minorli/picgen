@@ -5,12 +5,7 @@ from __future__ import annotations
 from .client import (
     HttpxAsyncClient,
     UpstreamClient,
-    fetch_remote_image,
     get_default_client,
-    run_upstream_file_upload,
-    run_upstream_json,
-    run_upstream_multipart,
-    run_upstream_responses_json,
     shutdown_default_client,
 )
 from .errors import compact_log_text, extract_error_message
@@ -51,7 +46,6 @@ __all__ = [
     "event_image_base64",
     "extract_error_message",
     "extract_response_image_item",
-    "fetch_remote_image",
     "get_default_client",
     "normalize_responses_image_payload",
     "openai_image_options",
@@ -60,10 +54,6 @@ __all__ = [
     "parse_sse_json_events",
     "prepare_image_payload",
     "request_metadata",
-    "run_upstream_file_upload",
-    "run_upstream_json",
-    "run_upstream_multipart",
-    "run_upstream_responses_json",
     "shutdown_default_client",
     "sibling_endpoint_url",
     "stream_events_to_image_payload",

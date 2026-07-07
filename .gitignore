@@ -9,3 +9,8 @@ picgen-*.png
 reference-agent6.png
 data/auth.sqlite3*
 data/outputs/
+# Root-level dev/test artifacts (already-tracked images like demo1.png stay tracked)
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp

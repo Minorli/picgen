@@ -43,8 +43,10 @@ VOLUME ["/app/data"]
 
 EXPOSE 8000
 
+# Probe the configured port, not a hardcoded 8000 — overriding PICGEN_PORT
+# used to leave a working container permanently "unhealthy".
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()" || exit 1
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/api/health' % os.environ.get('PICGEN_PORT', '8000'), timeout=3).read()" || exit 1
 
 ENTRYPOINT ["python", "-m", "picgen.cli"]
 CMD ["--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--log-format", "json"]

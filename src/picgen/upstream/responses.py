@@ -11,11 +11,14 @@ logger = get_logger("picgen.upstream.responses")
 
 def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
     import json as _json
+    import re as _re
 
     events: list[dict[str, Any]] = []
     data_lines: list[str] = []
+    dropped = 0
 
     def flush_event() -> None:
+        nonlocal dropped
         if not data_lines:
             return
         data = "\n".join(data_lines).strip()
@@ -25,12 +28,16 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
         try:
             parsed = _json.loads(data)
         except _json.JSONDecodeError:
+            dropped += 1
             return
         if isinstance(parsed, dict):
             events.append(parsed)
 
-    for raw_line in body.splitlines():
-        line = raw_line.rstrip("\r\n")
+    # SSE frames are delimited by \r\n / \n / \r ONLY. str.splitlines() would
+    # also split on U+2028/U+2029/\x0b/…, which are legal raw inside JSON
+    # strings — a model output containing one would shred the event's JSON.
+    for raw_line in _re.split(r"\r\n|\r|\n", body):
+        line = raw_line
         if not line:
             flush_event()
             continue
@@ -38,6 +45,14 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
             data_lines.append(line.removeprefix("data:").strip())
 
     flush_event()
+    if dropped:
+        log_event(
+            logger,
+            logging.WARNING,
+            "responses_sse_events_dropped",
+            dropped=dropped,
+            parsed=len(events),
+        )
     return events
 
 

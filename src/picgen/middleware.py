@@ -27,7 +27,10 @@ logger = get_logger("picgen.middleware")
 RequestHandler = Callable[[Request], Awaitable[Response]]
 
 
-def _single_message_receive(message: dict[str, Any]) -> Callable[[], Awaitable[dict[str, Any]]]:
+def _single_message_receive(
+    message: dict[str, Any],
+    fallback: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+) -> Callable[[], Awaitable[dict[str, Any]]]:
     delivered = False
 
     async def receive() -> dict[str, Any]:
@@ -35,6 +38,12 @@ def _single_message_receive(message: dict[str, Any]) -> Callable[[], Awaitable[d
         if not delivered:
             delivered = True
             return message
+        if fallback is not None:
+            # After the replayed body, defer to the real receive so downstream
+            # disconnect-watchers still observe ``http.disconnect``; returning
+            # synthetic empty messages forever would make a cancelled request
+            # look connected until the upstream call finishes.
+            return await fallback()
         return {"type": "http.request", "body": b"", "more_body": False}
 
     return receive
@@ -172,7 +181,7 @@ class BodySizeLimitMiddleware:
             "type": "http.request",
             "body": bytes(body),
             "more_body": False,
-        }), send)
+        }, fallback=receive), send)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -241,6 +250,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self._evict(burst_bucket, now - 5.0)
             if len(minute_bucket) >= self.per_minute or (self.burst > 0 and len(burst_bucket) >= self.burst):
                 retry_after = 5
+                if len(minute_bucket) >= self.per_minute and minute_bucket:
+                    # The minute window is what's exhausted — tell the client
+                    # when a slot actually frees up instead of a flat 5s that
+                    # guarantees repeat 429s.
+                    retry_after = max(1, int(60.0 - (now - minute_bucket[0])) + 1)
                 log_event(
                     logger,
                     logging.WARNING,
@@ -278,7 +292,10 @@ class ProxyAuthMiddleware(BaseHTTPMiddleware):
         if not provided:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
-                provided = auth.split(None, 1)[1].strip()
+                # "Bearer " with nothing after it splits to a single element;
+                # a blind [1] would 500 on that malformed-but-common header.
+                parts = auth.split(None, 1)
+                provided = parts[1].strip() if len(parts) == 2 else ""
         if provided != self.token:
             log_event(
                 logger,

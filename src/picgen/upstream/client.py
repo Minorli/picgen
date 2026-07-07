@@ -9,7 +9,6 @@ import time
 from http import HTTPStatus
 from typing import Any, NoReturn, Protocol
 
-import anyio
 import httpx
 
 from ..errors import APIError
@@ -315,7 +314,7 @@ class HttpxAsyncClient:
                 return parsed
         except APIError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.RequestError as exc:
             self._raise_network(exc, url=url, started_at=started_at, action="Responses 图像接口")
 
     async def fetch_image(self, url: str, user_agent: str) -> tuple[bytes, str]:
@@ -329,7 +328,13 @@ class HttpxAsyncClient:
                     url, headers, started_at=started_at, attempt=attempt
                 )
             except APIError as exc:
-                if attempt < self.max_retries and exc.status in _RETRY_STATUS:
+                # Never retry the locally-raised "image too large" rejection —
+                # it is deterministic and each retry re-downloads up to the cap.
+                if (
+                    attempt < self.max_retries
+                    and exc.status in _RETRY_STATUS
+                    and exc.code != "upstream_image_too_large"
+                ):
                     await self._sleep_for_retry(attempt, url=url, status=exc.status)
                     continue
                 raise
@@ -339,7 +344,7 @@ class HttpxAsyncClient:
                     await self._sleep_for_retry(attempt, url=url, reason="timeout")
                     continue
                 self._raise_network(exc, url=url, started_at=started_at, action=action)
-            except httpx.NetworkError as exc:
+            except httpx.RequestError as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
                     await self._sleep_for_retry(attempt, url=url, reason=str(exc))
@@ -379,7 +384,7 @@ class HttpxAsyncClient:
             return APIError(
                 HTTPStatus.BAD_GATEWAY,
                 f"上游返回的图片过大，超过 {self.max_image_bytes // 1024} KB 上限",
-                code="upstream_error",
+                code="upstream_image_too_large",
             )
 
         async with self._client.stream("GET", url, headers=headers) as response:
@@ -421,7 +426,10 @@ class HttpxAsyncClient:
             response = await self._client.request(method, url, content=content, headers=headers)
         except httpx.TimeoutException as exc:
             self._raise_network(exc, url=url, started_at=started_at, action=action)
-        except httpx.NetworkError as exc:
+        except httpx.RequestError as exc:
+            # RequestError covers NetworkError AND its siblings — notably
+            # RemoteProtocolError (server closed a kept-alive connection midway),
+            # which previously escaped as an unhandled 500.
             if self._is_broken_pipe(exc):
                 raise APIError(
                     HTTPStatus.BAD_GATEWAY,
@@ -527,15 +535,28 @@ class HttpxAsyncClient:
                 url=url,
                 elapsed_ms=elapsed_ms,
                 timeout_s=self.total_timeout,
+                timeout_kind=type(exc).__name__,
                 action=action,
             )
+            # PoolTimeout/ConnectTimeout fire after the (short) connect window,
+            # not the total read timeout — a message blaming "上游超过 N 秒没有
+            # 返回" would misdirect diagnosis at the upstream.
+            if isinstance(exc, httpx.PoolTimeout):
+                detail = (
+                    f"{action}排队超时：本地连接池已被占满，等待空闲连接超过阈值。\n"
+                    "通常是并发生成过多；请稍后再试或提高 PICGEN_UPSTREAM_MAX_CONNECTIONS。"
+                )
+            elif isinstance(exc, httpx.ConnectTimeout):
+                detail = f"{action}连接超时：无法在限定时间内与上游建立连接。请检查网络或上游地址。"
+            else:
+                detail = (
+                    f"{action}超时：上游接口超过 {self.total_timeout:.0f} 秒没有返回。\n"
+                    "本地服务已经等满超时阈值。请降低图片尺寸/质量，或换用没有短网关限制的上游接口。"
+                )
             raise APIError(
                 HTTPStatus.GATEWAY_TIMEOUT,
                 "图片生成服务响应超时，请稍后再试。",
-                (
-                    f"{action}超时：上游接口超过 {self.total_timeout:.0f} 秒没有返回。\n"
-                    "本地服务已经等满超时阈值。请降低图片尺寸/质量，或换用没有短网关限制的上游接口。"
-                ),
+                detail,
                 code="upstream_timeout",
             ) from exc
         log_event(
@@ -616,63 +637,3 @@ async def shutdown_default_client() -> None:
             _default_client = None
 
 
-# --- legacy sync wrappers used by tests --------------------------------
-
-def run_upstream_json(
-    url: str, api_key: str, payload: dict[str, Any], user_agent: str
-) -> dict[str, Any]:
-    return _run_sync(HttpxAsyncClient().run_json, url, api_key, payload, user_agent)
-
-
-def run_upstream_multipart(
-    url: str,
-    api_key: str,
-    fields: dict[str, Any],
-    files: list[dict[str, Any]],
-    user_agent: str,
-) -> dict[str, Any]:
-    return _run_sync(HttpxAsyncClient().run_multipart, url, api_key, fields, files, user_agent)
-
-
-def run_upstream_file_upload(
-    url: str,
-    api_key: str,
-    file_part: dict[str, Any],
-    user_agent: str,
-    *,
-    purpose: str = "vision",
-) -> dict[str, Any]:
-    return _run_sync(
-        HttpxAsyncClient().run_file_upload, url, api_key, file_part, user_agent, purpose
-    )
-
-
-def run_upstream_responses_json(
-    url: str, api_key: str, payload: dict[str, Any], user_agent: str
-) -> dict[str, Any]:
-    return _run_sync(HttpxAsyncClient().run_responses, url, api_key, payload, user_agent)
-
-
-def fetch_remote_image(url: str, user_agent: str) -> tuple[bytes, str]:
-    return _run_sync(HttpxAsyncClient().fetch_image, url, user_agent)
-
-
-def _run_sync(awaitable_fn: Any, *args: Any, **kwargs: Any) -> Any:
-    async def _runner() -> Any:
-        client = HttpxAsyncClient()
-        try:
-            return await awaitable_fn.__self__.__class__.__dict__[awaitable_fn.__name__](
-                client, *args, **kwargs
-            )
-        finally:
-            await client.aclose()
-
-    return anyio.from_thread.run_sync(lambda: anyio.run(_runner)) if _in_async_context() else anyio.run(_runner)
-
-
-def _in_async_context() -> bool:
-    try:
-        asyncio.get_running_loop()
-        return True
-    except RuntimeError:
-        return False

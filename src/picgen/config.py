@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, HttpUrl, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -50,7 +52,10 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=120, ge=0, le=100000)
     rate_limit_burst: int = Field(default=20, ge=0, le=10000)
 
-    cors_allow_origins: list[str] = Field(default_factory=list)
+    # NoDecode: keep the raw env string ("a.com,b.com" or "") out of pydantic's
+    # JSON decoding — without it any non-JSON value aborts startup before the
+    # comma-splitting validator below ever runs.
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     cors_allow_credentials: bool = False
     proxy_auth_token: str = ""
     trust_forwarded_for: bool = False
@@ -116,10 +121,24 @@ class Settings(BaseSettings):
     def _strip(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("auth_db_path", mode="before")
+    @classmethod
+    def _empty_path_is_none(cls, value: object) -> object:
+        # An empty env value must fall back to the default DB path; pydantic
+        # would otherwise coerce "" to Path(".") which is truthy and points the
+        # sqlite file at the working directory.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("upstream_user_agent", mode="after")
+    @classmethod
+    def _default_user_agent_when_empty(cls, value: str) -> str:
+        return value.strip() or DEFAULT_USER_AGENT
+
     @field_validator(
         "default_api_key",
         "proxy_auth_token",
-        "upstream_user_agent",
         "bug_report_webhook_url",
         "error_alert_telegram_bot_token",
         "error_alert_telegram_chat_id",
@@ -195,7 +214,19 @@ class Settings(BaseSettings):
     @classmethod
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                # Backwards compatibility: JSON list syntax used to be the only
+                # accepted env format before NoDecode was introduced.
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
     @property

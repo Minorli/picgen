@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.43**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.44**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,8 +14,19 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.43 主要特性
+## 0.1.44 主要特性
 
+- **编辑前后文字对比**：编辑模式自动把"编辑前/编辑后"两张图分别转写并程序化比对，未被要求修改的
+  文字发生变化会立即在文字一致性面板提示（个别形近字可能超出自动识别能力，面板会注明需人工复核）。
+- **无标签提示词也做文字校验**：提示词里没有"标题：/亮点："等标签时（表格、自由排版很常见），
+  文字一致性检查不再空转放行，而是把完整提示词原文作为文字来源逐字核对成图。
+- **版本历史不再受图库规模限制**：改为按版本链查询，图片超过 200 张后新图的版本记录不再 404。
+- **候选图 ID 精确对齐**：上游返回不可用候选时不再错位挂接 `generated_image_id`，杜绝反馈/收藏/LOGO
+  成品写错记录；全占位响应会明确报错而不是"成功但没图"。
+- **成功通知移出请求路径**：Telegram 通知改为后台发送并自动重试瞬时失败，生图完成不再被通知超时拖慢。
+- **路线图排版加固**：国家大字和站点签条互不遮挡，签条不再压住其他站点的路线圆点；日期完整显示。
+- **一批健壮性修复**：`.env.example` 逗号写法不再崩溃启动、空 Bearer 头返回 401 而非 500、
+  上游连接被掐断正确重试、保留期清理不再提前一天删图、关闭登录时路线图/匿名保存可用等。
 - **透明 LOGO 成品**：最终成品只叠加官方透明 PNG，不再因为深色或复杂背景自动绘制半透明底板；Telegram 通知默认超时提高到 15 秒并记录可诊断的失败类型。
 - **标题/正文文字分层**：主标题在逐字准确和高识别度前提下，允许商业美术字、手写标题、立体描边、金属或笔刷字效；正文、地名、日期、序号、说明和贴士继续严格清晰逐字。
 - **上游原图交付**：普通海报和编辑图仍会把用户选择的 `size` 传给上游；若上游返回不同尺寸，PicGen 不缩放、不裁切、不终止，按上游原始图片保存并在界面提示实际尺寸。路线图仍可按行程内容推测构图尺寸。
@@ -79,10 +90,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.43 .
+docker build -t minorli/picgen:0.1.44 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.43
+  minorli/picgen:0.1.44
 ```
 
 或：
@@ -97,10 +108,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.43`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.44`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.43 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.44 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -202,7 +213,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.43 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.44 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
@@ -325,8 +336,9 @@ uv run picgen --prune-now
 
 - 本地使用建议保持 `PICGEN_HOST=127.0.0.1`。
 - 对外部署务必：
-  - 设置 `PICGEN_PROXY_AUTH_TOKEN`，前端通过 `Authorization: Bearer <token>` 或
-    `X-Proxy-Token: <token>` 调用 `/api/*`。
+  - 设置 `PICGEN_PROXY_AUTH_TOKEN`，API 客户端通过 `Authorization: Bearer <token>` 或
+    `X-Proxy-Token: <token>` 调用 `/api/*`。使用自带 Web 控制台时，需在浏览器控制台执行
+    `localStorage.setItem("picgen-proxy-token", "<token>")` 后刷新页面，前端会自动附带该头。
   - 设置强随机 `PICGEN_ADMIN_PASSWORD`，不要使用空密码启动对外服务。
   - 通过反代终止 TLS，并设置 `PICGEN_TRUST_FORWARDED_FOR=true`。
   - 按需配置 `PICGEN_CORS_ALLOW_ORIGINS`。
