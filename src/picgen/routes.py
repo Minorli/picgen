@@ -36,7 +36,6 @@ from .config import (
     DEFAULT_RESPONSES_MODEL,
     DEFAULT_RESPONSES_REASONING_EFFORT,
     LEGACY_DEFAULT_RESPONSES_MODEL,
-    RESPONSES_MODEL_STORAGE_VERSION,
     Settings,
 )
 from .errors import APIError
@@ -197,18 +196,18 @@ def _responses_reasoning_options(model: str) -> dict[str, dict[str, str]]:
     return {"reasoning": {"effort": DEFAULT_RESPONSES_REASONING_EFFORT}}
 
 
-def _normalize_legacy_client_responses_model(
+def _normalize_responses_model(
     model: str,
     *,
-    storage_version: int | None,
     default_model: str,
 ) -> str:
-    if model == LEGACY_DEFAULT_RESPONSES_MODEL and (storage_version or 0) < RESPONSES_MODEL_STORAGE_VERSION:
-        normalized_default = default_model.strip()
-        if not normalized_default or normalized_default == LEGACY_DEFAULT_RESPONSES_MODEL:
-            return DEFAULT_RESPONSES_MODEL
+    normalized_model = model.strip()
+    normalized_default = default_model.strip()
+    if not normalized_default or normalized_default == LEGACY_DEFAULT_RESPONSES_MODEL:
+        normalized_default = DEFAULT_RESPONSES_MODEL
+    if not normalized_model or normalized_model == LEGACY_DEFAULT_RESPONSES_MODEL:
         return normalized_default
-    return model
+    return normalized_model
 
 
 JSON_BODY = Body(...)
@@ -999,7 +998,10 @@ async def _generate_itinerary_artwork(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         return {}
-    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_responses_model(
+        parsed.model,
+        default_model=settings.default_responses_model,
+    )
     width, height = _parse_itinerary_size(output_size)
     # Pure-Python pixel rendering + zlib over a multi-MB canvas takes seconds of
     # CPU; run it in a worker thread so the event loop keeps serving requests.
@@ -1291,7 +1293,10 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     if not api_key:
         return plan
 
-    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_responses_model(
+        parsed.model,
+        default_model=settings.default_responses_model,
+    )
     upstream_payload = {
         "model": model,
         "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
@@ -1941,9 +1946,8 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(UserPreferencesRequest, payload)
-        responses_model = _normalize_legacy_client_responses_model(
+        responses_model = _normalize_responses_model(
             parsed.default_responses_model,
-            storage_version=parsed.responses_model_storage_version,
             default_model=settings.default_responses_model,
         )
         preferences = await anyio.to_thread.run_sync(
@@ -3100,7 +3104,10 @@ async def _create_team_chat_bot_reply(
                 mentions=[user.username],
             )
         )
-    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_responses_model(
+        settings.default_responses_model,
+        default_model=DEFAULT_RESPONSES_MODEL,
+    )
     upstream_payload = {
         "model": model,
         "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
@@ -3243,7 +3250,10 @@ async def handle_copyright_risk(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_responses_model(
+        parsed.model or "",
+        default_model=settings.default_responses_model,
+    )
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -3285,7 +3295,10 @@ async def handle_text_fidelity(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_responses_model(
+        parsed.model or "",
+        default_model=settings.default_responses_model,
+    )
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -4250,10 +4263,8 @@ async def handle_responses_image(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
-    model = _normalize_legacy_client_responses_model(
-        model,
-        storage_version=parsed.responses_model_storage_version,
+    model = _normalize_responses_model(
+        parsed.model or "",
         default_model=settings.default_responses_model,
     )
     api_key = (parsed.api_key or settings.default_api_key).strip()

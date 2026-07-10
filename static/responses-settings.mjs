@@ -4,12 +4,15 @@ export const RESPONSES_MODEL_STORAGE_VERSION = 4
 
 export function migrateStoredResponsesSettings(settings = {}, defaultModel = DEFAULT_RESPONSES_MODEL) {
   const version = Number(settings.responsesModelStorageVersion || 0)
-  if (version >= RESPONSES_MODEL_STORAGE_VERSION) {
+  const storedModel = String(settings.responsesModel || "").trim()
+  if (version >= RESPONSES_MODEL_STORAGE_VERSION && storedModel !== LEGACY_DEFAULT_RESPONSES_MODEL) {
     return settings
   }
 
-  const storedModel = String(settings.responsesModel || "").trim()
-  const normalizedDefault = String(defaultModel || "").trim() || DEFAULT_RESPONSES_MODEL
+  const configuredDefault = String(defaultModel || "").trim()
+  const normalizedDefault = !configuredDefault || configuredDefault === LEGACY_DEFAULT_RESPONSES_MODEL
+    ? DEFAULT_RESPONSES_MODEL
+    : configuredDefault
   return {
     ...settings,
     responsesModel: storedModel === LEGACY_DEFAULT_RESPONSES_MODEL

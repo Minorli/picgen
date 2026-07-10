@@ -1003,7 +1003,7 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
             "title": "日本纵贯路线",
             "subtitle": "9/5 - 9/19",
             "size": "1792x1792",
-            "model": "gpt-image-2",
+            "model": "custom-responses-model",
             "stops": [
                 {"date": "9/5", "name": "札幌", "lat": 43.0618, "lng": 141.3545, "transport": "抵达"},
                 {"date": "9/12", "name": "东京", "lat": 35.6762, "lng": 139.6503, "transport": "火车"},
@@ -1043,6 +1043,8 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert fake.run_file_upload.await_args.args[2]["filename"] == "itinerary-geometry-control.png"
     assert fake.run_file_upload.await_args.args[2]["content_type"] == "image/png"
     upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "custom-responses-model"
+    assert "reasoning" not in upstream_payload
     assert upstream_payload["tools"][0]["size"] == "1792x1792"
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -1427,6 +1429,7 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
             "title": "欧洲漫画路线",
             "subtitle": "6/1 - 6/8",
             "generate_background": False,
+            "model": "custom-coordinate-model",
             "stops": [
                 {"date": "D1", "name": "巴黎", "transport": "火车"},
                 {"date": "D2", "name": "罗马", "transport": "飞机"},
@@ -1444,8 +1447,8 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
     assert payload["plan"]["stops"][1]["lng"] == 12.4964
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"]["effort"] == "max"
+    assert upstream_payload["model"] == "custom-coordinate-model"
+    assert "reasoning" not in upstream_payload
     assert "可解析 JSON" in upstream_payload["instructions"]
     assert "经纬度" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]
@@ -2354,7 +2357,9 @@ def test_responses_image_v3_client_legacy_model_is_normalized(make_client, setti
     assert upstream_payload["reasoning"] == {"effort": "max"}
 
 
-def test_responses_image_saves_streamed_image(make_client, settings_factory):
+def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
+    make_client, settings_factory
+):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
@@ -2378,14 +2383,14 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "reference"
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert payload["saved_image_url"].startswith("files/outputs/")
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
-    assert "reasoning" not in upstream_payload
+    assert upstream_payload["reasoning"] == {"effort": "max"}
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
 
 
@@ -2617,7 +2622,7 @@ def test_responses_image_normalizes_default_poster_size_when_size_omitted(make_c
     assert payload["image_size_normalized"] is True
 
 
-def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_factory):
+def test_copyright_risk_normalizes_gpt55_and_uses_inline_images(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
@@ -2629,6 +2634,7 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
         json={
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/responses",
+            "model": "gpt-5.5",
             "prompt": "生成一张活动图",
             "images": [
                 {
@@ -2672,6 +2678,7 @@ def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, se
         json={
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/responses",
+            "model": "gpt-5.5",
             "prompt": "把“铁帆鱿鱼”改成“铁煎章鱼”，把“11日从头吃到尾”改成“舌尖盛宴”",
             "text_contract": {
                 "required": ["舌尖盛宴", "铁煎章鱼"],

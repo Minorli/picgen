@@ -1,9 +1,9 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.50"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.51"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.50"
+} from "./responses-settings.mjs?v=0.1.51"
 
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
@@ -4857,6 +4857,7 @@ function createWorkspaceSnapshot() {
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
+      responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
       imageTransport: getImageTransport(),
       logoOverlayEnabled: refs.logoOverlayEnabled.checked,
       itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
@@ -4966,7 +4967,17 @@ async function restoreWorkspaceState() {
 
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
-  refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
+  const currentResponsesModel = normalizeResponsesModel(refs.responsesModelInput.value)
+  const workspaceResponsesSettings = migrateStoredResponsesSettings(
+    {
+      responsesModel: forms.responsesModel,
+      responsesModelStorageVersion: forms.responsesModelStorageVersion,
+    },
+    currentResponsesModel,
+  )
+  refs.responsesModelInput.value = normalizeResponsesModel(
+    workspaceResponsesSettings.responsesModel || refs.responsesModelInput.value,
+  )
   refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
   if (refs.itineraryIdEnabled) {
     refs.itineraryIdEnabled.checked = Boolean(forms.itineraryIdEnabled)

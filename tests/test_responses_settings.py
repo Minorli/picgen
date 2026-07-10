@@ -36,7 +36,7 @@ def test_v3_legacy_model_is_migrated_again_without_losing_other_settings() -> No
     }
 
 
-def test_v4_manual_legacy_model_selection_is_not_repeatedly_overwritten() -> None:
+def test_v4_legacy_model_is_always_migrated() -> None:
     result = _run_settings_migration(
         "(() => {"
         "const settings = { responsesModel: 'gpt-5.5', responsesModelStorageVersion: 4 };"
@@ -46,8 +46,34 @@ def test_v4_manual_legacy_model_selection_is_not_repeatedly_overwritten() -> Non
     )
 
     assert result == {
-        "sameObject": True,
-        "migrated": {"responsesModel": "gpt-5.5", "responsesModelStorageVersion": 4},
+        "sameObject": False,
+        "migrated": {"responsesModel": "gpt-5.6-sol", "responsesModelStorageVersion": 4},
+    }
+
+
+def test_legacy_runtime_default_cannot_restore_legacy_model() -> None:
+    result = _run_settings_migration(
+        "migrateStoredResponsesSettings({"
+        "responsesModel: 'gpt-5.5', responsesModelStorageVersion: 4"
+        "}, 'gpt-5.5')"
+    )
+
+    assert result == {
+        "responsesModel": "gpt-5.6-sol",
+        "responsesModelStorageVersion": 4,
+    }
+
+
+def test_legacy_workspace_model_uses_current_custom_model() -> None:
+    result = _run_settings_migration(
+        "migrateStoredResponsesSettings({"
+        "responsesModel: 'gpt-5.5', responsesModelStorageVersion: 4"
+        "}, 'custom-responses-model')"
+    )
+
+    assert result == {
+        "responsesModel": "custom-responses-model",
+        "responsesModelStorageVersion": 4,
     }
 
 

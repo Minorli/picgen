@@ -1560,14 +1560,26 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     )
     assert manual_response.status_code == 200
     preferences = manual_response.json()["preferences"]
-    assert preferences["default_responses_model"] == "gpt-5.5"
+    assert preferences["default_responses_model"] == "gpt-5.6-sol"
+
+    custom_response = client.put(
+        "/api/preferences",
+        json={
+            **preference_payload,
+            "default_responses_model": "custom-responses-model",
+            "responses_model_storage_version": 4,
+        },
+    )
+    assert custom_response.status_code == 200
+    preferences = custom_response.json()["preferences"]
+    assert preferences["default_responses_model"] == "custom-responses-model"
 
     fetched_response = client.get("/api/preferences")
     assert fetched_response.status_code == 200
     assert fetched_response.json()["preferences"] == preferences
 
 
-def test_legacy_gpt55_preference_is_migrated_again_from_schema_v10_once(tmp_path: Path) -> None:
+def test_legacy_gpt55_preference_is_migrated_again_from_schema_v11_once(tmp_path: Path) -> None:
     from picgen.auth import AuthStore
 
     db_path = tmp_path / "auth.sqlite3"
@@ -1580,10 +1592,10 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v10_once(tmp_path
         default_size="1088x2240",
     )
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM schema_migrations WHERE version = 11")
+        conn.execute("DELETE FROM schema_migrations WHERE version = 12")
         conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (10, ?, ?)",
-            ("gpt_5_6_sol_preferences_retry", "2026-07-10T00:00:00+00:00"),
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (11, ?, ?)",
+            ("gpt_5_6_sol_preferences_v4", "2026-07-10T00:00:00+00:00"),
         )
 
     migrated = AuthStore(db_path)
@@ -1591,9 +1603,9 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v10_once(tmp_path
     assert migrated.get_user_preferences(user_id=user.id)["default_responses_model"] == "gpt-5.6-sol"
     with sqlite3.connect(db_path) as conn:
         migration = conn.execute(
-            "SELECT name FROM schema_migrations WHERE version = 11"
+            "SELECT name FROM schema_migrations WHERE version = 12"
         ).fetchone()
-    assert migration == ("gpt_5_6_sol_preferences_v4",)
+    assert migration == ("gpt_5_6_sol_preferences_workspace",)
 
     migrated.update_user_preferences(
         user_id=user.id,
@@ -2113,8 +2125,8 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     assert team_messages[1]["content"].startswith("@alice ")
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.5"
-    assert "reasoning" not in upstream_payload
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "max"}
     assert "GPT-BOT" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]
