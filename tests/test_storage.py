@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from http import HTTPStatus
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from picgen.errors import APIError
 from picgen.storage import (
@@ -12,10 +14,17 @@ from picgen.storage import (
     detect_image_mime,
     extension_for_mime,
     prune_old_outputs,
+    resize_image_to_exact_size,
     resolve_storage_path,
     sanitize_filename,
     save_output_image,
 )
+
+
+def _png_bytes(width: int, height: int, color: tuple[int, int, int] = (20, 120, 200)) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (width, height), color).save(output, format="PNG")
+    return output.getvalue()
 
 
 def test_itinerary_map_svg_requires_coordinates(tmp_path: Path) -> None:
@@ -289,6 +298,33 @@ def test_detect_png_dimensions() -> None:
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x02\x00\x00\x00\x03\x08\x02\x00\x00\x00\x00\x00\x00\x00"
     )
     assert detect_image_dimensions(image_bytes) == (2, 3)
+
+
+def test_resize_image_to_exact_size_records_source_dimensions() -> None:
+    resized_bytes, resized_mime, metadata = resize_image_to_exact_size(
+        _png_bytes(10, 20),
+        "image/png",
+        (20, 40),
+    )
+
+    assert resized_mime == "image/png"
+    assert detect_image_dimensions(resized_bytes) == (20, 40)
+    assert metadata == {
+        "image_size_normalized": True,
+        "image_size_normalized_method": "cover_lanczos",
+        "upstream_actual_size": "10x20",
+        "upstream_image_width": 10,
+        "upstream_image_height": 20,
+    }
+
+
+def test_resize_image_to_exact_size_rejects_oversized_source_before_decode() -> None:
+    image_bytes = bytearray(_png_bytes(1, 1))
+    image_bytes[16:20] = (4096).to_bytes(4, "big")
+    image_bytes[20:24] = (4096).to_bytes(4, "big")
+
+    with pytest.raises(ValueError, match="source image exceeds"):
+        resize_image_to_exact_size(bytes(image_bytes), "image/png", (20, 40))
 
 
 def test_detect_webp_vp8_lossy_dimensions() -> None:

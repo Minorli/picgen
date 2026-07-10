@@ -14,6 +14,7 @@ COPY src ./src
 RUN pip install --upgrade pip \
     && pip install "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "httpx>=0.27.0" \
                    "pydantic>=2.7.0" "pydantic-settings>=2.4.0" "anyio>=4.4.0" \
+                   "pillow>=11.0.0" \
     && pip install --no-deps . \
     && python -m compileall -q /app/src
 

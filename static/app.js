@@ -1,3 +1,10 @@
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.49"
+import {
+  DEFAULT_RESPONSES_MODEL,
+  RESPONSES_MODEL_STORAGE_VERSION,
+  migrateStoredResponsesSettings,
+} from "./responses-settings.mjs?v=0.1.49"
+
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
@@ -2269,7 +2276,7 @@ async function submitAIItineraryMap() {
       size,
     })
     const settings = getSettings()
-    const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5"
+    const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
     const result = await postJSON("api/itinerary-map/render", {
       title,
       subtitle,
@@ -5279,6 +5286,7 @@ function saveSettings() {
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
     responsesModel: refs.responsesModelInput.value.trim(),
+    responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
     imageTransport: getImageTransport(),
   }
   saveJSON(settingsStorageKey(), payload)
@@ -5289,7 +5297,14 @@ function saveSettings() {
 }
 
 function loadSettings() {
-  const local = loadJSON(settingsStorageKey(), {})
+  const storedLocal = loadJSON(settingsStorageKey(), {})
+  const local = migrateStoredResponsesSettings(
+    storedLocal,
+    state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
+  )
+  if (local !== storedLocal) {
+    saveJSON(settingsStorageKey(), local)
+  }
   const legacy = loadJSON(legacySettingsStorageKey(), {})
   const prefs = state.userPreferences || {}
   const localResponsesUrl = local.responsesUrl || ""
@@ -5343,6 +5358,7 @@ function currentUserPreferencesPayload() {
   return {
     default_model: refs.generateModelInput.value.trim(),
     default_responses_model: normalizeResponsesModel(refs.responsesModelInput.value),
+    responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
     default_size: size,
     default_quality: refs.qualitySelect.value || "",
     default_output_format: refs.outputFormatSelect.value || "",
@@ -5406,7 +5422,7 @@ function updateImageTransportUI() {
   const isResponses = transport === "responses"
   if (refs.imageTransportHint) {
     refs.imageTransportHint.textContent = isResponses
-      ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.5），用于对接不支持 Images Edit 的兼容代理。"
+      ? `编辑、参考图、延展会走 Responses + image_generation 工具（默认 ${DEFAULT_RESPONSES_MODEL}，reasoning=max），用于对接不支持 Images Edit 的兼容代理。`
       : "编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。"
   }
   const editFieldset = refs.responsesUrlInput?.closest("label")
@@ -5600,7 +5616,7 @@ function requireEditSettings(settings, contextLabel) {
 function normalizeResponsesModel(value) {
   const model = String(value || "").trim()
   if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
-    return state.serverConfig?.default_responses_model || "gpt-5.5"
+    return state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
   }
   return model
 }
@@ -7566,7 +7582,7 @@ async function checkCopyrightRisk(payload) {
   const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setRiskPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做版权风险提醒。")
+    setRiskPanel("未检查", `未填写 API Key，无法调用 ${DEFAULT_RESPONSES_MODEL} 做版权风险提醒。`)
     return
   }
 
@@ -7607,16 +7623,16 @@ async function checkCopyrightRisk(payload) {
     : []
 
   if (!images.length) {
-    setRiskPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    setRiskPanel("未检查", `当前结果没有可直接发送给 ${DEFAULT_RESPONSES_MODEL} 的图片数据。`)
     return
   }
 
-  setRiskPanel("检查中", "正在调用 gpt-5.5 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。")
+  setRiskPanel("检查中", `正在调用 ${DEFAULT_RESPONSES_MODEL} 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。`)
   try {
     const result = await postJSONSilent("api/copyright-risk", {
       api_key: settings.apiKey,
       endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      model: settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
       prompt: payload.prompt || state.lastResultPrompt || "",
       context: [
         `模式：${payload.mode || ""}`,
@@ -7658,7 +7674,7 @@ async function checkTextFidelity(payload) {
   const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setTextFidelityPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做文字一致性检查。")
+    setTextFidelityPanel("未检查", `未填写 API Key，无法调用 ${DEFAULT_RESPONSES_MODEL} 做文字一致性检查。`)
     return
   }
 
@@ -7697,7 +7713,7 @@ async function checkTextFidelity(payload) {
     : []
 
   if (!images.length) {
-    setTextFidelityPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    setTextFidelityPanel("未检查", `当前结果没有可直接发送给 ${DEFAULT_RESPONSES_MODEL} 的图片数据。`)
     return
   }
 
@@ -7729,7 +7745,7 @@ async function checkTextFidelity(payload) {
     const result = await postJSONSilent("api/text-fidelity", {
       api_key: settings.apiKey,
       endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      model: settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
       prompt: fidelityPrompt,
       context: [
         `模式：${payload.mode || ""}`,
@@ -7869,35 +7885,6 @@ function createOfficialLogoCanvas(image) {
   return logoCanvas
 }
 
-function calculateRegionComplexity(ctx, region) {
-  const x = Math.max(0, Math.floor(region.x))
-  const y = Math.max(0, Math.floor(region.y))
-  const width = Math.max(1, Math.min(ctx.canvas.width - x, Math.floor(region.width)))
-  const height = Math.max(1, Math.min(ctx.canvas.height - y, Math.floor(region.height)))
-  const sampleWidth = Math.max(1, Math.min(24, width))
-  const sampleHeight = Math.max(1, Math.min(12, height))
-  const imageData = ctx.getImageData(x, y, width, height)
-  let total = 0
-  let count = 0
-  let previous = null
-  for (let sy = 0; sy < sampleHeight; sy += 1) {
-    const py = Math.min(height - 1, Math.floor((sy / sampleHeight) * height))
-    for (let sx = 0; sx < sampleWidth; sx += 1) {
-      const px = Math.min(width - 1, Math.floor((sx / sampleWidth) * width))
-      const index = (py * width + px) * 4
-      const luminance = 0.2126 * imageData.data[index]
-        + 0.7152 * imageData.data[index + 1]
-        + 0.0722 * imageData.data[index + 2]
-      if (previous !== null) {
-        total += Math.abs(luminance - previous)
-        count += 1
-      }
-      previous = luminance
-    }
-  }
-  return count ? total / count : 0
-}
-
 async function loadCompanyLogoCanvas() {
   if (state.companyLogoCanvas) {
     return state.companyLogoCanvas
@@ -7931,17 +7918,11 @@ function calculateLogoPlacement(canvas, logoCanvas) {
   if (!ctx) {
     return candidates[0]
   }
-  return candidates
-    .map((placement) => ({
-      placement,
-      complexity: calculateRegionComplexity(ctx, {
-        x: placement.x,
-        y: placement.y,
-        width: placement.width,
-        height: placement.height,
-      }),
-    }))
-    .sort((left, right) => left.complexity - right.complexity)[0]?.placement || candidates[0]
+  const scoredCandidates = candidates.map((placement) => ({
+    placement,
+    score: calculateLogoPlacementScore(ctx, canvas, placement),
+  }))
+  return chooseLogoPlacement(scoredCandidates) || candidates[0]
 }
 
 function drawCanvasWithHighQuality(ctx, canvas, width, height) {
@@ -8356,6 +8337,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
         endpoint_url: settings.responsesUrl,
         prompt: confirmedPrompt,
         model,
+        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
         mode: "variant",
         transport: "responses-image",
         allow_inline_fallback: true,
@@ -8576,6 +8558,7 @@ async function submitGenerate() {
           recipe_id: promptPlan.recipe?.id || "",
           recipe_version: promptPlan.recipe?.version || "",
           model: settings.responsesModel,
+          responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
           mode: "reference",
           transport: "responses-image",
           allow_inline_fallback: true,
@@ -8656,6 +8639,7 @@ async function submitGenerate() {
         recipe_id: promptPlan.recipe?.id || "",
         recipe_version: promptPlan.recipe?.version || "",
         model: settings.responsesModel,
+        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
         mode: "generate",
         transport: "responses-image",
         allow_inline_fallback: true,
@@ -8833,6 +8817,7 @@ async function submitEdit() {
         endpoint_url: settings.responsesUrl,
         prompt: confirmedPrompt,
         model,
+        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
         mode: "edit",
         transport: "responses-image",
         allow_inline_fallback: true,
@@ -9690,7 +9675,7 @@ async function init() {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
     state.serverConfig = {
       default_model: "gpt-image-2",
-      default_responses_model: "gpt-5.5",
+      default_responses_model: DEFAULT_RESPONSES_MODEL,
       default_size: "1088x2240",
       generate_url: "",
       edit_url: "",

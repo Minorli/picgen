@@ -7,8 +7,11 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta
 from http import HTTPStatus
+from io import BytesIO
 from pathlib import Path
 from urllib import parse
+
+from PIL import Image, ImageOps
 
 from .errors import APIError
 from .logging_config import get_logger, log_event
@@ -25,6 +28,13 @@ _MIME_TO_EXT: dict[str, str] = {
     "image/svg+xml": ".svg",
     "application/octet-stream": ".bin",
 }
+_MIME_TO_PIL_FORMAT: dict[str, str] = {
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/jpg": "JPEG",
+    "image/webp": "WEBP",
+}
+MAX_EXACT_IMAGE_PIXELS = 8_294_400
 
 
 def extension_for_mime(image_mime: str) -> str:
@@ -141,6 +151,69 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
             return width, height
 
     return None
+
+
+def resize_image_to_exact_size(
+    image_bytes: bytes,
+    image_mime: str,
+    target_size: tuple[int, int],
+) -> tuple[bytes, str, dict[str, object]]:
+    """Resize/crop an image to an exact canvas using a high-quality cover fit."""
+
+    target_width, target_height = target_size
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError("target_size must contain positive dimensions")
+
+    source_dimensions = detect_image_dimensions(image_bytes)
+    if (
+        source_dimensions is not None
+        and source_dimensions[0] * source_dimensions[1] > MAX_EXACT_IMAGE_PIXELS
+    ):
+        raise ValueError(f"source image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
+    if source_dimensions == target_size:
+        return image_bytes, image_mime, {}
+
+    normalized_mime = image_mime.lower().split(";", 1)[0].strip()
+    output_format = _MIME_TO_PIL_FORMAT.get(normalized_mime)
+    if output_format is None:
+        raise ValueError(f"unsupported image mime for resizing: {image_mime}")
+
+    with Image.open(BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source)
+        if source_dimensions is None:
+            source_dimensions = image.size
+        fitted = ImageOps.fit(
+            image,
+            (target_width, target_height),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
+        if output_format == "JPEG" or fitted.mode == "CMYK":
+            fitted = fitted.convert("RGB")
+
+        output = BytesIO()
+        if output_format == "PNG":
+            fitted.save(output, format=output_format, compress_level=6)
+        elif output_format == "JPEG":
+            fitted.save(output, format=output_format, quality=95, optimize=True)
+        elif output_format == "WEBP":
+            fitted.save(output, format=output_format, quality=95)
+        else:
+            fitted.save(output, format=output_format)
+
+    upstream_actual_size = f"{source_dimensions[0]}x{source_dimensions[1]}"
+    return (
+        output.getvalue(),
+        normalized_mime,
+        {
+            "image_size_normalized": True,
+            "image_size_normalized_method": "cover_lanczos",
+            "upstream_actual_size": upstream_actual_size,
+            "upstream_image_width": source_dimensions[0],
+            "upstream_image_height": source_dimensions[1],
+        },
+    )
 
 
 def storage_url_for_path(data_dir: Path, file_path: Path) -> str:

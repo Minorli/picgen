@@ -5,8 +5,22 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
+def test_legacy_responses_model_storage_is_migrated_once() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
+
+    assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.49"' in app_js
+    assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
+    assert "const RESPONSES_MODEL_STORAGE_VERSION = 3" in settings_js
+    assert "function migrateStoredResponsesSettings" in settings_js
+    assert "responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION" in app_js
+    assert "responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION" in app_js
+
+
 def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    placement_js = (ROOT_DIR / "static" / "logo-placement.mjs").read_text(encoding="utf-8")
     logo_png = ROOT_DIR / "static" / "6renyou.png"
     logo_bytes = logo_png.read_bytes()
     assert logo_bytes.startswith(b"\x89PNG\r\n\x1a\n")
@@ -15,6 +29,11 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.49"' in app_js
+    assert "chooseLogoPlacement" in app_js
+    assert "calculateLogoPlacementScore" in app_js
+    assert "expandLogoSafetyRegion" in placement_js
+    assert "calculateRegionTextEdgePenalty" in placement_js
     assert "hasTransparentLogoBackground" in app_js
     assert "resizeCanvasHighQuality" in app_js
     assert "applyLogoOverlayToDataUrl" in app_js

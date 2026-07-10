@@ -14,6 +14,10 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+DEFAULT_RESPONSES_MODEL = "gpt-5.6-sol"
+DEFAULT_RESPONSES_REASONING_EFFORT = "max"
+LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"
+RESPONSES_MODEL_STORAGE_VERSION = 3
 
 
 class Settings(BaseSettings):
@@ -35,7 +39,7 @@ class Settings(BaseSettings):
     default_edit_url: str = "https://sub.tidba.com/v1/images/edits"
     default_responses_url: str = "https://sub.tidba.com/v1/responses"
     default_model: str = "gpt-image-2"
-    default_responses_model: str = "gpt-5.5"
+    default_responses_model: str = DEFAULT_RESPONSES_MODEL
     default_size: str = "1088x2240"
     default_api_key: str = ""
 
@@ -49,6 +53,13 @@ class Settings(BaseSettings):
 
     max_request_body_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
     max_image_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
+    # When the upstream returns an image smaller than the exact requested size,
+    # optionally re-run the generation and keep the attempt closest to the
+    # target. Default 0 (disabled): the current upstream downscales
+    # deterministically, so a retry just doubles the bill for the same result.
+    # Turn on (1-3) only if the upstream becomes intermittent again. Applies to
+    # exact-size (strict) requests with sample_count == 1.
+    size_mismatch_max_retries: int = Field(default=0, ge=0, le=3)
     rate_limit_per_minute: int = Field(default=120, ge=0, le=100000)
     rate_limit_burst: int = Field(default=20, ge=0, le=10000)
 

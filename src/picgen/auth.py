@@ -12,12 +12,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .config import DEFAULT_RESPONSES_MODEL, LEGACY_DEFAULT_RESPONSES_MODEL
+
 _HASH_NAME = "pbkdf2_sha256"
 _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 10
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 _PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
@@ -3629,6 +3631,19 @@ class AuthStore:
             """
         )
         now = _now_text()
+        migration_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (_SCHEMA_VERSION,),
+        ).fetchone()
+        if migration_applied is None:
+            conn.execute(
+                """
+                UPDATE user_preferences
+                SET default_responses_model = ?, updated_at = ?
+                WHERE default_responses_model = ?
+                """,
+                (DEFAULT_RESPONSES_MODEL, now, LEGACY_DEFAULT_RESPONSES_MODEL),
+            )
         for company, department in DEFAULT_ORG_UNITS:
             conn.execute(
                 """
@@ -3648,7 +3663,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "image_version_lineage", now),
+            (_SCHEMA_VERSION, "gpt_5_6_sol_preferences_retry", now),
         )
         return migrated_sidecar_paths
 

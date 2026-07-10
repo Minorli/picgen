@@ -111,6 +111,7 @@ class ResponsesImageRequest(_ImageOptions):
     prompt: str = Field(default="")
     endpoint_url: str | None = None
     model: str | None = Field(default=None, max_length=128)
+    responses_model_storage_version: int | None = Field(default=None, ge=0, le=1000)
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
     image: FilePayload | None = None
@@ -563,6 +564,7 @@ class UserPreferencesRequest(BaseModel):
 
     default_model: str = Field(default="", max_length=128)
     default_responses_model: str = Field(default="", max_length=128)
+    responses_model_storage_version: int | None = Field(default=None, ge=0, le=1000)
     default_size: str = Field(default="", max_length=64)
     default_quality: Literal["", "auto", "low", "medium", "high"] = ""
     default_output_format: Literal["", "png", "jpeg", "webp"] = ""

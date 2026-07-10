@@ -193,6 +193,152 @@ def test_all_placeholder_candidates_yield_zero_count(tmp_path: Path) -> None:
     assert payload["candidate_count"] == 0
 
 
+# --- size mismatch retry ------------------------------------------------------
+
+
+def test_size_mismatch_retry_defaults_to_disabled() -> None:
+    # The upstream currently downscales deterministically — a retry doubles
+    # the bill for the same result, so it must be opt-in.
+    assert Settings(_env_file=None).size_mismatch_max_retries == 0
+
+
+def _generate_poster(client, size="1088x2240"):
+    return client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张 6 人游竖版旅行海报",
+            "model": "gpt-image-2",
+            "size": size,
+        },
+    )
+
+
+def test_size_mismatch_retries_and_keeps_exact_result(make_client, settings_factory, tmp_path: Path) -> None:
+    from test_api import png_b64_with_dimensions
+
+    settings = settings_factory(default_api_key="sk-test", size_mismatch_max_retries=1)
+    client, fake, resolved = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        {"data": [{"b64_json": png_b64_with_dimensions(1024, 1536)}], "created": 1},
+        {"data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}], "created": 1},
+    ]
+
+    response = _generate_poster(client)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert fake.run_json.await_count == 2
+    assert payload["saved_image_width"] == 1088
+    assert payload["saved_image_height"] == 2240
+    assert not payload.get("size_mismatch")
+    assert payload["size_mismatch_retries"] == 1
+    # The losing first attempt's file must be cleaned up.
+    outputs = list((resolved.data_dir / "outputs").rglob("*.png"))
+    assert len(outputs) == 1
+
+
+def test_size_mismatch_keeps_largest_when_all_attempts_fail(make_client, settings_factory) -> None:
+    from test_api import png_b64_with_dimensions
+
+    settings = settings_factory(default_api_key="sk-test", size_mismatch_max_retries=1)
+    client, fake, resolved = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        {"data": [{"b64_json": png_b64_with_dimensions(1024, 1536)}], "created": 1},
+        {"data": [{"b64_json": png_b64_with_dimensions(512, 768)}], "created": 1},
+    ]
+
+    response = _generate_poster(client)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert fake.run_json.await_count == 2
+    assert payload["size_mismatch"] is True
+    assert payload["saved_image_width"] == 1024
+    assert payload["size_mismatch_retries"] == 1
+    assert "已自动重新生成" in payload["size_mismatch_message"]
+    outputs = list((resolved.data_dir / "outputs").rglob("*.png"))
+    assert len(outputs) == 1
+
+
+def test_size_mismatch_retry_disabled(make_client, settings_factory) -> None:
+    from test_api import png_b64_with_dimensions
+
+    settings = settings_factory(default_api_key="sk-test", size_mismatch_max_retries=0)
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(1024, 1536)}],
+        "created": 1,
+    }
+
+    response = _generate_poster(client)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert fake.run_json.await_count == 1
+    assert payload["size_mismatch"] is True
+    assert "size_mismatch_retries" not in payload
+
+
+def test_size_mismatch_no_retry_for_multi_sample(make_client, settings_factory) -> None:
+    from test_api import png_b64_with_dimensions
+
+    settings = settings_factory(default_api_key="sk-test", size_mismatch_max_retries=2)
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [
+            {"b64_json": png_b64_with_dimensions(1024, 1536)},
+            {"b64_json": png_b64_with_dimensions(1024, 1536)},
+        ],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张 6 人游竖版旅行海报",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+            "sample_count": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake.run_json.await_count == 1
+
+
+def test_responses_channel_reinforces_size_in_prompt(make_client, settings_factory) -> None:
+    from test_api import png_b64_with_dimensions
+
+    settings = settings_factory(default_api_key="sk-test", size_mismatch_max_retries=0)
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": png_b64_with_dimensions(1088, 2240)}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/responses",
+            "prompt": "生成一张 6 人游竖版旅行海报",
+            "size": "1088x2240",
+        },
+    )
+
+    assert response.status_code == 200
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"]["effort"] == "max"
+    input_text = upstream_payload["input"][0]["content"][0]["text"]
+    assert "画布尺寸要求" in input_text
+    assert "1088x2240" in input_text
+
+
 # --- text fidelity transcript diff -------------------------------------------
 
 

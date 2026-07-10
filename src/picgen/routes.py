@@ -32,7 +32,13 @@ from .auth import (
     UserExistsError,
     normalize_username,
 )
-from .config import Settings
+from .config import (
+    DEFAULT_RESPONSES_MODEL,
+    DEFAULT_RESPONSES_REASONING_EFFORT,
+    LEGACY_DEFAULT_RESPONSES_MODEL,
+    RESPONSES_MODEL_STORAGE_VERSION,
+    Settings,
+)
 from .errors import APIError
 from .itinerary_map import (
     apply_itinerary_coordinate_estimates,
@@ -99,6 +105,7 @@ from .schemas import (
     UserProfileRequest,
 )
 from .storage import (
+    MAX_EXACT_IMAGE_PIXELS,
     detect_image_mime,
     extension_for_mime,
     resolve_storage_path,
@@ -139,11 +146,66 @@ def _parse_requested_size(size: Any) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+MAX_EXACT_IMAGE_SIDE = 3840
+MAX_EXACT_IMAGE_ASPECT_RATIO = 3.0
+
+
+def _validate_exact_image_size(size: str | None) -> tuple[int, int] | None:
+    cleaned = (size or "").strip()
+    if not cleaned or cleaned == "auto":
+        return None
+    parsed = _parse_requested_size(cleaned)
+    if parsed is None:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "图片尺寸必须是 auto 或 WIDTHxHEIGHT 格式",
+            code="invalid_parameter",
+        )
+    width, height = parsed
+    if width > MAX_EXACT_IMAGE_SIDE or height > MAX_EXACT_IMAGE_SIDE:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸单边不能超过 {MAX_EXACT_IMAGE_SIDE} 像素",
+            code="invalid_parameter",
+        )
+    if width * height > MAX_EXACT_IMAGE_PIXELS:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸总像素不能超过 {MAX_EXACT_IMAGE_PIXELS}",
+            code="invalid_parameter",
+        )
+    aspect_ratio = max(width / height, height / width)
+    if aspect_ratio > MAX_EXACT_IMAGE_ASPECT_RATIO:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸宽高比不能超过 {MAX_EXACT_IMAGE_ASPECT_RATIO:g}:1",
+            code="invalid_parameter",
+        )
+    return parsed
+
+
 def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
     quality = str(options.get("quality") or "").strip()
     if quality and quality != "auto":
         return options
     return {**options, "quality": "high"}
+
+
+def _responses_reasoning_options(model: str) -> dict[str, dict[str, str]]:
+    if model.strip() != DEFAULT_RESPONSES_MODEL:
+        return {}
+    return {"reasoning": {"effort": DEFAULT_RESPONSES_REASONING_EFFORT}}
+
+
+def _normalize_legacy_client_responses_model(
+    model: str,
+    *,
+    storage_version: int | None,
+    default_model: str,
+) -> str:
+    if model == LEGACY_DEFAULT_RESPONSES_MODEL and (storage_version or 0) < RESPONSES_MODEL_STORAGE_VERSION:
+        return default_model.strip() or DEFAULT_RESPONSES_MODEL
+    return model
 
 
 JSON_BODY = Body(...)
@@ -934,7 +996,7 @@ async def _generate_itinerary_artwork(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         return {}
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
     width, height = _parse_itinerary_size(output_size)
     # Pure-Python pixel rendering + zlib over a multi-MB canvas takes seconds of
     # CPU; run it in a worker thread so the event loop keeps serving requests.
@@ -969,6 +1031,7 @@ async def _generate_itinerary_artwork(
     upstream_payload: dict[str, Any] = {
         "model": model,
         "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
+        **_responses_reasoning_options(model),
         "stream": True,
         "input": [{"role": "user", "content": content}],
         "tools": [tool],
@@ -1225,11 +1288,11 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     if not api_key:
         return plan
 
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
     upstream_payload = {
         "model": model,
         "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
-        "reasoning": {"effort": "high"},
+        **_responses_reasoning_options(model),
         "input": [
             {
                 "role": "user",
@@ -1869,16 +1932,22 @@ def create_router() -> APIRouter:
         body: Any = JSON_BODY,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
+        settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(UserPreferencesRequest, payload)
+        responses_model = _normalize_legacy_client_responses_model(
+            parsed.default_responses_model,
+            storage_version=parsed.responses_model_storage_version,
+            default_model=settings.default_responses_model,
+        )
         preferences = await anyio.to_thread.run_sync(
             lambda: auth_store.update_user_preferences(
                 user_id=user.id,
                 default_model=parsed.default_model,
-                default_responses_model=parsed.default_responses_model,
+                default_responses_model=responses_model,
                 default_size=parsed.default_size,
                 default_quality=parsed.default_quality,
                 default_output_format=parsed.default_output_format,
@@ -3028,11 +3097,11 @@ async def _create_team_chat_bot_reply(
                 mentions=[user.username],
             )
         )
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = settings.default_responses_model.strip() or DEFAULT_RESPONSES_MODEL
     upstream_payload = {
         "model": model,
         "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
-        "reasoning": {"effort": "high"},
+        **_responses_reasoning_options(model),
         "input": [
             {
                 "role": "user",
@@ -3171,7 +3240,7 @@ async def handle_copyright_risk(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
+    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -3185,6 +3254,7 @@ async def handle_copyright_risk(
     upstream_payload = {
         "model": model,
         "instructions": COPYRIGHT_RISK_INSTRUCTIONS,
+        **_responses_reasoning_options(model),
         "input": [
             {
                 "role": "user",
@@ -3212,7 +3282,7 @@ async def handle_text_fidelity(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
+    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -3238,6 +3308,7 @@ async def handle_text_fidelity(
                 {
                     "model": model,
                     "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+                    **_responses_reasoning_options(model),
                     "input": [
                         {
                             "role": "user",
@@ -3270,6 +3341,7 @@ async def handle_text_fidelity(
     upstream_payload = {
         "model": model,
         "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+        **_responses_reasoning_options(model),
         "input": [
             {
                 "role": "user",
@@ -3339,10 +3411,13 @@ def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any
     images = saved.get("images")
     candidates = [item for item in images if isinstance(item, dict)] if isinstance(images, list) else [saved]
     mismatches: list[str] = []
+    first_checked: dict[str, Any] | None = None
     for image in candidates:
         actual = _image_dimensions_for_size_check(image)
         if actual is None:
             continue
+        if first_checked is None:
+            first_checked = image
         image["actual_size"] = f"{actual[0]}x{actual[1]}"
         image["requested_size"] = requested_size
         if actual != expected:
@@ -3356,6 +3431,19 @@ def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any
         else:
             image["size_mismatch"] = False
     if not mismatches:
+        if first_checked is not None:
+            for key in (
+                "actual_size",
+                "requested_size",
+                "size_mismatch",
+                "image_size_normalized",
+                "image_size_normalized_method",
+                "upstream_actual_size",
+                "upstream_image_width",
+                "upstream_image_height",
+            ):
+                if key in first_checked:
+                    saved[key] = first_checked[key]
         return
 
     # Summarize from the first candidate that actually mismatched — candidate 0
@@ -3943,7 +4031,9 @@ async def handle_generate(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     image_options = _highest_quality_image_options(openai_image_options(payload))
     mode = _generate_mode(parsed.mode)
-    strict_size = mode != "itinerary" and _strict_requested_size(parsed.size)
+    if mode != "itinerary":
+        _validate_exact_image_size(size)
+    strict_size = mode != "itinerary" and _strict_requested_size(size)
     original_prompt = (parsed.original_prompt or parsed.prompt).strip()
     prompt_mode = parsed.prompt_mode
     recipe_id = parsed.recipe_id or ""
@@ -3972,14 +4062,16 @@ async def handle_generate(
     if parsed.sample_count > 1:
         upstream_payload["n"] = parsed.sample_count
 
-    upstream_response = await _run_json_candidates(
-        client=client,
-        endpoint_url=endpoint_url,
-        api_key=api_key,
-        payload=upstream_payload,
-        user_agent=settings.upstream_user_agent,
-        sample_count=parsed.sample_count,
-    )
+    async def _run_generate_upstream() -> dict[str, Any]:
+        return await _run_json_candidates(
+            client=client,
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            payload=upstream_payload,
+            user_agent=settings.upstream_user_agent,
+            sample_count=parsed.sample_count,
+        )
+
     metadata = request_metadata({**payload, **image_options}, size=size)
     lineage_metadata: dict[str, Any] = {
         "original_prompt": original_prompt,
@@ -3996,8 +4088,9 @@ async def handle_generate(
         lineage_metadata["recipe_title"] = recipe["title"]
     metadata.update(lineage_metadata)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_generate_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4059,6 +4152,7 @@ async def handle_edit(
 
     files_for_multipart = [*image_parts, *([mask_part] if mask_part else [])]
     size = (parsed.size or "").strip()
+    _validate_exact_image_size(size)
     strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
     fields: dict[str, Any] = {
@@ -4071,15 +4165,17 @@ async def handle_edit(
     if parsed.sample_count > 1:
         fields["n"] = parsed.sample_count
 
-    upstream_response = await _run_multipart_candidates(
-        client=client,
-        endpoint_url=endpoint_url,
-        api_key=api_key,
-        fields=fields,
-        files=files_for_multipart,
-        user_agent=settings.upstream_user_agent,
-        sample_count=parsed.sample_count,
-    )
+    async def _run_edit_upstream() -> dict[str, Any]:
+        return await _run_multipart_candidates(
+            client=client,
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            fields=fields,
+            files=files_for_multipart,
+            user_agent=settings.upstream_user_agent,
+            sample_count=parsed.sample_count,
+        )
+
     metadata = request_metadata({**payload, **image_options}, size=size or None)
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
@@ -4087,8 +4183,9 @@ async def handle_edit(
     mode = (parsed.mode or "edit").strip() or "edit"
     image_metadata = _image_reference_metadata(image_parts)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_edit_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4150,10 +4247,16 @@ async def handle_responses_image(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
+    model = (parsed.model or settings.default_responses_model).strip() or DEFAULT_RESPONSES_MODEL
+    model = _normalize_legacy_client_responses_model(
+        model,
+        storage_version=parsed.responses_model_storage_version,
+        default_model=settings.default_responses_model,
+    )
     api_key = (parsed.api_key or settings.default_api_key).strip()
     size = (parsed.size or settings.default_size).strip() or settings.default_size
-    strict_size = _strict_requested_size(parsed.size)
+    _validate_exact_image_size(size)
+    strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
 
     _ensure_no_restricted_destination_text(parsed.prompt)
@@ -4217,9 +4320,19 @@ async def handle_responses_image(
         tool["input_image_mask"] = {"image_url": f"data:{mask_mime};base64,{mask_b64}"}
 
     guarded_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size and size and size != "auto":
+        # The image_generation tool's `size` param is treated as advisory by
+        # some gateways (they "lazily" return a downscaled canvas). Restating
+        # the requirement in the prompt measurably improves compliance.
+        guarded_prompt = (
+            f"{guarded_prompt.rstrip()}\n\n"
+            f"画布尺寸要求：最终输出图片必须精确为 {size} 像素（宽x高），"
+            "不得缩小画布、更换为其它分辨率或改变宽高比。"
+        )
     upstream_payload = {
         "model": model,
         "instructions": RESPONSES_IMAGE_INSTRUCTIONS,
+        **_responses_reasoning_options(model),
         "stream": True,
         "input": [
             {
@@ -4234,34 +4347,35 @@ async def handle_responses_image(
         "tools": [tool],
     }
 
-    try:
-        upstream_response = await client.run_responses(
-            endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
-        )
-    except APIError as exc:
-        # `n` is not part of the official image_generation tool schema; strict
-        # upstreams reject the whole request. Mirror the Images-API fallback:
-        # retry once without it when the error clearly points at the field.
-        if (
-            "n" in tool
-            and exc.status == HTTPStatus.BAD_REQUEST
-            and _error_mentions_sample_count(exc)
-        ):
-            log_event(
-                logger,
-                logging.WARNING,
-                "responses_image_sample_count_fallback",
-                endpoint_url=endpoint_url,
-                sample_count=parsed.sample_count,
-                status=exc.status,
-                message=exc.message,
-            )
-            tool.pop("n", None)
-            upstream_response = await client.run_responses(
+    async def _run_responses_upstream() -> dict[str, Any]:
+        try:
+            return await client.run_responses(
                 endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
             )
-        else:
+        except APIError as exc:
+            # `n` is not part of the official image_generation tool schema; strict
+            # upstreams reject the whole request. Mirror the Images-API fallback:
+            # retry once without it when the error clearly points at the field.
+            if (
+                "n" in tool
+                and exc.status == HTTPStatus.BAD_REQUEST
+                and _error_mentions_sample_count(exc)
+            ):
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "responses_image_sample_count_fallback",
+                    endpoint_url=endpoint_url,
+                    sample_count=parsed.sample_count,
+                    status=exc.status,
+                    message=exc.message,
+                )
+                tool.pop("n", None)
+                return await client.run_responses(
+                    endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+                )
             raise
+
     metadata = request_metadata({**payload, **image_options}, size=size)
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
@@ -4269,8 +4383,9 @@ async def handle_responses_image(
     mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
     image_metadata = _image_reference_metadata(image_parts)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_responses_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4340,6 +4455,114 @@ async def _finalize_image_response(
         )
     _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
+
+
+def _saved_pixel_count(saved: dict[str, Any]) -> int:
+    total = 0
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if isinstance(image, dict):
+            width = image.get("saved_image_width")
+            height = image.get("saved_image_height")
+            if isinstance(width, int) and isinstance(height, int):
+                total += width * height
+    return total
+
+
+def _discard_saved_result_files(saved: dict[str, Any]) -> None:
+    """Best-effort removal of a losing retry attempt's files so retries don't
+    litter the outputs dir (only the returned result gets DB records)."""
+
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        for key in ("saved_image_path", "saved_metadata_path"):
+            path_text = str(image.get(key) or "")
+            if path_text:
+                with suppress(OSError):
+                    Path(path_text).unlink()
+
+
+async def _finalize_with_size_retry(
+    *,
+    run_upstream: Callable[[], Awaitable[dict[str, Any]]],
+    settings: Settings,
+    client: UpstreamClient,
+    save_context: dict[str, Any],
+    extra: dict[str, Any],
+    sample_count: int,
+) -> dict[str, Any]:
+    """Retry the (paid) upstream call when it "lazily" returns a smaller size.
+
+    Production gateways honor exact poster sizes most of the time but
+    intermittently downscale under load; a plain local upscale cannot recover
+    the missing detail, so the effective fix is to try again and keep the
+    attempt closest to the target. Scope is deliberately narrow: exact-size
+    requests with sample_count == 1, up to size_mismatch_max_retries extra
+    calls (0 disables).
+    """
+
+    max_retries = (
+        settings.size_mismatch_max_retries
+        if save_context.get("strict_size") and sample_count == 1
+        else 0
+    )
+    best: dict[str, Any] | None = None
+    retries_used = 0
+    for attempt in range(max_retries + 1):
+        try:
+            upstream_response = await run_upstream()
+            saved = await _finalize_image_response(
+                upstream_response=upstream_response,
+                settings=settings,
+                client=client,
+                save_context=save_context,
+                extra=extra,
+            )
+        except APIError:
+            if best is not None:
+                # A retry failing outright must not discard a usable result.
+                break
+            raise
+        retries_used = attempt
+        if not saved.get("size_mismatch"):
+            if best is not None:
+                _discard_saved_result_files(best)
+            if attempt:
+                saved["size_mismatch_retries"] = attempt
+            return saved
+        if best is None:
+            best = saved
+        elif _saved_pixel_count(saved) > _saved_pixel_count(best):
+            _discard_saved_result_files(best)
+            best = saved
+        else:
+            _discard_saved_result_files(saved)
+        if attempt < max_retries:
+            log_event(
+                logger,
+                logging.WARNING,
+                "size_mismatch_retry",
+                requested_size=str(save_context.get("requested_size") or save_context.get("size") or ""),
+                actual_size=str(saved.get("actual_size") or ""),
+                attempt=attempt + 1,
+                max_retries=max_retries,
+            )
+    assert best is not None
+    if retries_used:
+        best["size_mismatch_retries"] = retries_used
+        retry_note = f"已自动重新生成 {retries_used} 次，上游仍未按目标尺寸返回，已保留其中最接近的一次。"
+        message = str(best.get("size_mismatch_message") or "").rstrip()
+        best["size_mismatch_message"] = f"{message}{retry_note}" if message else retry_note
+        images = best.get("images")
+        for image in images if isinstance(images, list) else []:
+            if isinstance(image, dict) and image.get("size_mismatch"):
+                candidate_message = str(image.get("size_mismatch_message") or "").rstrip()
+                image["size_mismatch_message"] = (
+                    f"{candidate_message}{retry_note}" if candidate_message else retry_note
+                )
+    return best
 
 
 def _make_remote_fetcher(client: UpstreamClient) -> Any:

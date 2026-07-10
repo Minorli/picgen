@@ -926,7 +926,10 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     metadata = json.loads(metadata_row["metadata_json"])
     assert metadata["user_id"] == created["id"]
     assert metadata["username"] == "alice"
-    assert metadata["saved_image_width"] == 1
+    assert metadata["saved_image_width"] == 1088
+    assert metadata["saved_image_height"] == 2240
+    assert metadata["upstream_actual_size"] == "1x1"
+    assert metadata["image_size_normalized"] is True
 
     fetched_image = client.get(f"/{payload['saved_image_url']}")
     assert fetched_image.status_code == 200
@@ -1519,24 +1522,22 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     assert empty_preferences["default_model"] == ""
     assert "api_key" not in empty_preferences
 
-    update_response = client.put(
-        "/api/preferences",
-        json={
-            "default_model": "gpt-image-2",
-            "default_responses_model": "gpt-5.5",
-            "default_size": "1088x2240",
-            "default_quality": "high",
-            "default_output_format": "webp",
-            "default_image_transport": "responses",
-            "logo_overlay_enabled": False,
-            "auto_copyright_check_enabled": False,
-            "api_key": "sk-should-be-ignored",
-        },
-    )
+    preference_payload = {
+        "default_model": "gpt-image-2",
+        "default_responses_model": "gpt-5.5",
+        "default_size": "1088x2240",
+        "default_quality": "high",
+        "default_output_format": "webp",
+        "default_image_transport": "responses",
+        "logo_overlay_enabled": False,
+        "auto_copyright_check_enabled": False,
+        "api_key": "sk-should-be-ignored",
+    }
+    update_response = client.put("/api/preferences", json=preference_payload)
     assert update_response.status_code == 200
     preferences = update_response.json()["preferences"]
     assert preferences["default_model"] == "gpt-image-2"
-    assert preferences["default_responses_model"] == "gpt-5.5"
+    assert preferences["default_responses_model"] == "gpt-5.6-sol"
     assert preferences["default_size"] == "1088x2240"
     assert preferences["default_quality"] == "high"
     assert preferences["default_output_format"] == "webp"
@@ -1545,9 +1546,55 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     assert preferences["auto_copyright_check_enabled"] is False
     assert "api_key" not in preferences
 
+    manual_response = client.put(
+        "/api/preferences",
+        json={**preference_payload, "responses_model_storage_version": 3},
+    )
+    assert manual_response.status_code == 200
+    preferences = manual_response.json()["preferences"]
+    assert preferences["default_responses_model"] == "gpt-5.5"
+
     fetched_response = client.get("/api/preferences")
     assert fetched_response.status_code == 200
     assert fetched_response.json()["preferences"] == preferences
+
+
+def test_legacy_gpt55_preference_is_migrated_again_from_schema_v9_once(tmp_path: Path) -> None:
+    from picgen.auth import AuthStore
+
+    db_path = tmp_path / "auth.sqlite3"
+    store = AuthStore(db_path)
+    store.initialize()
+    user = store.create_user("legacy-model-user", USER_PASSWORD)
+    store.update_user_preferences(
+        user_id=user.id,
+        default_responses_model="gpt-5.5",
+        default_size="1088x2240",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version = 10")
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (9, ?, ?)",
+            ("gpt_5_6_sol_preferences", "2026-07-10T00:00:00+00:00"),
+        )
+
+    migrated = AuthStore(db_path)
+    migrated.initialize()
+    assert migrated.get_user_preferences(user_id=user.id)["default_responses_model"] == "gpt-5.6-sol"
+    with sqlite3.connect(db_path) as conn:
+        migration = conn.execute(
+            "SELECT name FROM schema_migrations WHERE version = 10"
+        ).fetchone()
+    assert migration == ("gpt_5_6_sol_preferences_retry",)
+
+    migrated.update_user_preferences(
+        user_id=user.id,
+        default_responses_model="gpt-5.5",
+        default_size="1088x2240",
+    )
+    restarted = AuthStore(db_path)
+    restarted.initialize()
+    assert restarted.get_user_preferences(user_id=user.id)["default_responses_model"] == "gpt-5.5"
 
 
 def test_bug_report_is_recorded_and_admin_can_review_it(make_client, settings_factory):
@@ -2059,7 +2106,7 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.5"
-    assert upstream_payload["reasoning"]["effort"] == "high"
+    assert "reasoning" not in upstream_payload
     assert "GPT-BOT" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]

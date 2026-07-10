@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
+import re
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -10,7 +12,10 @@ from typing import Any
 from urllib import parse
 
 from ..errors import APIError
-from ..storage import detect_image_mime, save_output_image
+from ..logging_config import get_logger, log_event
+from ..storage import detect_image_mime, resize_image_to_exact_size, save_output_image
+
+logger = get_logger("picgen.upstream.payload")
 
 _IMAGE_OPTION_KEYS = ("quality", "background", "output_format", "output_compression", "moderation")
 _RAW_IMAGE_KEYS = frozenset({"b64_json", "result", "partial_image_b64", "image_b64"})
@@ -123,6 +128,39 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
         if value is not None and value != "":
             metadata[key] = value
     return metadata
+
+
+def _parse_exact_size(size: Any) -> tuple[int, int] | None:
+    if not isinstance(size, str):
+        return None
+    match = re.fullmatch(r"\s*(\d{2,5})x(\d{2,5})\s*", size)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _normalize_strict_size_image(
+    image_bytes: bytes,
+    image_mime: str,
+    save_context: dict[str, Any],
+) -> tuple[bytes, str, dict[str, object]]:
+    if not save_context.get("strict_size"):
+        return image_bytes, image_mime, {}
+    target_size = _parse_exact_size(save_context.get("requested_size") or save_context.get("size"))
+    if target_size is None:
+        return image_bytes, image_mime, {}
+    try:
+        return resize_image_to_exact_size(image_bytes, image_mime, target_size)
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "image_size_normalize_failed",
+            target_size=f"{target_size[0]}x{target_size[1]}",
+            image_mime=image_mime,
+            error=type(exc).__name__,
+        )
+        return image_bytes, image_mime, {}
 
 
 def compact_raw_response(payload: Any) -> Any:
@@ -240,6 +278,11 @@ def _image_item_payload(
 
     saved_payload: dict[str, Any] = {}
     if image_bytes and image_mime:
+        image_bytes, image_mime, normalization_metadata = _normalize_strict_size_image(
+            image_bytes,
+            image_mime,
+            save_context,
+        )
         saved_payload = save_output_image(
             data_dir=data_dir,
             outputs_dir=outputs_dir,
@@ -254,8 +297,10 @@ def _image_item_payload(
                 "upstream_created": upstream.get("created"),
                 "upstream_image_url": image_url,
                 "saved_image_mime": image_mime,
+                **normalization_metadata,
             },
         )
+        saved_payload.update(normalization_metadata)
 
     # When the image is persisted, the browser loads it from the saved file URL
     # (same-origin), so we drop the multi-megabyte inline data URL to keep
