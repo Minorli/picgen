@@ -36,8 +36,8 @@ from .auth import (
 )
 from .config import (
     DEFAULT_RESPONSES_MODEL,
-    DEFAULT_RESPONSES_REASONING_EFFORT,
     LEGACY_DEFAULT_RESPONSES_MODEL,
+    RESPONSES_REASONING_EFFORTS,
     Settings,
 )
 from .errors import APIError
@@ -196,7 +196,7 @@ def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
 
 def _responses_reasoning_options(
     model: str,
-    reasoning_effort: str = DEFAULT_RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str,
 ) -> dict[str, dict[str, str]]:
     if model.strip() != DEFAULT_RESPONSES_MODEL:
         return {}
@@ -222,9 +222,6 @@ IMAGE_INPUT_MODES = frozenset({"reference", "edit", "variant"})
 USER_EXECUTION_OVERRIDE_FIELDS = frozenset(
     {"api_key", "endpoint_url", "model", "reasoning_effort"}
 )
-RESPONSES_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
-
-
 @dataclass(frozen=True)
 class ImageExecutionPlan:
     transport: str
@@ -421,7 +418,9 @@ def _resolve_image_execution_plan(
     )
     endpoint_url = (advanced.responses_url if advanced else None) or settings.default_responses_url
     requested_reasoning_effort = (
-        advanced.reasoning_effort if advanced else DEFAULT_RESPONSES_REASONING_EFFORT
+        advanced.reasoning_effort
+        if advanced and advanced.reasoning_effort
+        else settings.default_responses_reasoning_effort
     )
     reasoning_effort = (
         requested_reasoning_effort
@@ -1273,7 +1272,7 @@ async def _generate_itinerary_artwork(
     upstream_payload: dict[str, Any] = {
         "model": model,
         "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
-        **_responses_reasoning_options(model),
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "stream": True,
         "input": [{"role": "user", "content": content}],
         "tools": [tool],
@@ -1537,7 +1536,7 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     upstream_payload = {
         "model": model,
         "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
-        **_responses_reasoning_options(model),
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -1794,6 +1793,7 @@ def create_router() -> APIRouter:
             responses_url=settings.default_responses_url,
             default_model=settings.default_model,
             default_responses_model=settings.default_responses_model,
+            default_responses_reasoning_effort=settings.default_responses_reasoning_effort,
             default_size=settings.default_size,
             has_default_api_key=bool(settings.default_api_key),
             storage_dir=str(settings.outputs_dir),
@@ -3387,7 +3387,7 @@ async def _create_team_chat_bot_reply(
     upstream_payload = {
         "model": model,
         "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
-        **_responses_reasoning_options(model),
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3548,7 +3548,7 @@ async def handle_copyright_risk(
     upstream_payload = {
         "model": model,
         "instructions": COPYRIGHT_RISK_INSTRUCTIONS,
-        **_responses_reasoning_options(model),
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3610,7 +3610,9 @@ async def handle_text_fidelity(
                 {
                     "model": model,
                     "instructions": TEXT_FIDELITY_INSTRUCTIONS,
-                    **_responses_reasoning_options(model),
+                    **_responses_reasoning_options(
+                        model, settings.default_responses_reasoning_effort
+                    ),
                     "input": [
                         {
                             "role": "user",
@@ -3643,7 +3645,7 @@ async def handle_text_fidelity(
     upstream_payload = {
         "model": model,
         "instructions": TEXT_FIDELITY_INSTRUCTIONS,
-        **_responses_reasoning_options(model),
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3893,10 +3895,11 @@ def _job_metadata(path: str, body: Any, user: AuthUser, settings: Settings) -> d
         else requested_model
     )
     requested_reasoning_effort = str(
-        execution_payload.get("reasoning_effort") or DEFAULT_RESPONSES_REASONING_EFFORT
+        execution_payload.get("reasoning_effort")
+        or settings.default_responses_reasoning_effort
     )
     if requested_reasoning_effort not in RESPONSES_REASONING_EFFORTS:
-        requested_reasoning_effort = DEFAULT_RESPONSES_REASONING_EFFORT
+        requested_reasoning_effort = settings.default_responses_reasoning_effort
     default_reasoning_effort = (
         requested_reasoning_effort
         if _responses_reasoning_options(effective_model, requested_reasoning_effort)
@@ -4669,7 +4672,9 @@ async def handle_responses_image(
     _validate_exact_image_size(size)
     strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
-    requested_reasoning_effort = parsed.reasoning_effort or DEFAULT_RESPONSES_REASONING_EFFORT
+    requested_reasoning_effort = (
+        parsed.reasoning_effort or settings.default_responses_reasoning_effort
+    )
     reasoning_options = _responses_reasoning_options(model, requested_reasoning_effort)
     reasoning_effort = requested_reasoning_effort if reasoning_options else ""
 

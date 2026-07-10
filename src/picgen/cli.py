@@ -74,6 +74,7 @@ def _print_config(settings: Settings) -> None:
         "default_responses_url": settings.default_responses_url,
         "default_model": settings.default_model,
         "default_responses_model": settings.default_responses_model,
+        "default_responses_reasoning_effort": settings.default_responses_reasoning_effort,
         "default_size": settings.default_size,
         "default_api_key": _mask_secret(settings.default_api_key),
         "proxy_auth_token": _mask_secret(settings.proxy_auth_token),

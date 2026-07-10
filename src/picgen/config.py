@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, HttpUrl, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -14,8 +14,10 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+ResponsesReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 DEFAULT_RESPONSES_MODEL = "gpt-5.6-sol"
-DEFAULT_RESPONSES_REASONING_EFFORT = "max"
+RESPONSES_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+DEFAULT_RESPONSES_REASONING_EFFORT: ResponsesReasoningEffort = "xhigh"
 LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"
 
 
@@ -39,6 +41,9 @@ class Settings(BaseSettings):
     default_responses_url: str = "https://sub.tidba.com/v1/responses"
     default_model: str = "gpt-image-2"
     default_responses_model: str = DEFAULT_RESPONSES_MODEL
+    default_responses_reasoning_effort: ResponsesReasoningEffort = (
+        DEFAULT_RESPONSES_REASONING_EFFORT
+    )
     default_size: str = "1088x2240"
     default_api_key: str = ""
 

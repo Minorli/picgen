@@ -178,7 +178,7 @@ class ImageJobAdvancedOptions(BaseModel):
     images_model: str | None = Field(default=None, max_length=128)
     responses_model: str | None = Field(default=None, max_length=128)
     preferred_transport: Literal["auto", "images", "responses"] = "auto"
-    reasoning_effort: ReasoningEffort = "max"
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ImageJobRequest(_ImageOptions):
@@ -642,6 +642,7 @@ class ConfigResponse(BaseModel):
     responses_url: str
     default_model: str
     default_responses_model: str
+    default_responses_reasoning_effort: ReasoningEffort
     default_size: str
     has_default_api_key: bool
     storage_dir: str

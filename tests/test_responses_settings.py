@@ -9,7 +9,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 def _run_settings_migration(expression: str) -> object:
     script = f"""
-import {{ migrateStoredResponsesSettings }} from './static/responses-settings.mjs'
+import {{
+  migrateStoredResponsesReasoningSettings,
+  migrateStoredResponsesSettings,
+}} from './static/responses-settings.mjs'
 console.log(JSON.stringify({expression}))
 """
     completed = subprocess.run(
@@ -87,4 +90,47 @@ def test_v3_custom_model_is_preserved_while_advancing_storage_version() -> None:
     assert result == {
         "responsesModel": "custom-image-model",
         "responsesModelStorageVersion": 4,
+    }
+
+
+def test_legacy_default_max_reasoning_migrates_to_server_inheritance() -> None:
+    result = _run_settings_migration(
+        "migrateStoredResponsesReasoningSettings({"
+        "responsesReasoningEffort: 'max', imageTransport: 'auto'"
+        "})"
+    )
+
+    assert result == {
+        "responsesReasoningEffort": "",
+        "responsesReasoningStorageVersion": 1,
+        "imageTransport": "auto",
+    }
+
+
+def test_current_explicit_max_reasoning_is_preserved() -> None:
+    result = _run_settings_migration(
+        "(() => {"
+        "const settings = { responsesReasoningEffort: 'max', responsesReasoningStorageVersion: 1 };"
+        "const migrated = migrateStoredResponsesReasoningSettings(settings);"
+        "return { sameObject: migrated === settings, migrated };"
+        "})()"
+    )
+
+    assert result == {
+        "sameObject": True,
+        "migrated": {
+            "responsesReasoningEffort": "max",
+            "responsesReasoningStorageVersion": 1,
+        },
+    }
+
+
+def test_legacy_explicit_nondefault_reasoning_is_preserved() -> None:
+    result = _run_settings_migration(
+        "migrateStoredResponsesReasoningSettings({ responsesReasoningEffort: 'high' })"
+    )
+
+    assert result == {
+        "responsesReasoningEffort": "high",
+        "responsesReasoningStorageVersion": 1,
     }

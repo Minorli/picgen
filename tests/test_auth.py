@@ -2130,7 +2130,7 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert "GPT-BOT" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]

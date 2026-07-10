@@ -206,6 +206,18 @@ def test_anonymous_execution_overrides_are_disabled_by_default() -> None:
     assert Settings(_env_file=None).allow_anonymous_execution_overrides is False
 
 
+def test_default_responses_reasoning_effort_is_xhigh_and_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings(_env_file=None).default_responses_reasoning_effort == "xhigh"
+
+    monkeypatch.setenv("PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT", "high")
+    assert Settings(_env_file=None).default_responses_reasoning_effort == "high"
+
+    with pytest.raises(ValueError, match="default_responses_reasoning_effort"):
+        Settings(_env_file=None, default_responses_reasoning_effort="unsupported")
+
+
 def _generate_poster(client, size="1088x2240"):
     return client.post(
         "/api/generate",
@@ -337,7 +349,7 @@ def test_responses_channel_reinforces_size_in_prompt(make_client, settings_facto
     assert response.status_code == 200
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"]["effort"] == "max"
+    assert upstream_payload["reasoning"]["effort"] == "xhigh"
     input_text = upstream_payload["input"][0]["content"][0]["text"]
     assert "画布尺寸要求" in input_text
     assert "1088x2240" in input_text

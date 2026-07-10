@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.52**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.53**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,15 +14,15 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.52 主要特性
+## 0.1.53 主要特性
 
 - **统一生图入口**：生成、参考图、延展和编辑统一提交 `/api/image-jobs`，由服务端根据尺寸、模式和输入图选择 Images Generate、Images Edit 或 Responses，前端不再自行猜测调用路径。
 - **模型信息分权展示**：普通用户工作台不再展示或提交模型、通道、接口和思考等级；管理员高级设置可覆盖这些参数，并可在任务中心查看实际执行的 transport、model 和 reasoning effort。
 - **实际执行记录一致**：任务完成时用上游真实执行信息更新 `generation_jobs`，避免页面显示 `gpt-image-2`、任务表记录 `gpt-5.5`、实际请求却使用 `gpt-5.6-sol` 的不一致。
-- **精确尺寸服务端路由**：`1088x2240`、`3840x2160` 和其它合法非 Images 原生尺寸自动走 Responses + `gpt-5.6-sol` + `reasoning.effort=max`；Images 原生尺寸按是否有输入图选择生成或编辑接口。
+- **精确尺寸服务端路由**：`1088x2240`、`3840x2160` 和其它合法非 Images 原生尺寸自动走 Responses + `gpt-5.6-sol` + `reasoning.effort=xhigh`；Images 原生尺寸按是否有输入图选择生成或编辑接口。
 - **Responses 旧模型彻底退役**：修复 IndexedDB 工作区快照在设置迁移后再次写回 `gpt-5.5`；数据库升级到 schema v13，前端同步迁移本地设置和工作区，服务端对所有入口无条件把精确旧默认值归一化为 `gpt-5.6-sol`。
 - **LOGO 标准位置优先**：官方 LOGO 默认固定在左上标准位置，只有候选区域的归一化复杂度同时达到绝对和相对改善阈值才会移动；评分覆盖扩大后的安全区，并提高 LOGO 本体区域权重，惩罚邻近文字和高密度边缘。
-- **Responses 模型兼容迁移**：现有用户保存的旧默认 `gpt-5.5` 会一次性迁移到 `gpt-5.6-sol`，浏览器本地旧值也会自动归一化；`reasoning.effort=max` 仅对已验证支持的 `gpt-5.6-sol` 发送，手动调用其它模型不再因不兼容等级触发上游 502。
+- **Responses 运行时配置**：现有用户保存的旧默认 `gpt-5.5` 会一次性迁移到 `gpt-5.6-sol`；默认思考等级通过 `PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT` 配置，当前为 `xhigh`，无需重新改代码。
 - **编辑前后文字对比**：编辑模式自动把"编辑前/编辑后"两张图分别转写并程序化比对，未被要求修改的
   文字发生变化会立即在文字一致性面板提示（个别形近字可能超出自动识别能力，面板会注明需人工复核）。
 - **无标签提示词也做文字校验**：提示词里没有"标题：/亮点："等标签时（表格、自由排版很常见），
@@ -97,10 +97,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.52 .
+docker build -t minorli/picgen:0.1.53 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.52
+  minorli/picgen:0.1.53
 ```
 
 或：
@@ -115,10 +115,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.52`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.53`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.52 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.53 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -147,6 +147,7 @@ IMAGE=minorli/picgen VERSION=0.1.52 PLATFORM=linux/amd64 ./scripts/docker-build-
 | `PICGEN_DEFAULT_API_KEY` | 服务端默认上游 key（浏览器留空即用此值） | 空 |
 | `PICGEN_DEFAULT_GENERATE_URL` / `PICGEN_DEFAULT_EDIT_URL` / `PICGEN_DEFAULT_RESPONSES_URL` | 上游接口 URL | Tidb 兼容代理 |
 | `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.6-sol` |
+| `PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT` | `gpt-5.6-sol` 默认思考等级，可选 `low/medium/high/xhigh/max/ultra`；其它模型为兼容性不发送该字段 | `xhigh` |
 | `PICGEN_DEFAULT_SIZE` | 默认生图尺寸；当前按 6 人游主场景设置 | `1088x2240` |
 | `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 1200 |
 | `PICGEN_UPSTREAM_MAX_RETRIES` | 5xx / 网络瞬时错误重试次数 | 2 |
@@ -227,13 +228,13 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.52 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.53 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
 | Images 原生尺寸、无参考图 | `/api/image-jobs` → `/v1/images/generations` | `gpt-image-2` |
 | Images 原生尺寸、含输入图 | `/api/image-jobs` → `/v1/images/edits` | `gpt-image-2` |
-| `1088x2240`、`3840x2160` 或其它合法精确尺寸 | `/api/image-jobs` → `/v1/responses` | `gpt-5.6-sol` + `max` |
+| `1088x2240`、`3840x2160` 或其它合法精确尺寸 | `/api/image-jobs` → `/v1/responses` | `gpt-5.6-sol` + `xhigh` |
 
 普通用户只选择任务模式和尺寸，不显示模型或通道。管理员可在高级设置里使用自动路由、优先 Images 或强制
 Responses，并覆盖模型、接口和 reasoning effort。非 Images 原生精确尺寸即使选择 Images 仍会切到 Responses，
@@ -304,7 +305,7 @@ Responses 兜底通道默认 `stream: true`，并优先把参考图上传到同�
 ```json
 {
   "model": "gpt-5.6-sol",
-  "reasoning": {"effort": "max"},
+  "reasoning": {"effort": "xhigh"},
   "stream": true,
   "input": [
     {
@@ -390,7 +391,7 @@ uv run picgen --prune-now
 2. 浏览器访问 `http://127.0.0.1:8000`
 3. 普通用户选择尺寸并填写提示词；模型、通道、上游 URL 和 Key 由服务端管理
 4. Images 原生尺寸无输入图时走 `/v1/images/generations`，有输入图时走 `/v1/images/edits`
-5. `1088x2240`、`3840x2160` 等非原生精确尺寸自动走 Responses + `gpt-5.6-sol` + `max`
+5. `1088x2240`、`3840x2160` 等非原生精确尺寸自动走 Responses + `gpt-5.6-sol` + `xhigh`
 6. 想"换风格保持主体"时切到生成区的"基于当前结果延展"，系统会自动携带最新结果
 7. 管理员需要诊断兼容代理时，可在"高级设置"里强制 Responses 或填写自定义端点与对应 Key
 

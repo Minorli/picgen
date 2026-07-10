@@ -1,10 +1,14 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.52"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.53"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
+  RESPONSES_REASONING_STORAGE_VERSION,
+  migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.52"
+} from "./responses-settings.mjs?v=0.1.53"
 
+const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
+const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
@@ -4897,6 +4901,7 @@ function createWorkspaceSnapshot() {
       responsesModel: refs.responsesModelInput.value,
       responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
       responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
+      responsesReasoningStorageVersion: RESPONSES_REASONING_STORAGE_VERSION,
       imageTransport: getImageTransport(),
       logoOverlayEnabled: refs.logoOverlayEnabled.checked,
       itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
@@ -5007,17 +5012,21 @@ async function restoreWorkspaceState() {
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
   const currentResponsesModel = normalizeResponsesModel(refs.responsesModelInput.value)
-  const workspaceResponsesSettings = migrateStoredResponsesSettings(
-    {
-      responsesModel: forms.responsesModel,
-      responsesModelStorageVersion: forms.responsesModelStorageVersion,
-    },
-    currentResponsesModel,
+  const workspaceResponsesSettings = migrateStoredResponsesReasoningSettings(
+    migrateStoredResponsesSettings(
+      {
+        responsesModel: forms.responsesModel,
+        responsesModelStorageVersion: forms.responsesModelStorageVersion,
+        responsesReasoningEffort: forms.responsesReasoningEffort,
+        responsesReasoningStorageVersion: forms.responsesReasoningStorageVersion,
+      },
+      currentResponsesModel,
+    ),
   )
   refs.responsesModelInput.value = normalizeResponsesModel(
     workspaceResponsesSettings.responsesModel || refs.responsesModelInput.value,
   )
-  refs.responsesReasoningEffortSelect.value = forms.responsesReasoningEffort || "max"
+  refs.responsesReasoningEffortSelect.value = workspaceResponsesSettings.responsesReasoningEffort || ""
   refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
   if (refs.itineraryIdEnabled) {
     refs.itineraryIdEnabled.checked = Boolean(forms.itineraryIdEnabled)
@@ -5341,6 +5350,7 @@ function saveSettings() {
     responsesModel: refs.responsesModelInput.value.trim(),
     responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
     responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
+    responsesReasoningStorageVersion: RESPONSES_REASONING_STORAGE_VERSION,
     imageTransport: getImageTransport(),
   }
   saveJSON(settingsStorageKey(), payload)
@@ -5352,10 +5362,11 @@ function saveSettings() {
 
 function loadSettings() {
   const storedLocal = loadJSON(settingsStorageKey(), {})
-  const local = migrateStoredResponsesSettings(
+  const migratedModelSettings = migrateStoredResponsesSettings(
     storedLocal,
     state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
   )
+  const local = migrateStoredResponsesReasoningSettings(migratedModelSettings)
   if (local !== storedLocal) {
     saveJSON(settingsStorageKey(), local)
   }
@@ -5376,7 +5387,8 @@ function loadSettings() {
 
   refs.generateModelInput.value = local.generateModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
   refs.editModelInput.value = local.editModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
-  refs.responsesReasoningEffortSelect.value = local.responsesReasoningEffort || "max"
+  updateResponsesReasoningDefaultOption()
+  refs.responsesReasoningEffortSelect.value = local.responsesReasoningEffort || ""
   setGenerateSize(prefs.default_size || state.serverConfig.default_size || "auto")
   if (prefs.default_quality) {
     refs.qualitySelect.value = prefs.default_quality
@@ -5507,6 +5519,22 @@ function flashHint(text) {
   }, 2200)
 }
 
+function serverDefaultResponsesReasoningEffort() {
+  const configured = String(
+    state.serverConfig?.default_responses_reasoning_effort || "",
+  ).trim().toLowerCase()
+  return RESPONSES_REASONING_EFFORTS.has(configured)
+    ? configured
+    : DEFAULT_RESPONSES_REASONING_EFFORT
+}
+
+function updateResponsesReasoningDefaultOption() {
+  const option = refs.responsesReasoningEffortSelect?.querySelector('option[value=""]')
+  if (option) {
+    option.textContent = `服务端默认 (${serverDefaultResponsesReasoningEffort()})`
+  }
+}
+
 function getSettings() {
   return {
     apiKey: refs.apiKeyInput.value.trim() || state.savedApiKey || "",
@@ -5514,7 +5542,7 @@ function getSettings() {
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
     responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
-    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value || "max",
+    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
     imageTransport: getImageTransport(),
   }
 }
@@ -5534,7 +5562,7 @@ function imageJobAdvancedOptions(settings, mode = "generate") {
     images_model: imagesModel || undefined,
     responses_model: settings.responsesModel || undefined,
     preferred_transport: settings.imageTransport || "auto",
-    reasoning_effort: settings.responsesReasoningEffort || "max",
+    reasoning_effort: settings.responsesReasoningEffort || undefined,
   }
 }
 
@@ -9543,6 +9571,7 @@ async function init() {
     state.serverConfig = {
       default_model: "gpt-image-2",
       default_responses_model: DEFAULT_RESPONSES_MODEL,
+      default_responses_reasoning_effort: DEFAULT_RESPONSES_REASONING_EFFORT,
       default_size: "1088x2240",
       generate_url: "",
       edit_url: "",

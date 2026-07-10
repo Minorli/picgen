@@ -1,6 +1,6 @@
 services:
   picgen:
-    image: minorli/picgen:0.1.52
+    image: minorli/picgen:0.1.53
     build:
       context: .
     ports:
@@ -19,6 +19,7 @@ services:
       PICGEN_DEFAULT_GENERATE_URL: "https://sub.tidba.com/v1/images/generations"
       PICGEN_DEFAULT_EDIT_URL: "https://sub.tidba.com/v1/images/edits"
       PICGEN_DEFAULT_RESPONSES_URL: "https://sub.tidba.com/v1/responses"
+      PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT: "${PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT:-xhigh}"
     volumes:
       - picgen-data:/app/data
     restart: unless-stopped

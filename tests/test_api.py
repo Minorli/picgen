@@ -79,6 +79,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["has_default_api_key"] is True
     assert payload["responses_url"] == "https://sub.tidba.com/v1/responses"
     assert payload["default_responses_model"] == "gpt-5.6-sol"
+    assert payload["default_responses_reasoning_effort"] == "xhigh"
     assert payload["default_size"] == "1088x2240"
     assert payload["allow_anonymous_execution_overrides"] is True
     assert "sk-secret" not in response.text
@@ -1046,7 +1047,7 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     upstream_payload = fake.run_responses.await_args.args[2]
     assert fake.run_responses.await_args.args[1] == "sk-test"
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert upstream_payload["tools"][0]["size"] == "1792x1792"
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -1450,7 +1451,7 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert "可解析 JSON" in upstream_payload["instructions"]
     assert "经纬度" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]
@@ -2356,7 +2357,7 @@ def test_responses_image_v3_client_legacy_model_is_normalized(make_client, setti
     assert response.json()["model"] == "gpt-5.6-sol"
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
 
 
 def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
@@ -2392,7 +2393,7 @@ def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
     upstream_payload = fake.run_responses.await_args.args[2]
     assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
 
 
@@ -2654,7 +2655,7 @@ def test_copyright_risk_normalizes_gpt55_and_uses_inline_images(make_client, set
     assert "风险等级：低" in payload["risk_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"]["effort"] == "max"
+    assert upstream_payload["reasoning"]["effort"] == "xhigh"
     assert "版权" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
     content = upstream_payload["input"][0]["content"]
@@ -2702,7 +2703,7 @@ def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, se
     assert payload["passed"] is False
     assert "铁煎章鱼" in payload["fidelity_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["reasoning"]["effort"] == "max"
+    assert upstream_payload["reasoning"]["effort"] == "xhigh"
     assert "文字一致性验收助手" in upstream_payload["instructions"]
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"

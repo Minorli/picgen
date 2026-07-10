@@ -102,7 +102,10 @@ def test_image_job_routes_native_reference_to_images_edit(make_client, settings_
 
 
 def test_image_job_routes_six_person_size_to_responses(make_client, settings_factory) -> None:
-    settings = settings_factory(default_api_key="sk-server")
+    settings = settings_factory(
+        default_api_key="sk-server",
+        default_responses_reasoning_effort="high",
+    )
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
         "data": [{"b64_json": _png_b64(1088, 2240)}],
@@ -118,10 +121,10 @@ def test_image_job_routes_six_person_size_to_responses(make_client, settings_fac
     payload = response.json()
     assert payload["transport"] == "responses-image"
     assert payload["model"] == "gpt-5.6-sol"
-    assert payload["reasoning_effort"] == "max"
+    assert payload["reasoning_effort"] == "high"
     upstream_payload = fake.run_responses.await_args.args[2]
     assert upstream_payload["model"] == "gpt-5.6-sol"
-    assert upstream_payload["reasoning"] == {"effort": "max"}
+    assert upstream_payload["reasoning"] == {"effort": "high"}
     fake.run_json.assert_not_awaited()
     fake.run_multipart.assert_not_awaited()
 
@@ -244,6 +247,33 @@ def test_admin_can_override_responses_execution(make_client, settings_factory) -
     assert upstream_args[0] == "https://admin.example/v1/responses"
     assert upstream_args[1] == "sk-admin"
     assert upstream_args[2]["reasoning"] == {"effort": "low"}
+
+
+def test_admin_invalid_reasoning_override_is_rejected(make_client, settings_factory) -> None:
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-server",
+    )
+    client, fake, _ = make_client(settings=settings)
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "correct horse battery admin"},
+    ).status_code == 200
+
+    response = client.post(
+        "/api/image-jobs",
+        json={
+            "prompt": "非法思考等级",
+            "mode": "generate",
+            "size": "1088x2240",
+            "advanced": {"reasoning_effort": "impossible"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+    fake.run_responses.assert_not_awaited()
 
 
 def test_admin_can_prefer_images_and_override_images_model(make_client, settings_factory) -> None:
@@ -386,7 +416,7 @@ def test_regular_user_old_responses_endpoint_uses_server_model_and_reasoning(
             "api_key": "sk-browser",
             "endpoint_url": "https://override.example/v1/responses",
             "model": "override-model",
-            "reasoning_effort": "low",
+            "reasoning_effort": "impossible",
         },
     )
 
@@ -395,7 +425,7 @@ def test_regular_user_old_responses_endpoint_uses_server_model_and_reasoning(
     assert upstream_args[0] == "https://server.example/v1/responses"
     assert upstream_args[1] == "sk-server"
     assert upstream_args[2]["model"] == "gpt-5.6-sol"
-    assert upstream_args[2]["reasoning"] == {"effort": "max"}
+    assert upstream_args[2]["reasoning"] == {"effort": "xhigh"}
 
 
 @pytest.mark.parametrize(
@@ -445,7 +475,7 @@ def test_regular_user_review_endpoints_use_server_execution_settings(
     assert upstream_args[0] == "https://server.example/v1/responses"
     assert upstream_args[1] == "sk-server"
     assert upstream_args[2]["model"] == "gpt-5.6-sol"
-    assert upstream_args[2]["reasoning"] == {"effort": "max"}
+    assert upstream_args[2]["reasoning"] == {"effort": "xhigh"}
 
 
 def test_auth_disabled_does_not_allow_execution_overrides_by_default(
@@ -649,7 +679,7 @@ def test_image_job_records_actual_execution_metadata(make_client, settings_facto
     assert job["endpoint_path"] == "/api/image-jobs"
     assert job["transport"] == "responses-image"
     assert job["model"] == "gpt-5.6-sol"
-    assert job["reasoning_effort"] == "max"
+    assert job["reasoning_effort"] == "xhigh"
 
     with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
         image_model = conn.execute(
@@ -690,4 +720,4 @@ def test_failed_image_job_keeps_resolved_execution_metadata(make_client, setting
     assert job["status"] == "failed"
     assert job["transport"] == "responses-image"
     assert job["model"] == "gpt-5.6-sol"
-    assert job["reasoning_effort"] == "max"
+    assert job["reasoning_effort"] == "xhigh"

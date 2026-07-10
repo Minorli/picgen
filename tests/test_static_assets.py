@@ -10,12 +10,16 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.52"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.53"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
+    assert "const RESPONSES_REASONING_STORAGE_VERSION = 1" in settings_js
+    assert "function migrateStoredResponsesReasoningSettings" in settings_js
     assert app_js.count("responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION") >= 2
     assert app_js.count("migrateStoredResponsesSettings(") >= 2
+    assert app_js.count("responsesReasoningStorageVersion: RESPONSES_REASONING_STORAGE_VERSION") >= 2
+    assert app_js.count("migrateStoredResponsesReasoningSettings(") >= 2
     assert "const currentResponsesModel = normalizeResponsesModel(refs.responsesModelInput.value)" in app_js
     assert "responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION" in app_js
 
@@ -31,7 +35,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.52"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.53"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "expandLogoSafetyRegion" in placement_js
@@ -104,7 +108,8 @@ def test_model_controls_are_admin_only_and_generation_uses_unified_endpoint() ->
     assert 'id="editModelInput"' in connection_settings
     assert 'id="responsesModelInput"' in connection_settings
     assert 'id="responsesReasoningEffortSelect"' in connection_settings
-    assert 'value="max" selected' in connection_settings
+    assert '<option value="" selected>服务端默认</option>' in connection_settings
+    assert '<option value="xhigh">xhigh</option>' in connection_settings
 
     assert 'postJSON("api/generate"' not in app_js
     assert 'postJSON("api/edit"' not in app_js
@@ -114,6 +119,8 @@ def test_model_controls_are_admin_only_and_generation_uses_unified_endpoint() ->
     assert 'refs.connectionSettings?.classList.toggle("hidden", !canManageExecution)' in app_js
     assert 'refs.connectionSettingsLink?.classList.toggle("hidden", !canManageExecution)' in app_js
     assert 'state.serverConfig?.allow_anonymous_execution_overrides === true' in app_js
+    assert "state.serverConfig?.default_responses_reasoning_effort" in app_js
+    assert "reasoning_effort: settings.responsesReasoningEffort || undefined" in app_js
     assert 'refs.debugOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)' in app_js
     assert 'refs.rawResponseOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)' in app_js
     assert "job.transport" in app_js
@@ -202,7 +209,8 @@ def test_image_quality_defaults_to_high_without_unsupported_xhigh() -> None:
     assert 'refs.qualitySelect.value = snapshot.quality || "high"' in app_js
     quality_select = index_html.split('<select id="qualitySelect">', 1)[1].split("</select>", 1)[0]
     assert 'value="xhigh"' not in quality_select
-    assert '"xhigh"' not in app_js
+    assert 'refs.qualitySelect.value = forms.quality || "xhigh"' not in app_js
+    assert 'quality: refs.qualitySelect.value || "xhigh"' not in app_js
 
 
 def test_result_preview_zoom_and_feedback_controls_are_present() -> None:
