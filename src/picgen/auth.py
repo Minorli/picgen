@@ -19,7 +19,7 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 _PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
@@ -3663,7 +3663,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "gpt_5_6_sol_preferences_retry", now),
+            (_SCHEMA_VERSION, "gpt_5_6_sol_preferences_v4", now),
         )
         return migrated_sidecar_paths
 

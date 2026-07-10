@@ -1,6 +1,6 @@
 export const DEFAULT_RESPONSES_MODEL = "gpt-5.6-sol"
 const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"
-export const RESPONSES_MODEL_STORAGE_VERSION = 3
+export const RESPONSES_MODEL_STORAGE_VERSION = 4
 
 export function migrateStoredResponsesSettings(settings = {}, defaultModel = DEFAULT_RESPONSES_MODEL) {
   const version = Number(settings.responsesModelStorageVersion || 0)

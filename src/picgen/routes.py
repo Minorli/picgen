@@ -204,7 +204,10 @@ def _normalize_legacy_client_responses_model(
     default_model: str,
 ) -> str:
     if model == LEGACY_DEFAULT_RESPONSES_MODEL and (storage_version or 0) < RESPONSES_MODEL_STORAGE_VERSION:
-        return default_model.strip() or DEFAULT_RESPONSES_MODEL
+        normalized_default = default_model.strip()
+        if not normalized_default or normalized_default == LEGACY_DEFAULT_RESPONSES_MODEL:
+            return DEFAULT_RESPONSES_MODEL
+        return normalized_default
     return model
 
 

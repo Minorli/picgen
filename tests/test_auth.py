@@ -1552,6 +1552,14 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     )
     assert manual_response.status_code == 200
     preferences = manual_response.json()["preferences"]
+    assert preferences["default_responses_model"] == "gpt-5.6-sol"
+
+    manual_response = client.put(
+        "/api/preferences",
+        json={**preference_payload, "responses_model_storage_version": 4},
+    )
+    assert manual_response.status_code == 200
+    preferences = manual_response.json()["preferences"]
     assert preferences["default_responses_model"] == "gpt-5.5"
 
     fetched_response = client.get("/api/preferences")
@@ -1559,7 +1567,7 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     assert fetched_response.json()["preferences"] == preferences
 
 
-def test_legacy_gpt55_preference_is_migrated_again_from_schema_v9_once(tmp_path: Path) -> None:
+def test_legacy_gpt55_preference_is_migrated_again_from_schema_v10_once(tmp_path: Path) -> None:
     from picgen.auth import AuthStore
 
     db_path = tmp_path / "auth.sqlite3"
@@ -1572,10 +1580,10 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v9_once(tmp_path:
         default_size="1088x2240",
     )
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM schema_migrations WHERE version = 10")
+        conn.execute("DELETE FROM schema_migrations WHERE version = 11")
         conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (9, ?, ?)",
-            ("gpt_5_6_sol_preferences", "2026-07-10T00:00:00+00:00"),
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (10, ?, ?)",
+            ("gpt_5_6_sol_preferences_retry", "2026-07-10T00:00:00+00:00"),
         )
 
     migrated = AuthStore(db_path)
@@ -1583,9 +1591,9 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v9_once(tmp_path:
     assert migrated.get_user_preferences(user_id=user.id)["default_responses_model"] == "gpt-5.6-sol"
     with sqlite3.connect(db_path) as conn:
         migration = conn.execute(
-            "SELECT name FROM schema_migrations WHERE version = 10"
+            "SELECT name FROM schema_migrations WHERE version = 11"
         ).fetchone()
-    assert migration == ("gpt_5_6_sol_preferences_retry",)
+    assert migration == ("gpt_5_6_sol_preferences_v4",)
 
     migrated.update_user_preferences(
         user_id=user.id,

@@ -2324,8 +2324,11 @@ def test_responses_image_requires_prompt(make_client):
     assert response.json()["error"] == "Responses 图像提示词不能为空"
 
 
-def test_responses_image_old_client_legacy_model_is_normalized(make_client, settings_factory):
-    settings = settings_factory(default_api_key="sk-test")
+def test_responses_image_v3_client_legacy_model_is_normalized(make_client, settings_factory):
+    settings = settings_factory(
+        default_api_key="sk-test",
+        default_responses_model="gpt-5.5",
+    )
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
         "data": [{"b64_json": TINY_PNG_B64}],
@@ -2339,6 +2342,7 @@ def test_responses_image_old_client_legacy_model_is_normalized(make_client, sett
             "endpoint_url": "https://sub.tidba.com/v1/responses",
             "prompt": "生成一张小图",
             "model": "gpt-5.5",
+            "responses_model_storage_version": 3,
             "mode": "generate",
         },
     )
@@ -2366,7 +2370,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
             "endpoint_url": "https://api.openai.com/v1/responses",
             "prompt": "生成一张小图",
             "model": "gpt-5.5",
-            "responses_model_storage_version": 3,
+            "responses_model_storage_version": 4,
             "mode": "reference",
         },
     )

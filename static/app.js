@@ -1,9 +1,9 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.49"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.50"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.49"
+} from "./responses-settings.mjs?v=0.1.50"
 
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"

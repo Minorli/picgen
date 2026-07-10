@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.49**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.50**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,9 +14,9 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.49 主要特性
+## 0.1.50 主要特性
 
-- **Responses 默认模型二次迁移**：修复浏览器 v2 遗留设置把数据库中的 `gpt-5.6-sol` 又覆盖成 `gpt-5.5`；浏览器升级到设置 v3，数据库升级到 schema v10，精确迁移旧默认值且保留后续手动选模能力。
+- **Responses 默认模型迁移加固**：修复浏览器 v3 遗留设置把数据库中的 `gpt-5.6-sol` 又覆盖成 `gpt-5.5`；浏览器升级到设置 v4，数据库升级到 schema v11，旧页面请求由服务端统一兜底，且保留新版页面手动选模能力。
 - **LOGO 标准位置优先**：官方 LOGO 默认固定在左上标准位置，只有候选区域的归一化复杂度同时达到绝对和相对改善阈值才会移动；评分覆盖扩大后的安全区，并提高 LOGO 本体区域权重，惩罚邻近文字和高密度边缘。
 - **Responses 模型兼容迁移**：现有用户保存的旧默认 `gpt-5.5` 会一次性迁移到 `gpt-5.6-sol`，浏览器本地旧值也会自动归一化；`reasoning.effort=max` 仅对已验证支持的 `gpt-5.6-sol` 发送，手动调用其它模型不再因不兼容等级触发上游 502。
 - **编辑前后文字对比**：编辑模式自动把"编辑前/编辑后"两张图分别转写并程序化比对，未被要求修改的
@@ -93,10 +93,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.49 .
+docker build -t minorli/picgen:0.1.50 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.49
+  minorli/picgen:0.1.50
 ```
 
 或：
@@ -111,10 +111,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.49`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.50`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.49 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.50 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -217,7 +217,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.49 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.50 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
