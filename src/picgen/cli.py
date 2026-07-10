@@ -98,6 +98,7 @@ def _print_config(settings: Settings) -> None:
         "smtp_starttls": settings.smtp_starttls,
         "password_reset_token_minutes": settings.password_reset_token_minutes,
         "auth_enabled": settings.auth_enabled,
+        "allow_anonymous_execution_overrides": settings.allow_anonymous_execution_overrides,
         "auth_db_path": str(settings.resolved_auth_db_path),
         "auth_cookie_name": settings.auth_cookie_name,
         "auth_cookie_secure": settings.auth_cookie_secure,

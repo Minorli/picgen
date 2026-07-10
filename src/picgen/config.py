@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     trust_forwarded_for: bool = False
 
     auth_enabled: bool = True
+    allow_anonymous_execution_overrides: bool = False
     auth_db_path: Path | None = None
     auth_cookie_name: str = "picgen_session"
     auth_cookie_secure: bool = False

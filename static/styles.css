@@ -4024,12 +4024,22 @@ button:disabled {
     flex-wrap: wrap;
   }
 
+  .topbar-tools {
+    width: 100%;
+  }
+
   .api-pill {
     display: none;
   }
 
   .user-pill {
-    flex: 1;
+    flex: 0 1 180px;
+    min-width: 150px;
+    max-width: 100%;
+  }
+
+  .user-pill strong {
+    white-space: nowrap;
   }
 
   .app-grid {

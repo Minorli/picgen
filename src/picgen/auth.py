@@ -19,7 +19,7 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 _PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
@@ -262,6 +262,7 @@ class AuthStore:
                         endpoint_path TEXT NOT NULL,
                         mode TEXT NOT NULL DEFAULT '',
                         transport TEXT NOT NULL DEFAULT '',
+                        reasoning_effort TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL DEFAULT 'started',
                         prompt TEXT NOT NULL DEFAULT '',
                         original_prompt TEXT NOT NULL DEFAULT '',
@@ -1289,6 +1290,7 @@ class AuthStore:
         endpoint_path: str,
         mode: str = "",
         transport: str = "",
+        reasoning_effort: str = "",
         prompt: str = "",
         original_prompt: str = "",
         prompt_mode: str = "free",
@@ -1309,6 +1311,7 @@ class AuthStore:
                     endpoint_path,
                     mode,
                     transport,
+                    reasoning_effort,
                     prompt,
                     original_prompt,
                     prompt_mode,
@@ -1320,7 +1323,7 @@ class AuthStore:
                     logo_requested,
                     started_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id.strip()[:128],
@@ -1329,6 +1332,7 @@ class AuthStore:
                     endpoint_path.strip()[:128],
                     mode.strip()[:64],
                     transport.strip()[:64],
+                    reasoning_effort.strip()[:32],
                     prompt.strip()[:32_000],
                     original_prompt.strip()[:32_000],
                     prompt_mode.strip()[:32] or "free",
@@ -1366,6 +1370,9 @@ class AuthStore:
                 UPDATE generation_jobs
                 SET
                     status = ?,
+                    transport = COALESCE(NULLIF(?, ''), transport),
+                    reasoning_effort = COALESCE(NULLIF(?, ''), reasoning_effort),
+                    model = COALESCE(NULLIF(?, ''), model),
                     image_count = ?,
                     saved_bytes = ?,
                     error_code = ?,
@@ -1376,6 +1383,9 @@ class AuthStore:
                 """,
                 (
                     status.strip()[:64] or "succeeded",
+                    str(result.get("transport") or "").strip()[:64],
+                    str(result.get("reasoning_effort") or "").strip()[:32],
+                    str(result.get("model") or "").strip()[:128],
                     image_count,
                     saved_bytes,
                     error_code.strip()[:128],
@@ -1944,6 +1954,7 @@ class AuthStore:
                     j.endpoint_path,
                     j.mode,
                     j.transport,
+                    j.reasoning_effort,
                     j.status,
                     j.prompt,
                     j.original_prompt,
@@ -3572,6 +3583,7 @@ class AuthStore:
             "prompt_mode": "TEXT NOT NULL DEFAULT 'free'",
             "recipe_id": "TEXT NOT NULL DEFAULT ''",
             "recipe_version": "TEXT NOT NULL DEFAULT ''",
+            "reasoning_effort": "TEXT NOT NULL DEFAULT ''",
         })
         _ensure_columns(conn, "generated_images", {
             "source_generated_image_id": "INTEGER",
@@ -3663,7 +3675,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "gpt_5_6_sol_preferences_workspace", now),
+            (_SCHEMA_VERSION, "image_job_execution_metadata", now),
         )
         return migrated_sidecar_paths
 
@@ -4397,6 +4409,7 @@ def _generation_job_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "endpoint_path": str(row["endpoint_path"] or ""),
         "mode": str(row["mode"] or ""),
         "transport": str(row["transport"] or ""),
+        "reasoning_effort": str(row["reasoning_effort"] or ""),
         "status": str(row["status"] or ""),
         "prompt": str(row["prompt"] or ""),
         "original_prompt": str(row["original_prompt"] or row["prompt"] or ""),

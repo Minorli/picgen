@@ -1,9 +1,9 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.51"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.52"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.51"
+} from "./responses-settings.mjs?v=0.1.52"
 
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
@@ -52,7 +52,6 @@ const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
-const IMAGES_API_EXACT_SIZES = new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -319,8 +318,11 @@ const refs = {
   editUrlInput: document.querySelector("#editUrlInput"),
   responsesUrlInput: document.querySelector("#responsesUrlInput"),
   responsesModelInput: document.querySelector("#responsesModelInput"),
+  responsesReasoningEffortSelect: document.querySelector("#responsesReasoningEffortSelect"),
   imageTransportInputs: Array.from(document.querySelectorAll('input[name="imageTransport"]')),
   imageTransportHint: document.querySelector("#imageTransportHint"),
+  connectionSettings: document.querySelector("#connectionSettings"),
+  connectionSettingsLink: document.querySelector("#connectionSettingsLink"),
   settingsHint: document.querySelector("#settingsHint"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
@@ -938,7 +940,12 @@ async function refreshImageStats() {
 
 function updateAdminPanelVisibility() {
   const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  const canManageExecution = canManageExecutionSettings()
   refs.adminPanel?.classList.toggle("hidden", !isAdmin)
+  refs.connectionSettings?.classList.toggle("hidden", !canManageExecution)
+  refs.connectionSettingsLink?.classList.toggle("hidden", !canManageExecution)
+  refs.debugOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
+  refs.rawResponseOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
   if (!isAdmin && refs.adminUsersList) {
     refs.adminUsersList.innerHTML = ""
   }
@@ -951,6 +958,21 @@ function updateAdminPanelVisibility() {
   if (!isAdmin && refs.passwordResetRequestsList) {
     refs.passwordResetRequestsList.innerHTML = ""
   }
+}
+
+function canManageExecutionSettings() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  const trustedLocalMode = state.serverConfig?.auth_enabled === false
+    && state.serverConfig?.allow_anonymous_execution_overrides === true
+  return Boolean(isAdmin || trustedLocalMode)
+}
+
+function canViewExecutionDetails() {
+  return canManageExecutionSettings()
+}
+
+function executionReviewServiceLabel() {
+  return canViewExecutionDetails() ? DEFAULT_RESPONSES_MODEL : "智能检查服务"
 }
 
 function formatAdminBytes(bytes) {
@@ -2277,15 +2299,15 @@ async function submitAIItineraryMap() {
     })
     const settings = getSettings()
     const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+    const canOverrideExecution = canManageExecutionSettings()
     const result = await postJSON("api/itinerary-map/render", {
       title,
       subtitle,
       route_style: refs.itineraryThemeSelect?.value || "comic",
       stops: routeStops,
       size,
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: itineraryModel,
+      api_key: canOverrideExecution ? settings.apiKey || undefined : undefined,
+      model: canOverrideExecution ? itineraryModel : undefined,
       generate_background: true,
       logo_requested: logoRequested,
     }, {
@@ -2596,7 +2618,7 @@ function renderSharedResults(shares) {
         ${imageUrl ? `<img src="${escapeHTML(imageUrl)}" alt="">` : '<span class="shared-result-thumb"></span>'}
         <span class="shared-result-copy">
           <strong>${escapeHTML(sender)}</strong>
-          <span>${escapeHTML(share.mode || "生成")} · ${escapeHTML(share.model || "")}</span>
+          <span>${escapeHTML(share.mode || "生成")}</span>
           <p>${escapeHTML(prompt)}</p>
         </span>
       </button>
@@ -2746,7 +2768,13 @@ function renderGalleryItems(items = state.galleryItems) {
 
     const meta = document.createElement("span")
     meta.className = "gallery-item-meta"
-    const metaParts = [item.mode || "生成", item.model || "", item.logo_overlay_applied ? "LOGO" : ""]
+    const metaParts = [item.mode || "生成"]
+    if (canViewExecutionDetails() && item.model) {
+      metaParts.push(item.model)
+    }
+    if (item.logo_overlay_applied) {
+      metaParts.push("LOGO")
+    }
     meta.textContent = metaParts.filter(Boolean).join(" · ")
 
     const tags = document.createElement("span")
@@ -2877,12 +2905,17 @@ function renderGenerationJobs(jobs = state.generationJobs) {
     prompt.textContent = job.original_prompt || job.prompt || "未记录提示词"
     const meta = document.createElement("span")
     const modeLabel = job.prompt_mode === "recipe" ? "配方辅助" : "精确提示词"
+    const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+    const executionMeta = isAdmin
+      ? [job.transport, job.model, job.reasoning_effort ? `reasoning=${job.reasoning_effort}` : ""]
+      : []
     meta.textContent = [
       job.mode || "生成",
       modeLabel,
       job.recipe_id || "",
       job.size || "",
       `${Number(job.image_count || 0)} 张`,
+      ...executionMeta,
     ].filter(Boolean).join(" · ")
     copy.append(top, prompt, meta)
     if (job.error_message) {
@@ -2959,7 +2992,12 @@ function openGalleryLikeImage(item, label = "作品库") {
   refs.resultPreviewEmpty.classList.add("hidden")
   refs.resultPrompt.textContent = state.lastResultPrompt || "未记录提示词"
   const promptMode = lineage.prompt_mode === "recipe" ? "配方辅助" : ""
-  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", promptMode, item.username || ""].filter(Boolean).join(" · ")
+  refs.resultMeta.textContent = [
+    item.mode || "生成",
+    canViewExecutionDetails() ? item.model || "" : "",
+    promptMode,
+    item.username || "",
+  ].filter(Boolean).join(" · ")
   refs.resultTiming.textContent = lineage.elapsed_ms ? `${(Number(lineage.elapsed_ms) / 1000).toFixed(1)}s` : ""
   refs.resultStorage.textContent = item.saved_image_path ? `已落盘到 ${item.saved_image_path}` : ""
   setDownloadAvailable(state.resultPreview.src, asset.name)
@@ -4858,6 +4896,7 @@ function createWorkspaceSnapshot() {
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
       responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
+      responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
       imageTransport: getImageTransport(),
       logoOverlayEnabled: refs.logoOverlayEnabled.checked,
       itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
@@ -4978,6 +5017,7 @@ async function restoreWorkspaceState() {
   refs.responsesModelInput.value = normalizeResponsesModel(
     workspaceResponsesSettings.responsesModel || refs.responsesModelInput.value,
   )
+  refs.responsesReasoningEffortSelect.value = forms.responsesReasoningEffort || "max"
   refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
   if (refs.itineraryIdEnabled) {
     refs.itineraryIdEnabled.checked = Boolean(forms.itineraryIdEnabled)
@@ -4988,7 +5028,7 @@ async function restoreWorkspaceState() {
   updateLogoControlUI()
   updateItineraryIdControlUI()
   if (forms.imageTransport) {
-    setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
+    setImageTransport(forms.imageTransport)
   }
   updatePromptCounters()
 
@@ -5296,7 +5336,10 @@ function saveSettings() {
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
+    generateModel: refs.generateModelInput.value.trim(),
+    editModel: refs.editModelInput.value.trim(),
     responsesModel: refs.responsesModelInput.value.trim(),
+    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
     responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
     imageTransport: getImageTransport(),
   }
@@ -5331,8 +5374,9 @@ function loadSettings() {
     local.responsesModel || prefs.default_responses_model || state.serverConfig.default_responses_model,
   )
 
-  refs.generateModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
-  refs.editModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.generateModelInput.value = local.generateModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.editModelInput.value = local.editModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.responsesReasoningEffortSelect.value = local.responsesReasoningEffort || "max"
   setGenerateSize(prefs.default_size || state.serverConfig.default_size || "auto")
   if (prefs.default_quality) {
     refs.qualitySelect.value = prefs.default_quality
@@ -5343,7 +5387,7 @@ function loadSettings() {
   if (typeof prefs.logo_overlay_enabled === "boolean") {
     refs.logoOverlayEnabled.checked = prefs.logo_overlay_enabled
   }
-  setImageTransport(local.imageTransport || prefs.default_image_transport || "images")
+  setImageTransport(local.imageTransport || prefs.default_image_transport || "auto")
 
   if (state.savedApiKey) {
     refs.settingsHint.textContent = "浏览器本地已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
@@ -5417,11 +5461,11 @@ async function syncUserPreferences({ quiet = true } = {}) {
 
 function getImageTransport() {
   const checked = refs.imageTransportInputs.find((input) => input.checked)
-  return checked?.value === "responses" ? "responses" : "images"
+  return ["auto", "images", "responses"].includes(checked?.value) ? checked.value : "auto"
 }
 
 function setImageTransport(value) {
-  const normalized = value === "responses" ? "responses" : "images"
+  const normalized = ["auto", "images", "responses"].includes(value) ? value : "auto"
   refs.imageTransportInputs.forEach((input) => {
     input.checked = input.value === normalized
   })
@@ -5432,15 +5476,18 @@ function updateImageTransportUI() {
   const transport = getImageTransport()
   const isResponses = transport === "responses"
   if (refs.imageTransportHint) {
-    refs.imageTransportHint.textContent = isResponses
-      ? `编辑、参考图、延展会走 Responses + image_generation 工具（默认 ${DEFAULT_RESPONSES_MODEL}，reasoning=max），用于对接不支持 Images Edit 的兼容代理。`
-      : "编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。"
+    refs.imageTransportHint.textContent = transport === "auto"
+      ? "自动模式由服务端根据尺寸、模式和输入图选择实际通道。"
+      : isResponses
+        ? `所有任务优先走 Responses + image_generation（默认 ${DEFAULT_RESPONSES_MODEL}）。`
+        : "原生尺寸优先走 Images API；非原生精确尺寸仍由服务端切换到 Responses。"
   }
   const editFieldset = refs.responsesUrlInput?.closest("label")
   const modelFieldset = refs.responsesModelInput?.closest("label")
-  ;[editFieldset, modelFieldset].forEach((node) => {
+  const reasoningFieldset = refs.responsesReasoningEffortSelect?.closest("label")
+  ;[editFieldset, modelFieldset, reasoningFieldset].forEach((node) => {
     if (!node) return
-    node.classList.toggle("is-dimmed", !isResponses)
+    node.classList.toggle("is-dimmed", transport === "images")
   })
 }
 
@@ -5467,7 +5514,27 @@ function getSettings() {
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
     responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
+    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value || "max",
     imageTransport: getImageTransport(),
+  }
+}
+
+function imageJobAdvancedOptions(settings, mode = "generate") {
+  if (!canManageExecutionSettings()) {
+    return undefined
+  }
+  const imagesModel = mode === "edit"
+    ? refs.editModelInput.value.trim()
+    : refs.generateModelInput.value.trim()
+  return {
+    api_key: settings.apiKey || undefined,
+    generate_url: settings.generateUrl || undefined,
+    edit_url: settings.editUrl || undefined,
+    responses_url: settings.responsesUrl || undefined,
+    images_model: imagesModel || undefined,
+    responses_model: settings.responsesModel || undefined,
+    preferred_transport: settings.imageTransport || "auto",
+    reasoning_effort: settings.responsesReasoningEffort || "max",
   }
 }
 
@@ -5614,38 +5681,12 @@ function updateGenerateSampleCountUI() {
   }
 }
 
-function requireEditSettings(settings, contextLabel) {
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError(`${contextLabel}需要填写编辑接口 URL（/v1/images/edits）。`)
-    refs.editUrlInput.focus()
-    return false
-  }
-  return true
-}
-
 function normalizeResponsesModel(value) {
   const model = String(value || "").trim()
   if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
     return state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
   }
   return model
-}
-
-function requireResponsesSettings(settings, contextLabel) {
-  if (!settings.responsesUrl) {
-    appendDebugLine("参数校验失败：Responses 图像接口 URL 为空")
-    setError(`${contextLabel}需要填写 Responses 图像接口 URL。`)
-    refs.responsesUrlInput.focus()
-    return false
-  }
-  if (!settings.responsesModel) {
-    appendDebugLine("参数校验失败：Responses 主模型为空")
-    setError(`${contextLabel}需要填写 Responses 主模型。`)
-    refs.responsesModelInput.focus()
-    return false
-  }
-  return true
 }
 
 function formatTimestamp(isoLike) {
@@ -5751,10 +5792,6 @@ function getGenerateSize() {
   }
 
   return formatSizeValue(width, height)
-}
-
-function shouldUseResponsesForSelectedSize(size) {
-  return !IMAGES_API_EXACT_SIZES.has(String(size || "").trim() || "auto")
 }
 
 function updateVisualSizePicker(value) {
@@ -6882,7 +6919,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
         : mode === "itinerary"
           ? "行程路线"
           : "生成"
-  const metaParts = [metaLabel, model]
+  const metaParts = [metaLabel, canViewExecutionDetails() ? model : ""]
 
   if (size) {
     metaParts.push(size)
@@ -6935,7 +6972,9 @@ function candidateAsset(candidate, payload, index) {
     originalFileUrl: originalSavedUrl,
     originalSavedPath,
     origin: "result",
-    description: `候选 ${index + 1} · ${payload.model || ""}`,
+    description: canViewExecutionDetails() && payload.model
+      ? `候选 ${index + 1} · ${payload.model}`
+      : `候选 ${index + 1}`,
     src: imageSource,
     logoOverlayApplied: Boolean(candidate.logo_overlay_applied),
   }
@@ -7246,13 +7285,19 @@ async function setResult(payload, durationMs, requestSource = null) {
         : payload.mode === "itinerary"
           ? "行程路线"
           : "生成"
-  const metaParts = [metaLabel, payload.model]
-  if (payload.transport === "responses-image") {
-    metaParts.push("Responses")
-  } else if (payload.transport === "images-edit") {
-    metaParts.push("Images Edit")
-  } else if (payload.transport === "images-generate") {
-    metaParts.push("Images Gen")
+  const metaParts = [metaLabel]
+  if (canViewExecutionDetails()) {
+    metaParts.push(payload.model)
+    if (payload.transport === "responses-image") {
+      metaParts.push("Responses")
+    } else if (payload.transport === "images-edit") {
+      metaParts.push("Images Edit")
+    } else if (payload.transport === "images-generate") {
+      metaParts.push("Images Gen")
+    }
+    if (payload.reasoning_effort) {
+      metaParts.push(`reasoning=${payload.reasoning_effort}`)
+    }
   }
   if (payload.logo_requested) {
     metaParts.push("6 人游 LOGO")
@@ -7317,9 +7362,17 @@ async function setResult(payload, durationMs, requestSource = null) {
 }
 
 function historySummary(item) {
-  const parts = [item.model]
-  if (item.transport === "responses-image") {
-    parts.push("Responses")
+  const parts = []
+  if (canViewExecutionDetails()) {
+    if (item.model) {
+      parts.push(item.model)
+    }
+    if (item.transport === "responses-image") {
+      parts.push("Responses")
+    }
+    if (item.reasoningEffort) {
+      parts.push(`reasoning=${item.reasoningEffort}`)
+    }
   }
   if (item.logoRequested) {
     parts.push("6 人游 LOGO")
@@ -7384,28 +7437,17 @@ function renderHistory() {
         refs.itineraryThemeSelect.value = item.itineraryTheme || refs.itineraryThemeSelect.value
         refs.itineraryDescriptionInput.value = item.itineraryDescription || item.prompt
         refs.itineraryLogoEnabled.checked = item.logoRequested !== false
-        refs.generateModelInput.value = item.model || refs.generateModelInput.value
         refs.itineraryDescriptionInput.focus()
       } else if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
-        if (item.transport === "responses-image") {
-          refs.responsesModelInput.value = item.model
-        } else {
-          refs.generateModelInput.value = item.model
-        }
         setGenerateSize(item.size || state.serverConfig.default_size || "1024x1024")
         updatePromptCounters()
         refs.generatePromptInput.focus()
       } else {
         setMode("edit")
         refs.editPromptInput.value = item.prompt
-        if (item.transport === "responses-image") {
-          refs.responsesModelInput.value = item.model
-        } else {
-          refs.editModelInput.value = item.model
-        }
         updatePromptCounters()
         refs.editPromptInput.focus()
       }
@@ -7593,7 +7635,7 @@ async function checkCopyrightRisk(payload) {
   const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setRiskPanel("未检查", `未填写 API Key，无法调用 ${DEFAULT_RESPONSES_MODEL} 做版权风险提醒。`)
+    setRiskPanel("未检查", `未填写 API Key，无法调用${executionReviewServiceLabel()}做版权风险提醒。`)
     return
   }
 
@@ -7634,16 +7676,18 @@ async function checkCopyrightRisk(payload) {
     : []
 
   if (!images.length) {
-    setRiskPanel("未检查", `当前结果没有可直接发送给 ${DEFAULT_RESPONSES_MODEL} 的图片数据。`)
+    setRiskPanel("未检查", `当前结果没有可直接发送给${executionReviewServiceLabel()}的图片数据。`)
     return
   }
 
-  setRiskPanel("检查中", `正在调用 ${DEFAULT_RESPONSES_MODEL} 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。`)
+  setRiskPanel("检查中", `正在调用${executionReviewServiceLabel()}查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。`)
   try {
     const result = await postJSONSilent("api/copyright-risk", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
+      api_key: canManageExecutionSettings() ? settings.apiKey || undefined : undefined,
+      endpoint_url: canManageExecutionSettings() ? settings.responsesUrl || undefined : undefined,
+      model: canManageExecutionSettings()
+        ? settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+        : undefined,
       prompt: payload.prompt || state.lastResultPrompt || "",
       context: [
         `模式：${payload.mode || ""}`,
@@ -7685,7 +7729,7 @@ async function checkTextFidelity(payload) {
   const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setTextFidelityPanel("未检查", `未填写 API Key，无法调用 ${DEFAULT_RESPONSES_MODEL} 做文字一致性检查。`)
+    setTextFidelityPanel("未检查", `未填写 API Key，无法调用${executionReviewServiceLabel()}做文字一致性检查。`)
     return
   }
 
@@ -7724,7 +7768,7 @@ async function checkTextFidelity(payload) {
     : []
 
   if (!images.length) {
-    setTextFidelityPanel("未检查", `当前结果没有可直接发送给 ${DEFAULT_RESPONSES_MODEL} 的图片数据。`)
+    setTextFidelityPanel("未检查", `当前结果没有可直接发送给${executionReviewServiceLabel()}的图片数据。`)
     return
   }
 
@@ -7754,9 +7798,11 @@ async function checkTextFidelity(payload) {
     : "正在核对成图中文字是否逐字匹配用户输入。")
   try {
     const result = await postJSONSilent("api/text-fidelity", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
+      api_key: canManageExecutionSettings() ? settings.apiKey || undefined : undefined,
+      endpoint_url: canManageExecutionSettings() ? settings.responsesUrl || undefined : undefined,
+      model: canManageExecutionSettings()
+        ? settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+        : undefined,
       prompt: fidelityPrompt,
       context: [
         `模式：${payload.mode || ""}`,
@@ -8251,16 +8297,11 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   let prompt = promptPlan.originalPrompt
   let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
   let confirmedPrompt = ""
   let imageOptions
   let size
-  let forceResponsesForSize = false
-  let model = imageModel
-  let transport = "images-edit"
 
   if (!state.lastResultImage) {
     appendDebugLine("参数校验失败：没有可延展的结果图")
@@ -8278,20 +8319,9 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   try {
     imageOptions = getOpenAIImageOptions()
     size = getGenerateSize()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
-    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
-    return
-  }
-
-  if (useResponses || forceResponsesForSize) {
-    if (!requireResponsesSettings(settings, forceResponsesForSize ? "基于当前结果延展的精确海报尺寸" : "基于当前结果延展")) {
-      return
-    }
-  } else if (!requireEditSettings(settings, "基于当前结果延展")) {
     return
   }
 
@@ -8320,7 +8350,6 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   previewPendingResult({
     mode: "variant",
     prompt,
-    model,
     size,
     sourceName: requestSource.name || "最新结果",
   })
@@ -8338,63 +8367,37 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       data_url: requestSourceDataUrl,
       role: "source_image",
     }
-    let result
-    if (useResponses || forceResponsesForSize) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      result = await postJSON("api/responses-image", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        model,
-        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
-        mode: "variant",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        ...sourceImageIdentityFields(requestSource),
-        size,
-        ...imageOptions,
-        image: imagePart,
-        images: [imagePart],
-      }, {
-        mode: "variant",
-        progressLabel: "提交延展请求",
-        waitingLabel: "等待上游延展",
-      })
-    } else {
-      result = await postJSON("api/edit", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt: confirmedPrompt,
-        model,
-        mode: "variant",
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        ...sourceImageIdentityFields(requestSource),
-        size,
-        ...imageOptions,
-        image: imagePart,
-        images: [imagePart],
-      }, {
-        mode: "variant",
-        progressLabel: "提交延展请求",
-        waitingLabel: "等待上游延展",
-      })
-    }
-    await setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSource)
+    const result = await postJSON("api/image-jobs", {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
+      mode: "variant",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      source_generated_image_id: sourceGeneratedImageId,
+      text_contract: textContract,
+      ...sourceImageIdentityFields(requestSource),
+      size,
+      ...imageOptions,
+      image: imagePart,
+      images: [imagePart],
+      advanced: imageJobAdvancedOptions(settings, "variant"),
+    }, {
+      mode: "variant",
+      progressLabel: "提交延展请求",
+      waitingLabel: "等待上游延展",
+    })
+    await setResult({ ...result, mode: "variant", prompt, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "variant",
       prompt,
-      model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -8432,8 +8435,6 @@ async function submitGenerate() {
   let prompt = promptPlan.originalPrompt
   let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const referenceImages = generateReferenceImages()
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
@@ -8441,10 +8442,6 @@ async function submitGenerate() {
   let baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
   let confirmedPrompt = ""
   const requiresReferenceTransport = referenceImages.length > 0
-  let forceResponsesForSize = false
-  let referenceViaResponses = useResponses
-  let textGenerateViaResponses = useResponses
-  let model = imageModel
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -8469,32 +8466,9 @@ async function submitGenerate() {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
     sampleCount = referenceImages.length ? 1 : getGenerateSampleCount()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    referenceViaResponses = useResponses || forceResponsesForSize
-    textGenerateViaResponses = useResponses || forceResponsesForSize
-    model = referenceImages.length && referenceViaResponses ? settings.responsesModel : imageModel
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
-    return
-  }
-
-  if (requiresReferenceTransport) {
-    if (referenceViaResponses) {
-      if (!requireResponsesSettings(settings, "带参考图生成")) {
-        return
-      }
-    } else if (!requireEditSettings(settings, "带参考图生成")) {
-      return
-    }
-  } else if (textGenerateViaResponses) {
-    if (!requireResponsesSettings(settings, "精确海报尺寸生成")) {
-      return
-    }
-  } else if (!settings.generateUrl) {
-    appendDebugLine("参数校验失败：生成接口 URL 为空")
-    setError("请先填写生成接口 URL。")
-    refs.generateUrlInput.focus()
     return
   }
 
@@ -8526,7 +8500,6 @@ async function submitGenerate() {
   previewPendingResult({
     mode: requiresReferenceTransport ? "reference" : "generate",
     prompt,
-    model,
     size,
     sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || "",
   })
@@ -8553,75 +8526,39 @@ async function submitGenerate() {
       const referencePart = requestParts.at(-1)
       const referenceLineageSource = requestSources.at(-1)
       const sourceGeneratedImageId = referenceLineageSource?.generatedImageId || null
-      const transport = referenceViaResponses ? "responses-image" : "images-edit"
       const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
-      let result
-      if (referenceViaResponses) {
-        if (forceResponsesForSize && !useResponses) {
-          appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-        }
-        result = await postJSON("api/responses-image", {
-          api_key: settings.apiKey,
-          endpoint_url: settings.responsesUrl,
-          prompt: confirmedPrompt,
-          original_prompt: prompt,
-          prompt_mode: promptPlan.promptMode,
-          recipe_id: promptPlan.recipe?.id || "",
-          recipe_version: promptPlan.recipe?.version || "",
-          model: settings.responsesModel,
-          responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
-          mode: "reference",
-          transport: "responses-image",
-          allow_inline_fallback: true,
-          logo_requested: logoRequested,
-          itinerary_id: itineraryId,
-          source_generated_image_id: sourceGeneratedImageId,
-          text_contract: textContract,
-          ...sourceImageIdentityFields(referenceLineageSource),
-          sample_count: referenceSampleCount,
-          size,
-          ...imageOptions,
-          image: referencePart,
-          images: requestParts,
-        }, {
-          mode: "reference",
-          progressLabel: "提交参考图生成",
-          waitingLabel: "等待上游参考生成",
-        })
-      } else {
-        result = await postJSON("api/edit", {
-          api_key: settings.apiKey,
-          endpoint_url: settings.editUrl,
-          prompt: confirmedPrompt,
-          original_prompt: prompt,
-          prompt_mode: promptPlan.promptMode,
-          recipe_id: promptPlan.recipe?.id || "",
-          recipe_version: promptPlan.recipe?.version || "",
-          model: imageModel,
-          mode: "reference",
-          logo_requested: logoRequested,
-          itinerary_id: itineraryId,
-          source_generated_image_id: sourceGeneratedImageId,
-          text_contract: textContract,
-          ...sourceImageIdentityFields(referenceLineageSource),
-          sample_count: referenceSampleCount,
-          size,
-          ...imageOptions,
-          image: referencePart,
-          images: requestParts,
-        }, {
-          mode: "reference",
-          progressLabel: "提交参考图生成",
-          waitingLabel: "等待上游参考生成",
-        })
-      }
-      await setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
+      const result = await postJSON("api/image-jobs", {
+        prompt: confirmedPrompt,
+        original_prompt: prompt,
+        prompt_mode: promptPlan.promptMode,
+        recipe_id: promptPlan.recipe?.id || "",
+        recipe_version: promptPlan.recipe?.version || "",
+        mode: "reference",
+        allow_inline_fallback: true,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
+        ...sourceImageIdentityFields(referenceLineageSource),
+        sample_count: referenceSampleCount,
+        size,
+        ...imageOptions,
+        image: referencePart,
+        images: requestParts,
+        advanced: imageJobAdvancedOptions(settings, "reference"),
+      }, {
+        mode: "reference",
+        progressLabel: "提交参考图生成",
+        waitingLabel: "等待上游参考生成",
+      })
+      await setResult({ ...result, mode: "reference", prompt, size, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
       rememberRegenerationRequest("generate", requestSnapshot)
       pushHistory({
         mode: "reference",
         prompt,
-        model: referenceViaResponses ? settings.responsesModel : imageModel,
-        transport,
+        model: result.model,
+        transport: result.transport,
+        reasoningEffort: result.reasoning_effort,
         logoRequested,
         itineraryId,
         sourceGeneratedImageId,
@@ -8634,66 +8571,34 @@ async function submitGenerate() {
       return
     }
 
-    let result
-    let transport = "images-generate"
-    if (textGenerateViaResponses) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      transport = "responses-image"
-      result = await postJSON("api/responses-image", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        original_prompt: prompt,
-        prompt_mode: promptPlan.promptMode,
-        recipe_id: promptPlan.recipe?.id || "",
-        recipe_version: promptPlan.recipe?.version || "",
-        model: settings.responsesModel,
-        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
-        mode: "generate",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        text_contract: textContract,
-        sample_count: sampleCount,
-        size,
-        ...imageOptions,
-      }, {
-        mode: "generate",
-        progressLabel: "提交 Responses 生成请求",
-        waitingLabel: "等待 Responses 图像流",
-      })
-    } else {
-      result = await postJSON("api/generate", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.generateUrl,
-        prompt: confirmedPrompt,
-        original_prompt: prompt,
-        prompt_mode: promptPlan.promptMode,
-        recipe_id: promptPlan.recipe?.id || "",
-        recipe_version: promptPlan.recipe?.version || "",
-        model,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        text_contract: textContract,
-        sample_count: sampleCount,
-        size,
-        ...imageOptions,
-      }, {
-        mode: "generate",
-        progressLabel: "提交生成请求",
-        waitingLabel: "等待上游生成",
-      })
-    }
+    const result = await postJSON("api/image-jobs", {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
+      mode: "generate",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      text_contract: textContract,
+      sample_count: sampleCount,
+      size,
+      ...imageOptions,
+      advanced: imageJobAdvancedOptions(settings, "generate"),
+    }, {
+      mode: "generate",
+      progressLabel: "提交生成请求",
+      waitingLabel: "等待图像生成",
+    })
     await setResult({ ...result, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
       prompt,
-      model: textGenerateViaResponses ? settings.responsesModel : model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -8722,16 +8627,11 @@ async function submitEdit() {
   resetDebugLog("点击编辑按钮：编辑图片")
   let prompt = refs.editPromptInput.value
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
   let confirmedPrompt = ""
   let size
   let imageOptions
-  let forceResponsesForSize = false
-  let model = imageModel
-  let transport = "images-edit"
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -8749,20 +8649,9 @@ async function submitEdit() {
   try {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
-    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
   } catch (error) {
     appendDebugLine("参数校验失败：编辑图片参数无效", { error: error.message })
     setError(error.message, error.details)
-    return
-  }
-
-  if (useResponses || forceResponsesForSize) {
-    if (!requireResponsesSettings(settings, forceResponsesForSize ? "精确海报尺寸编辑" : "编辑图像")) {
-      return
-    }
-  } else if (!requireEditSettings(settings, "编辑图像")) {
     return
   }
 
@@ -8787,7 +8676,6 @@ async function submitEdit() {
   previewPendingResult({
     mode: "edit",
     prompt,
-    model,
     size,
     sourceName: requestSource.name || "输入图",
   })
@@ -8818,71 +8706,38 @@ async function submitEdit() {
       }
     }
 
-    let result
-    if (useResponses || forceResponsesForSize) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸编辑改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      const requestPayload = {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        model,
-        responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
-        mode: "edit",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        size,
-        ...imageOptions,
-        ...sourceImageIdentityFields(requestSource),
-        image: imagePart,
-        images: [imagePart],
-      }
-      if (maskPart) {
-        requestPayload.mask = maskPart
-      }
-      result = await postJSON("api/responses-image", requestPayload, {
-        mode: "edit",
-        progressLabel: "提交 Responses 编辑请求",
-        waitingLabel: "等待 Responses 图像流",
-      })
-    } else {
-      const requestPayload = {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt: confirmedPrompt,
-        model: imageModel,
-        mode: "edit",
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        size,
-        ...imageOptions,
-        ...sourceImageIdentityFields(requestSource),
-        image: imagePart,
-        images: [imagePart],
-      }
-      if (maskPart) {
-        requestPayload.mask = maskPart
-      }
-      result = await postJSON("api/edit", requestPayload, {
-        mode: "edit",
-        progressLabel: "提交编辑请求",
-        waitingLabel: "等待上游编辑",
-      })
+    const requestPayload = {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      mode: "edit",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      source_generated_image_id: sourceGeneratedImageId,
+      text_contract: textContract,
+      size,
+      ...imageOptions,
+      ...sourceImageIdentityFields(requestSource),
+      image: imagePart,
+      images: [imagePart],
+      advanced: imageJobAdvancedOptions(settings, "edit"),
     }
-    await setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested, size, text_contract: textContract }, performance.now() - startedAt, requestSource)
+    if (maskPart) {
+      requestPayload.mask = maskPart
+    }
+    const result = await postJSON("api/image-jobs", requestPayload, {
+      mode: "edit",
+      progressLabel: "提交编辑请求",
+      waitingLabel: "等待图像编辑",
+    })
+    await setResult({ ...result, mode: "edit", prompt, logo_requested: logoRequested, size, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("edit", requestSnapshot)
     pushHistory({
       mode: "edit",
       prompt,
-      model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -9116,6 +8971,7 @@ function bindEvents() {
       scheduleWorkspacePersist()
     })
   })
+  refs.responsesReasoningEffortSelect?.addEventListener("change", scheduleWorkspacePersist)
   refs.clearHistoryButton.addEventListener("click", () => {
     state.history = []
     saveJSON(historyStorageKey(), state.history)

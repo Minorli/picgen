@@ -10,7 +10,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.51"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.52"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -31,7 +31,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.51"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.52"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "expandLogoSafetyRegion" in placement_js
@@ -80,6 +80,53 @@ def test_generate_sample_count_ui_is_not_disabled_by_logo_overlay() -> None:
     assert "referenceImages.length ? 1 : getGenerateSampleCount()" in app_js
     assert "logoRequested || hasReference || isVariant" not in app_js
     assert "sample_count: sampleCount" in app_js
+
+
+def test_model_controls_are_admin_only_and_generation_uses_unified_endpoint() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+    generate_controls = index_html.split('<section class="studio-block model-block">', 1)[1].split(
+        "</section>", 1
+    )[0]
+    edit_controls = index_html.split('<section id="editPanel"', 1)[1].split(
+        '<section id="itineraryPanel"', 1
+    )[0]
+    connection_settings = index_html.split('<section id="connectionSettings"', 1)[1].split(
+        '<div class="feedback-strip">', 1
+    )[0]
+
+    assert 'id="generateModelInput"' not in generate_controls
+    assert 'id="editModelInput"' not in edit_controls
+    assert 'class="studio-card settings-drawer hidden"' in index_html
+    assert 'id="connectionSettingsLink"' in index_html
+    assert 'id="generateModelInput"' in connection_settings
+    assert 'id="editModelInput"' in connection_settings
+    assert 'id="responsesModelInput"' in connection_settings
+    assert 'id="responsesReasoningEffortSelect"' in connection_settings
+    assert 'value="max" selected' in connection_settings
+
+    assert 'postJSON("api/generate"' not in app_js
+    assert 'postJSON("api/edit"' not in app_js
+    assert 'postJSON("api/responses-image"' not in app_js
+    assert app_js.count('postJSON("api/image-jobs"') >= 3
+    assert "imageJobAdvancedOptions" in app_js
+    assert 'refs.connectionSettings?.classList.toggle("hidden", !canManageExecution)' in app_js
+    assert 'refs.connectionSettingsLink?.classList.toggle("hidden", !canManageExecution)' in app_js
+    assert 'state.serverConfig?.allow_anonymous_execution_overrides === true' in app_js
+    assert 'refs.debugOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)' in app_js
+    assert 'refs.rawResponseOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)' in app_js
+    assert "job.transport" in app_js
+    assert "job.model" in app_js
+    assert "job.reasoning_effort" in app_js
+
+
+def test_mobile_user_identity_stays_on_one_line() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert ".topbar-tools {\n    width: 100%;" in styles_css
+    assert ".user-pill {\n    flex: 0 1 180px;\n    min-width: 150px;" in styles_css
+    assert ".user-pill strong {\n    white-space: nowrap;" in styles_css
 
 
 def test_auth_overlay_supports_open_registration_and_cookie_sessions() -> None:
@@ -153,7 +200,8 @@ def test_image_quality_defaults_to_high_without_unsupported_xhigh() -> None:
     assert 'refs.qualitySelect.value = forms.quality || "high"' in app_js
     assert 'quality: refs.qualitySelect.value || "high"' in app_js
     assert 'refs.qualitySelect.value = snapshot.quality || "high"' in app_js
-    assert 'value="xhigh"' not in index_html
+    quality_select = index_html.split('<select id="qualitySelect">', 1)[1].split("</select>", 1)[0]
+    assert 'value="xhigh"' not in quality_select
     assert '"xhigh"' not in app_js
 
 
@@ -348,8 +396,10 @@ def test_edit_requests_send_selected_size_and_quality_for_strict_poster_edits() 
     submit_block = app_js[submit_start:submit_end]
     assert "size = getGenerateSize()" in submit_block
     assert "imageOptions = getOpenAIImageOptions()" in submit_block
-    assert "forceResponsesForSize = shouldUseResponsesForSelectedSize(size)" in submit_block
-    assert 'transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"' in submit_block
+    assert 'postJSON("api/image-jobs", requestPayload' in submit_block
+    assert "shouldUseResponsesForSelectedSize" not in submit_block
+    assert 'postJSON("api/responses-image"' not in submit_block
+    assert 'postJSON("api/edit"' not in submit_block
     assert "size," in submit_block
     assert "...imageOptions" in submit_block
     assert "mode: \"edit\"" in submit_block
@@ -565,9 +615,9 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert 'mode: "itinerary"' in itinerary_submit_block
     assert 'if (selectedSize === "auto")' in app_js
     assert "composition?.message" in app_js
-    assert "api_key: settings.apiKey" in itinerary_submit_block
-    assert "endpoint_url: settings.responsesUrl" in itinerary_submit_block
-    assert "model: itineraryModel" in itinerary_submit_block
+    assert "api_key: canOverrideExecution ? settings.apiKey || undefined : undefined" in itinerary_submit_block
+    assert "endpoint_url: settings.responsesUrl" not in itinerary_submit_block
+    assert "model: canOverrideExecution ? itineraryModel : undefined" in itinerary_submit_block
     assert "generate_background: true" in itinerary_submit_block
     assert "logo_requested: logoRequested" in itinerary_submit_block
     assert "logo_requested: true" not in itinerary_submit_block
@@ -703,21 +753,17 @@ def test_generation_post_helpers_only_send_local_auth_401_to_login_gate() -> Non
     assert 'response.status === 401 && data?.code === "unauthorized"' in app_js
 
 
-def test_nonstandard_poster_sizes_use_responses_generation_instead_of_images_api() -> None:
+def test_poster_size_routing_is_owned_by_the_unified_backend_endpoint() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     submit_generate_block = app_js[
         app_js.index("async function submitGenerate()") : app_js.index("async function submitEdit()")
     ]
 
-    assert "IMAGES_API_EXACT_SIZES" in app_js
-    assert 'new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])' in app_js
-    assert "shouldUseResponsesForSelectedSize(size)" in submit_generate_block
-    assert "forceResponsesForSize = shouldUseResponsesForSelectedSize(size)" in submit_generate_block
-    assert "referenceViaResponses = useResponses || forceResponsesForSize" in submit_generate_block
-    assert "textGenerateViaResponses = useResponses || forceResponsesForSize" in submit_generate_block
-    assert "非标准海报尺寸改走 Responses 图像工具" in submit_generate_block
-    assert 'result = await postJSON("api/responses-image"' in submit_generate_block
-    assert 'transport: "responses-image"' in submit_generate_block
+    assert "IMAGES_API_EXACT_SIZES" not in app_js
+    assert "shouldUseResponsesForSelectedSize" not in app_js
+    assert 'postJSON("api/image-jobs"' in submit_generate_block
+    assert 'postJSON("api/responses-image"' not in submit_generate_block
+    assert 'postJSON("api/generate"' not in submit_generate_block
     assert 'mode: "generate"' in submit_generate_block
     assert "size," in submit_generate_block
 

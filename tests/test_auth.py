@@ -1579,7 +1579,7 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     assert fetched_response.json()["preferences"] == preferences
 
 
-def test_legacy_gpt55_preference_is_migrated_again_from_schema_v11_once(tmp_path: Path) -> None:
+def test_schema_v13_adds_execution_metadata_and_migrates_legacy_preference_once(tmp_path: Path) -> None:
     from picgen.auth import AuthStore
 
     db_path = tmp_path / "auth.sqlite3"
@@ -1592,10 +1592,10 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v11_once(tmp_path
         default_size="1088x2240",
     )
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM schema_migrations WHERE version = 12")
+        conn.execute("DELETE FROM schema_migrations WHERE version = 13")
         conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (11, ?, ?)",
-            ("gpt_5_6_sol_preferences_v4", "2026-07-10T00:00:00+00:00"),
+            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (12, ?, ?)",
+            ("gpt_5_6_sol_preferences_workspace", "2026-07-10T00:00:00+00:00"),
         )
 
     migrated = AuthStore(db_path)
@@ -1603,9 +1603,13 @@ def test_legacy_gpt55_preference_is_migrated_again_from_schema_v11_once(tmp_path
     assert migrated.get_user_preferences(user_id=user.id)["default_responses_model"] == "gpt-5.6-sol"
     with sqlite3.connect(db_path) as conn:
         migration = conn.execute(
-            "SELECT name FROM schema_migrations WHERE version = 12"
+            "SELECT name FROM schema_migrations WHERE version = 13"
         ).fetchone()
-    assert migration == ("gpt_5_6_sol_preferences_workspace",)
+        job_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()
+        }
+    assert migration == ("image_job_execution_metadata",)
+    assert "reasoning_effort" in job_columns
 
     migrated.update_user_preferences(
         user_id=user.id,

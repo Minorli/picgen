@@ -80,6 +80,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     assert payload["responses_url"] == "https://sub.tidba.com/v1/responses"
     assert payload["default_responses_model"] == "gpt-5.6-sol"
     assert payload["default_size"] == "1088x2240"
+    assert payload["allow_anonymous_execution_overrides"] is True
     assert "sk-secret" not in response.text
     assert "123:abc" not in response.text
     assert "-100123456" not in response.text
@@ -1043,8 +1044,9 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert fake.run_file_upload.await_args.args[2]["filename"] == "itinerary-geometry-control.png"
     assert fake.run_file_upload.await_args.args[2]["content_type"] == "image/png"
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "custom-responses-model"
-    assert "reasoning" not in upstream_payload
+    assert fake.run_responses.await_args.args[1] == "sk-test"
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "max"}
     assert upstream_payload["tools"][0]["size"] == "1792x1792"
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -1447,8 +1449,8 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
     assert payload["plan"]["stops"][1]["lng"] == 12.4964
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "custom-coordinate-model"
-    assert "reasoning" not in upstream_payload
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "max"}
     assert "可解析 JSON" in upstream_payload["instructions"]
     assert "经纬度" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]

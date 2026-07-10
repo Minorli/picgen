@@ -202,6 +202,10 @@ def test_size_mismatch_retry_defaults_to_disabled() -> None:
     assert Settings(_env_file=None).size_mismatch_max_retries == 0
 
 
+def test_anonymous_execution_overrides_are_disabled_by_default() -> None:
+    assert Settings(_env_file=None).allow_anonymous_execution_overrides is False
+
+
 def _generate_poster(client, size="1088x2240"):
     return client.post(
         "/api/generate",
