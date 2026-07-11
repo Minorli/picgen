@@ -243,6 +243,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in {"/api/health", "/api/ready", "/api/config"}:
             return await call_next(request)
         client_key = self._client_key(request)
+        uses_burst_limit = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
         now = time.monotonic()
         async with self._lock:
             if now - self._last_sweep >= 60.0:
@@ -252,7 +253,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             burst_bucket = self._burst_buckets.setdefault(client_key, deque())
             self._evict(minute_bucket, now - 60.0)
             self._evict(burst_bucket, now - 5.0)
-            if len(minute_bucket) >= self.per_minute or (self.burst > 0 and len(burst_bucket) >= self.burst):
+            if len(minute_bucket) >= self.per_minute or (
+                uses_burst_limit and self.burst > 0 and len(burst_bucket) >= self.burst
+            ):
                 retry_after = 5
                 if len(minute_bucket) >= self.per_minute and minute_bucket:
                     # The minute window is what's exhausted — tell the client
@@ -275,7 +278,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     extra_headers={"Retry-After": str(retry_after)},
                 )
             minute_bucket.append(now)
-            burst_bucket.append(now)
+            if uses_burst_limit:
+                burst_bucket.append(now)
         return await call_next(request)
 
 
