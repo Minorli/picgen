@@ -5441,6 +5441,16 @@ body.ui-simple-mode .generation-overlay-copy span {
   display: none;
 }
 
+.result-size-warning {
+  display: none;
+  margin: var(--ux-space-3);
+  overflow-wrap: anywhere;
+}
+
+.result-size-warning:not(.hidden) {
+  display: flex;
+}
+
 body.ui-simple-mode #resultActions {
   position: relative;
   grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr)) auto;
