@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from . import __version__
 from .auth import (
     TEAM_CHAT_BOT_NAME,
     AccountLockedError,
+    AuthSession,
     AuthStore,
     AuthUser,
     InvalidCredentialsError,
@@ -101,11 +103,13 @@ from .schemas import (
     ReadinessResponse,
     ResponsesImageRequest,
     ShareResultRequest,
+    SimpleChecklistPreferenceRequest,
     TeamChatMessageRequest,
     TeamChatReadRequest,
     TextFidelityRequest,
     UserPreferencesRequest,
     UserProfileRequest,
+    UserUiModeRequest,
 )
 from .storage import (
     MAX_EXACT_IMAGE_PIXELS,
@@ -138,6 +142,17 @@ _ITINERARY_ID_RE = re.compile(
 def _strict_requested_size(size: str | None) -> bool:
     cleaned = (size or "").strip()
     return bool(cleaned and cleaned != "auto")
+
+
+def _details_text(payload: object) -> str:
+    # APIError.details 是 str：直接塞 dict 会以 Python repr 展示给用户，
+    # 也绕过其它错误路径统一的 4000 字截断。
+    if isinstance(payload, str):
+        return payload[:4000]
+    try:
+        return json.dumps(payload, ensure_ascii=False)[:4000]
+    except (TypeError, ValueError):
+        return repr(payload)[:4000]
 
 
 def _parse_requested_size(size: Any) -> tuple[int, int] | None:
@@ -605,10 +620,9 @@ async def require_admin_user(user: AuthUser | None = Depends(require_current_use
 def _auth_response(
     *,
     settings: Settings,
-    auth_store: AuthStore,
     user: AuthUser,
+    session: AuthSession,
 ) -> JSONResponse:
-    session = auth_store.create_session(user.id, days=settings.auth_session_days)
     response = JSONResponse({"status": "ok", "user": user.public_dict()})
     response.set_cookie(
         key=settings.auth_cookie_name,
@@ -669,7 +683,7 @@ def _save_user_avatar(
     avatar_dir = settings.data_dir / "avatars"
     avatar_dir.mkdir(parents=True, exist_ok=True)
     prefix = sanitize_filename_prefix(user.username) or f"user-{user.id}"
-    avatar_path = avatar_dir / f"{prefix}-{user.id}{extension_for_mime(image_mime)}"
+    avatar_path = avatar_dir / f"{prefix}-{user.id}-{uuid.uuid4().hex[:12]}{extension_for_mime(image_mime)}"
     fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=avatar_path.suffix, dir=str(avatar_dir))
     temporary_path = Path(tmp_name)
     try:
@@ -682,6 +696,20 @@ def _save_user_avatar(
         temporary_path.unlink(missing_ok=True)
         raise
     return avatar_path, storage_url_for_path(settings.data_dir, avatar_path)
+
+
+def _delete_previous_user_avatar(*, settings: Settings, previous_path: str, new_path: Path) -> None:
+    if not previous_path:
+        return
+    avatar_dir = (settings.data_dir / "avatars").resolve()
+    candidate_path = Path(previous_path)
+    try:
+        resolved_previous = candidate_path.resolve()
+        resolved_previous.relative_to(avatar_dir)
+    except (OSError, ValueError):
+        return
+    if resolved_previous != new_path.resolve():
+        resolved_previous.unlink(missing_ok=True)
 
 
 def _map_geocoding_enabled(settings: Settings) -> bool:
@@ -700,9 +728,10 @@ def _parse_itinerary_size(value: str) -> tuple[int, int]:
     cleaned = (value or ITINERARY_DEFAULT_SIZE).strip() or ITINERARY_DEFAULT_SIZE
     if cleaned.casefold() == ITINERARY_AUTO_SIZE:
         cleaned = ITINERARY_DEFAULT_SIZE
+    cleaned = cleaned.lower()
     if "x" not in cleaned:
         raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸无效", code="invalid_parameter")
-    width_text, height_text = cleaned.lower().split("x", 1)
+    width_text, height_text = cleaned.split("x", 1)
     try:
         width = int(width_text)
         height = int(height_text)
@@ -899,7 +928,11 @@ def _error_mentions_sample_count(exc: APIError) -> bool:
         "param n",
         "value of n",
         "n must",
-        "sample",
+        # 裸 "sample" 会命中 "flagged sample" 这类审核文案，触发一次注定
+        # 失败的全价重试；只认真正指参数名的写法。
+        "sample_count",
+        "sample count",
+        "samples",
         "best_of",
         "num_images",
         "n_images",
@@ -1340,7 +1373,7 @@ async def _generate_itinerary_artwork(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "路线图生成接口没有返回可保存的图片",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_no_image",
         )
     image_mime = str(saved.get("saved_image_mime") or "")
@@ -1358,7 +1391,7 @@ async def _generate_itinerary_artwork(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "路线图生成接口没有返回可用的底图",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_error",
         )
 
@@ -1802,6 +1835,7 @@ def create_router() -> APIRouter:
             rate_limit_per_minute=settings.rate_limit_per_minute,
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             auth_enabled=settings.auth_enabled,
+            self_registration_enabled=settings.self_registration_enabled,
             allow_anonymous_execution_overrides=settings.allow_anonymous_execution_overrides,
             bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
@@ -1865,16 +1899,29 @@ def create_router() -> APIRouter:
         target_path = _resolve_served_file(settings, relative_path)
         if not target_path.is_file():
             raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
-        if settings.auth_enabled and relative_path.startswith("outputs/") and target_path.suffix.lower() != ".json":
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.record_image_delivery(
+        if settings.auth_enabled and relative_path.startswith("outputs/"):
+            if user is None:  # pragma: no cover - require_current_user enforces this
+                raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
+            authorized = await anyio.to_thread.run_sync(
+                lambda: auth_store.can_user_access_output(
+                    user_id=user.id,
+                    is_admin=user.is_admin,
                     relative_path=relative_path,
-                    user_id=user.id if user else None,
-                    status_code=200,
-                    client_host=request.client.host if request.client else "",
-                    user_agent=request.headers.get("user-agent", ""),
+                    absolute_path=target_path,
                 )
             )
+            if not authorized:
+                raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
+            if target_path.suffix.lower() != ".json":
+                await anyio.to_thread.run_sync(
+                    lambda: auth_store.record_image_delivery(
+                        relative_path=relative_path,
+                        user_id=user.id,
+                        status_code=200,
+                        client_host=request.client.host if request.client else "",
+                        user_agent=request.headers.get("user-agent", ""),
+                    )
+                )
         # Output filenames embed a UUID, so they are safely immutable. Avatar
         # filenames are deterministic per user (same URL after re-upload) — an
         # immutable year-long cache would show the old avatar forever.
@@ -1893,17 +1940,24 @@ def create_router() -> APIRouter:
         settings: Settings = Depends(get_settings),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> JSONResponse:
+        if not settings.self_registration_enabled:
+            raise APIError(
+                HTTPStatus.FORBIDDEN,
+                "当前不开放自助注册，请联系管理员创建账号。",
+                code="registration_disabled",
+            )
         payload = _ensure_dict(body)
         parsed = _validate_request(AuthRequest, payload)
         try:
             normalize_username(parsed.username)
             _ensure_self_service_username_allowed(parsed.username, settings)
-            user = await anyio.to_thread.run_sync(
-                lambda: auth_store.create_user(
+            user, session = await anyio.to_thread.run_sync(
+                lambda: auth_store.create_user_and_session(
                     parsed.username,
                     parsed.password,
-                    company=parsed.company,
-                    department=parsed.department,
+                    days=settings.auth_session_days,
+                    company="",
+                    department="",
                 )
             )
         except UserExistsError as exc:
@@ -1911,7 +1965,7 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
         return await anyio.to_thread.run_sync(
-            lambda: _auth_response(settings=settings, auth_store=auth_store, user=user)
+            lambda: _auth_response(settings=settings, user=user, session=session)
         )
 
     @router.post("/api/auth/login")
@@ -1925,7 +1979,13 @@ def create_router() -> APIRouter:
         parsed = _validate_request(AuthRequest, payload)
         await _ensure_admin_bootstrap(request, settings, auth_store)
         try:
-            user = await anyio.to_thread.run_sync(auth_store.authenticate, parsed.username, parsed.password)
+            user, session = await anyio.to_thread.run_sync(
+                lambda: auth_store.authenticate_and_create_session(
+                    parsed.username,
+                    parsed.password,
+                    days=settings.auth_session_days,
+                )
+            )
         except AccountLockedError as exc:
             raise APIError(
                 HTTPStatus.TOO_MANY_REQUESTS,
@@ -1935,7 +1995,7 @@ def create_router() -> APIRouter:
         except (InvalidCredentialsError, ValueError) as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, "用户名或密码错误", code="invalid_credentials") from exc
         return await anyio.to_thread.run_sync(
-            lambda: _auth_response(settings=settings, auth_store=auth_store, user=user)
+            lambda: _auth_response(settings=settings, user=user, session=session)
         )
 
     @router.post("/api/password-reset-requests")
@@ -2001,6 +2061,7 @@ def create_router() -> APIRouter:
                 else:
                     reset_notification_info = _safe_admin_reset_request_info(reset_request)
             if not email_sent:
+                reset_notification_info = _safe_admin_reset_request_info(reset_request)
                 _spawn_notification_task(
                     _notify_password_reset_request(settings, reset_notification_info)
                 )
@@ -2108,8 +2169,8 @@ def create_router() -> APIRouter:
                     phone_country_code=parsed.phone_country_code,
                     phone=parsed.phone,
                     email=parsed.email,
-                    company=parsed.company,
-                    department=parsed.department,
+                    company=user.company,
+                    department=user.department,
                     team=parsed.team,
                     job_title=parsed.job_title,
                     note=parsed.note,
@@ -2152,15 +2213,23 @@ def create_router() -> APIRouter:
                 image_mime=image_mime,
             )
         )
-        updated_user = await anyio.to_thread.run_sync(
-            lambda: auth_store.update_user_avatar(
+        updated_user, previous_avatar_path = await anyio.to_thread.run_sync(
+            lambda: auth_store.replace_user_avatar(
                 user_id=user.id,
                 avatar_path=str(avatar_path),
                 avatar_url=avatar_url,
             )
         )
         if updated_user is None:
+            avatar_path.unlink(missing_ok=True)
             raise APIError(HTTPStatus.NOT_FOUND, "用户不存在", code="not_found")
+        await anyio.to_thread.run_sync(
+            lambda: _delete_previous_user_avatar(
+                settings=settings,
+                previous_path=previous_avatar_path,
+                new_path=avatar_path,
+            )
+        )
         return {"status": "ok", "user": updated_user.public_dict()}
 
     @router.get("/api/preferences")
@@ -2184,6 +2253,7 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(UserPreferencesRequest, payload)
+        explicit_fields = parsed.model_fields_set
         responses_model = _normalize_responses_model(
             parsed.default_responses_model,
             default_model=settings.default_responses_model,
@@ -2199,7 +2269,44 @@ def create_router() -> APIRouter:
                 default_image_transport=parsed.default_image_transport,
                 logo_overlay_enabled=parsed.logo_overlay_enabled,
                 auto_copyright_check_enabled=parsed.auto_copyright_check_enabled,
+                simple_checklist_completed=(
+                    parsed.simple_checklist_completed
+                    if "simple_checklist_completed" in explicit_fields
+                    else None
+                ),
+                ui_mode=parsed.ui_mode if "ui_mode" in explicit_fields else None,
             )
+        )
+        return {"status": "ok", "preferences": preferences}
+
+    @router.patch("/api/preferences/simple-checklist")
+    async def update_simple_checklist_preference(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        parsed = _validate_request(SimpleChecklistPreferenceRequest, _ensure_dict(body))
+        preferences = await anyio.to_thread.run_sync(
+            lambda: auth_store.update_user_preferences(
+                user_id=user.id,
+                simple_checklist_completed=parsed.completed,
+            )
+        )
+        return {"status": "ok", "preferences": preferences}
+
+    @router.patch("/api/preferences/ui-mode")
+    async def update_ui_mode_preference(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        parsed = _validate_request(UserUiModeRequest, _ensure_dict(body))
+        preferences = await anyio.to_thread.run_sync(
+            lambda: auth_store.update_user_preferences(user_id=user.id, ui_mode=parsed.ui_mode)
         )
         return {"status": "ok", "preferences": preferences}
 
@@ -2227,6 +2334,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/org-units")
     async def public_org_units(
+        _user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
         org_units = await anyio.to_thread.run_sync(auth_store.list_organization_units)
@@ -2786,6 +2894,9 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(BugReportRequest, payload)
+        notification_configured = error_alert_notifications_enabled(settings) or bool(
+            settings.bug_report_webhook_url.strip()
+        )
         try:
             report = await anyio.to_thread.run_sync(
                 lambda: auth_store.record_bug_report(
@@ -2795,20 +2906,70 @@ def create_router() -> APIRouter:
                     contact=parsed.contact,
                     page_url=parsed.page_url,
                     user_agent=request.headers.get("user-agent", ""),
+                    notification_status="pending" if notification_configured else "not_configured",
                 )
             )
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
-        notification = await send_bug_report_notification(settings=settings, report=report, username=user.username)
-        if notification.status != report["notification_status"]:
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.update_bug_report_notification_status(report["id"], notification.status)
-            )
-            report = {**report, "notification_status": notification.status}
+        # 通知走后台：Telegram 不可达时重试+超时最坏要卡 ~48s，不能让
+        # 用户的提交按钮等它；结果状态由 update_bug_report_notification_status
+        # 异步补写，前端对缺失 notification 字段有兜底文案。
+        report_id = report["id"]
+        report_username = user.username
+
+        async def _notify_bug_report() -> None:
+            notification_status = report["notification_status"]
+            try:
+                try:
+                    notification = await send_bug_report_notification(
+                        settings=settings, report=report, username=report_username
+                    )
+                    notification_status = notification.status
+                except Exception as exc:
+                    notification_status = "failed"
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "bug_report_notification_failed",
+                        report_id=report_id,
+                        error=type(exc).__name__,
+                        message=redact_sensitive_text(str(exc), limit=300),
+                    )
+                if notification_status != report["notification_status"]:
+                    await anyio.to_thread.run_sync(
+                        lambda: auth_store.update_bug_report_notification_status(report_id, notification_status)
+                    )
+            except asyncio.CancelledError:
+                # Cancellation can arrive while the terminal status is being
+                # offloaded, after the external notification already completed.
+                # Persist synchronously during shutdown so it cannot remain pending.
+                cancelled_status = (
+                    notification_status
+                    if notification_status != report["notification_status"]
+                    else "cancelled"
+                )
+                try:
+                    auth_store.update_bug_report_notification_status(report_id, cancelled_status)
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "bug_report_notification_cancel_record_failed",
+                        report_id=report_id,
+                        error=type(exc).__name__,
+                    )
+                raise
+
+        _spawn_notification_task(_notify_bug_report())
         return {
             "status": "ok",
             "report": report,
-            "notification": notification.public_dict(),
+            "notification": {
+                "configured": admin_notifications_enabled(settings),
+                "sent": False,
+                "status": report["notification_status"],
+                "error": "",
+            },
         }
 
     @router.get("/api/bug-reports")
@@ -4144,6 +4305,24 @@ def _should_send_generation_success_alert(alert: GenerationSuccessAlert) -> bool
 _notification_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _notification_task_done(task: asyncio.Task[Any]) -> None:
+    _notification_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        log_event(
+            logger,
+            logging.ERROR,
+            "notification_task_failed",
+            error=type(error).__name__,
+            message=redact_sensitive_text(str(error), limit=300),
+        )
+
+
 def _spawn_notification_task(coro: Coroutine[Any, Any, Any]) -> None:
     """Send a notification off the request path.
 
@@ -4155,7 +4334,19 @@ def _spawn_notification_task(coro: Coroutine[Any, Any, Any]) -> None:
 
     task = asyncio.create_task(coro)
     _notification_tasks.add(task)
-    task.add_done_callback(_notification_tasks.discard)
+    task.add_done_callback(_notification_task_done)
+
+
+async def drain_notification_tasks(timeout_seconds: float = 5.0) -> None:
+    current_loop = asyncio.get_running_loop()
+    tasks = [task for task in _notification_tasks if task.get_loop() is current_loop and not task.done()]
+    if not tasks:
+        return
+    _done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout_seconds))
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _send_generation_success_alert(settings: Settings, alert: GenerationSuccessAlert) -> None:
@@ -4207,32 +4398,39 @@ async def _run_handler_until_client_disconnect(
         return await handler(body, settings, client, user)
 
     result: dict[str, Any] | None = None
-    error: BaseException | None = None
+    handler_error: BaseException | None = None
+    disconnect_error: APIError | None = None
 
     async def _run_handler() -> None:
-        nonlocal result, error
+        nonlocal result, handler_error
         try:
             result = await handler(body, settings, client, user)
         except Exception as exc:
-            error = exc
+            handler_error = exc
 
     async def _watch_disconnect() -> None:
-        nonlocal error
+        nonlocal disconnect_error
         try:
             await _raise_if_client_disconnects(request)
         except APIError as exc:
-            error = exc
+            disconnect_error = exc
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_run_handler)
         task_group.start_soon(_watch_disconnect)
-        while result is None and error is None:
+        while result is None and handler_error is None and disconnect_error is None:
             await anyio.sleep(0.05)
         task_group.cancel_scope.cancel()
 
-    if error is not None:
-        raise error
-    return result or {}
+    # 结果优先：生成完成和"断线"落在同一个轮询窗口时，这张图已经付费
+    # 并落盘，宁可返回给一个可能已离开的客户端，也不能把它记成 499 丢掉。
+    if result is not None:
+        return result
+    if handler_error is not None:
+        raise handler_error
+    if disconnect_error is not None:
+        raise disconnect_error
+    return {}
 
 
 async def _with_timing(
@@ -4872,23 +5070,90 @@ async def _finalize_image_response(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "图片生成接口这次没有返回图片，请稍后重试。",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_no_image",
         )
     _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
 
 
-def _saved_pixel_count(saved: dict[str, Any]) -> int:
-    total = 0
+def _saved_dimensions(saved: dict[str, Any]) -> tuple[int, int] | None:
     images = saved.get("images")
     for image in images if isinstance(images, list) else []:
         if isinstance(image, dict):
             width = image.get("saved_image_width")
             height = image.get("saved_image_height")
-            if isinstance(width, int) and isinstance(height, int):
-                total += width * height
-    return total
+            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                return width, height
+    return None
+
+
+def _upstream_dimensions(saved: dict[str, Any]) -> tuple[int, int] | None:
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        width = image.get("upstream_image_width")
+        height = image.get("upstream_image_height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            return width, height
+    return _saved_dimensions(saved)
+
+
+def _requires_size_retry(saved: dict[str, Any], target_size: tuple[int, int] | None) -> bool:
+    dimensions = _upstream_dimensions(saved)
+    if target_size is None or dimensions is None:
+        return bool(saved.get("size_mismatch"))
+    return dimensions != target_size
+
+
+def _size_mismatch_score(saved: dict[str, Any], target_size: tuple[int, int] | None) -> tuple[float, float, int]:
+    dimensions = _upstream_dimensions(saved)
+    if dimensions is None:
+        return math.inf, math.inf, 0
+    width, height = dimensions
+    pixels = width * height
+    if target_size is None:
+        return math.inf, math.inf, -pixels
+    target_width, target_height = target_size
+    aspect_delta = abs((width / height) - (target_width / target_height)) / (target_width / target_height)
+    dimension_delta = abs(width / target_width - 1) + abs(height / target_height - 1)
+    return aspect_delta, dimension_delta, -pixels
+
+
+def _with_size_retry_metadata(
+    saved: dict[str, Any],
+    *,
+    retries: int,
+    retry_error: APIError | None = None,
+) -> dict[str, Any]:
+    audit: dict[str, Any] = {
+        "size_mismatch_retries": retries,
+        "upstream_attempts": retries + 1,
+    }
+    if retry_error is not None:
+        audit["size_mismatch_retry_error_code"] = retry_error.code
+        audit["size_mismatch_retry_error_message"] = redact_sensitive_text(retry_error.message, limit=300)
+
+    updated_images: list[Any] = []
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            updated_images.append(image)
+            continue
+        metadata = image.get("metadata")
+        updated_images.append(
+            {
+                **image,
+                **audit,
+                "metadata": {**(metadata if isinstance(metadata, dict) else {}), **audit},
+            }
+        )
+
+    updated = {**saved, **audit, "images": updated_images}
+    if updated_images and isinstance(updated_images[0], dict):
+        updated["metadata"] = updated_images[0].get("metadata", updated.get("metadata"))
+    return updated
 
 
 def _discard_saved_result_files(saved: dict[str, Any]) -> None:
@@ -4932,6 +5197,8 @@ async def _finalize_with_size_retry(
     )
     best: dict[str, Any] | None = None
     retries_used = 0
+    retry_error: APIError | None = None
+    target_size = _parse_requested_size(str(save_context.get("requested_size") or save_context.get("size") or ""))
     for attempt in range(max_retries + 1):
         try:
             upstream_response = await run_upstream()
@@ -4942,39 +5209,59 @@ async def _finalize_with_size_retry(
                 save_context=save_context,
                 extra=extra,
             )
-        except APIError:
+        except APIError as exc:
             if best is not None:
                 # A retry failing outright must not discard a usable result.
+                # 这次失败的重试也真实扣了费，计数不能丢。
+                retries_used = attempt
+                retry_error = exc
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "size_mismatch_retry_failed",
+                    requested_size=str(save_context.get("requested_size") or save_context.get("size") or ""),
+                    attempt=attempt,
+                    error_code=exc.code,
+                    status=exc.status,
+                )
                 break
             raise
         retries_used = attempt
-        if not saved.get("size_mismatch"):
+        if not _requires_size_retry(saved, target_size):
             if best is not None:
                 _discard_saved_result_files(best)
             if attempt:
-                saved["size_mismatch_retries"] = attempt
+                saved = _with_size_retry_metadata(saved, retries=attempt)
             return saved
         if best is None:
             best = saved
-        elif _saved_pixel_count(saved) > _saved_pixel_count(best):
+        elif _size_mismatch_score(saved, target_size) < _size_mismatch_score(best, target_size):
             _discard_saved_result_files(best)
             best = saved
         else:
             _discard_saved_result_files(saved)
         if attempt < max_retries:
+            actual_dimensions = _upstream_dimensions(saved)
             log_event(
                 logger,
                 logging.WARNING,
                 "size_mismatch_retry",
                 requested_size=str(save_context.get("requested_size") or save_context.get("size") or ""),
-                actual_size=str(saved.get("actual_size") or ""),
+                actual_size=(
+                    f"{actual_dimensions[0]}x{actual_dimensions[1]}"
+                    if actual_dimensions is not None
+                    else str(saved.get("actual_size") or "")
+                ),
                 attempt=attempt + 1,
                 max_retries=max_retries,
             )
     assert best is not None
     if retries_used:
-        best["size_mismatch_retries"] = retries_used
-        retry_note = f"已自动重新生成 {retries_used} 次，上游仍未按目标尺寸返回，已保留其中最接近的一次。"
+        retry_note = (
+            f"已自动重新生成 {retries_used} 次，最后一次重试失败，已保留此前最接近目标画幅的一次。"
+            if retry_error is not None
+            else f"已自动重新生成 {retries_used} 次，上游仍未按目标尺寸返回，已保留其中最接近的一次。"
+        )
         message = str(best.get("size_mismatch_message") or "").rstrip()
         best["size_mismatch_message"] = f"{message}{retry_note}" if message else retry_note
         images = best.get("images")
@@ -4984,6 +5271,7 @@ async def _finalize_with_size_retry(
                 image["size_mismatch_message"] = (
                     f"{candidate_message}{retry_note}" if candidate_message else retry_note
                 )
+        best = _with_size_retry_metadata(best, retries=retries_used, retry_error=retry_error)
     return best
 
 

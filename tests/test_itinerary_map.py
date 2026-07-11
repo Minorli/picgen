@@ -19,6 +19,10 @@ def test_country_label_resolves_border_cities_by_nearest_box_center():
     assert im._country_label_from_coordinates(41.90, 12.50) == "意大利"  # Rome
 
 
+def test_xml_clean_text_removes_all_xml_10_invalid_codepoints() -> None:
+    assert im._clean_text("A\x08B\ud800C\ufffeD\U00100000E") == "ABCDE"
+
+
 def test_antimeridian_route_drawn_in_correct_direction():
     # Tokyo -> Honolulu is an eastward Pacific hop; Tokyo (west) must end up left of
     # Honolulu (east), not flung to opposite edges wrapping the wrong way.

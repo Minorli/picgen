@@ -32,7 +32,7 @@ from .notifications import (
     send_error_alert_notification,
 )
 from .redaction import redact_sensitive_text
-from .routes import create_router
+from .routes import create_router, drain_notification_tasks
 from .storage import prune_old_outputs
 from .upstream import HttpxAsyncClient
 
@@ -152,6 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             prune_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_task
+            await drain_notification_tasks()
             await client.aclose()
 
     app = FastAPI(

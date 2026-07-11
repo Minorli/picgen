@@ -248,8 +248,6 @@ def build_error_alert_text(alert: ErrorAlert) -> str:
 
 
 def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
-    prompt = redact_sensitive_text(alert.prompt, limit=600)
-    urls = [redact_sensitive_text(url, limit=300) for url in alert.saved_image_urls[:5] if url]
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
     title = "LOGO 成品已保存" if alert.path == "/api/final-images" else "生图成功"
     lines = [
@@ -267,10 +265,6 @@ def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
         f"LOGO：请求={'是' if alert.logo_requested else '否'} / 成品={'是' if alert.logo_overlay_applied else '否'}",
         f"图片 ID：{image_ids}",
     ]
-    if urls:
-        lines.extend(["", "图片：", *urls])
-    if prompt:
-        lines.extend(["", "提示词：", prompt])
     return "\n".join(lines)[:3900]
 
 

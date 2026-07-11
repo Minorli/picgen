@@ -19,7 +19,8 @@ _HASH_ITERATIONS = 600_000
 _SALT_BYTES = 16
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_RESET_TOKEN_BYTES = 32
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 15
+_SHARED_RESULT_OWNERSHIP_SCHEMA_VERSION = 15
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
 _PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
@@ -29,6 +30,7 @@ DEFAULT_COMPANY = "6renyou"
 DEFAULT_DEPARTMENT = "PD & OPS"
 DEFAULT_ORG_UNITS = ((DEFAULT_COMPANY, DEFAULT_DEPARTMENT),)
 SYSTEM_USERNAMES_WITHOUT_ORG = {"admin", "minorli"}
+_UI_MODES = frozenset({"simple", "professional"})
 
 
 @dataclass(frozen=True)
@@ -242,6 +244,7 @@ class AuthStore:
 
                     CREATE TABLE IF NOT EXISTS user_preferences (
                         user_id INTEGER PRIMARY KEY,
+                        ui_mode TEXT CHECK (ui_mode IS NULL OR ui_mode IN ('simple', 'professional')),
                         default_model TEXT NOT NULL DEFAULT '',
                         default_responses_model TEXT NOT NULL DEFAULT '',
                         default_size TEXT NOT NULL DEFAULT '',
@@ -250,6 +253,7 @@ class AuthStore:
                         default_image_transport TEXT NOT NULL DEFAULT '',
                         logo_overlay_enabled INTEGER NOT NULL DEFAULT 1,
                         auto_copyright_check_enabled INTEGER NOT NULL DEFAULT 1,
+                        simple_checklist_completed INTEGER NOT NULL DEFAULT 0,
                         updated_at TEXT NOT NULL,
                         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                     );
@@ -507,6 +511,50 @@ class AuthStore:
         company: str = DEFAULT_COMPANY,
         department: str = DEFAULT_DEPARTMENT,
     ) -> AuthUser:
+        user, _session = self._create_user(
+            username,
+            password,
+            role=role,
+            is_active=is_active,
+            company=company,
+            department=department,
+            session_days=None,
+        )
+        return user
+
+    def create_user_and_session(
+        self,
+        username: str,
+        password: str,
+        *,
+        days: int,
+        company: str = DEFAULT_COMPANY,
+        department: str = DEFAULT_DEPARTMENT,
+    ) -> tuple[AuthUser, AuthSession]:
+        user, session = self._create_user(
+            username,
+            password,
+            role="user",
+            is_active=True,
+            company=company,
+            department=department,
+            session_days=days,
+        )
+        if session is None:  # pragma: no cover - guarded by session_days
+            raise RuntimeError("session was not created")
+        return user, session
+
+    def _create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        role: str,
+        is_active: bool,
+        company: str,
+        department: str,
+        session_days: int | None,
+    ) -> tuple[AuthUser, AuthSession | None]:
         now = _now_text()
         normalized = normalize_username(username)
         normalized_role = normalize_role(role)
@@ -547,7 +595,7 @@ class AuthStore:
             except sqlite3.IntegrityError as exc:
                 raise UserExistsError(username) from exc
             user_id = _require_lastrowid(cursor)
-            return AuthUser(
+            user = AuthUser(
                 id=user_id,
                 username=username.strip(),
                 created_at=now,
@@ -556,6 +604,12 @@ class AuthStore:
                 company=clean_company,
                 department=clean_department,
             )
+            session = (
+                self._insert_session(conn, user_id, days=session_days)
+                if session_days is not None
+                else None
+            )
+            return user, session
 
     def ensure_admin_user(self, username: str, password: str) -> AuthUser:
         if not password:
@@ -623,6 +677,28 @@ class AuthStore:
             return _auth_user_from_row(row, username=clean_username, role="admin", is_active=True)
 
     def authenticate(self, username: str, password: str) -> AuthUser:
+        user, _session = self._authenticate_credentials(username, password, session_days=None)
+        return user
+
+    def authenticate_and_create_session(
+        self,
+        username: str,
+        password: str,
+        *,
+        days: int,
+    ) -> tuple[AuthUser, AuthSession]:
+        user, session = self._authenticate_credentials(username, password, session_days=days)
+        if session is None:  # pragma: no cover - guarded by session_days
+            raise RuntimeError("session was not created")
+        return user, session
+
+    def _authenticate_credentials(
+        self,
+        username: str,
+        password: str,
+        *,
+        session_days: int | None,
+    ) -> tuple[AuthUser, AuthSession | None]:
         normalized = normalize_username(username)
         with self._lock, self._connect() as conn:
             row = conn.execute(
@@ -640,41 +716,74 @@ class AuthStore:
             locked_until = _parse_datetime_text(row["locked_until"])
             if locked_until is not None and locked_until > now_dt:
                 raise AccountLockedError(username)
-            if not verify_password(password, str(row["password_hash"])):
+            verified_password_hash = str(row["password_hash"])
+            if not verify_password(password, verified_password_hash):
                 lock_until_text = _datetime_text(now_dt + timedelta(minutes=_ACCOUNT_LOCK_MINUTES))
                 # Atomic increment: a read-modify-write in Python loses counts
                 # when several workers process wrong passwords concurrently
                 # (PBKDF2 keeps the window wide open). An expired lock means the
                 # user served their time — restart the count at 1 so they are
                 # not re-locked by the very next wrong guess.
+                # "已服完刑"必须校验 locked_until 确实过期：跨 worker 并发时
+                # 另一个 worker 可能刚写入新锁，无条件的 IS NOT NULL 分支会把
+                # 刚生效的锁清掉，阈值处的并发爆破就永远锁不住。
+                now_text = _datetime_text(now_dt)
                 conn.execute(
                     """
                     UPDATE users
                     SET failed_login_count = CASE
-                            WHEN locked_until IS NOT NULL THEN 1
+                            WHEN locked_until IS NOT NULL AND locked_until <= ? THEN 1
                             ELSE COALESCE(failed_login_count, 0) + 1
                         END,
                         locked_until = CASE
-                            WHEN locked_until IS NOT NULL THEN NULL
+                            WHEN locked_until IS NOT NULL AND locked_until <= ? THEN NULL
+                            WHEN locked_until IS NOT NULL THEN locked_until
                             WHEN COALESCE(failed_login_count, 0) + 1 >= ? THEN ?
                             ELSE NULL
                         END
-                    WHERE id = ?
+                    WHERE id = ? AND password_hash = ? AND is_active = 1
                     """,
-                    (_MAX_FAILED_LOGIN_ATTEMPTS, lock_until_text, row["id"]),
+                    (
+                        now_text,
+                        now_text,
+                        _MAX_FAILED_LOGIN_ATTEMPTS,
+                        lock_until_text,
+                        row["id"],
+                        verified_password_hash,
+                    ),
                 )
                 conn.commit()
                 raise InvalidCredentialsError(username)
             now = _now_text()
-            conn.execute(
+            updated_cursor = conn.execute(
                 """
                 UPDATE users
                 SET last_login_at = ?, failed_login_count = 0, locked_until = NULL
                 WHERE id = ?
+                  AND password_hash = ?
+                  AND is_active = 1
+                  AND (locked_until IS NULL OR locked_until <= ?)
                 """,
-                (now, row["id"]),
+                (now, row["id"], verified_password_hash, now),
             )
-            return _auth_user_from_row(row, last_login_at=now)
+            if updated_cursor.rowcount != 1:
+                current = conn.execute(
+                    "SELECT is_active, password_hash, locked_until FROM users WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+                current_lock = _parse_datetime_text(current["locked_until"]) if current is not None else None
+                if current is not None and bool(current["is_active"]) and current_lock and current_lock > _now():
+                    raise AccountLockedError(username)
+                raise InvalidCredentialsError(username)
+            updated = conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+            if updated is None:  # pragma: no cover - row was updated above
+                raise InvalidCredentialsError(username)
+            session = (
+                self._insert_session(conn, int(row["id"]), days=session_days)
+                if session_days is not None
+                else None
+            )
+            return _auth_user_from_row(updated), session
 
     def request_password_reset(
         self,
@@ -1110,9 +1219,10 @@ class AuthStore:
             ).fetchone()
             if row is None or not bool(row["is_active"]):
                 raise InvalidCredentialsError("inactive")
-            if not verify_password(current_password, str(row["password_hash"])):
+            verified_password_hash = str(row["password_hash"])
+            if not verify_password(current_password, verified_password_hash):
                 raise InvalidCredentialsError("current_password")
-            conn.execute(
+            updated_cursor = conn.execute(
                 """
                 UPDATE users
                 SET
@@ -1120,10 +1230,12 @@ class AuthStore:
                     password_changed_at = ?,
                     failed_login_count = 0,
                     locked_until = NULL
-                WHERE id = ?
+                WHERE id = ? AND password_hash = ? AND is_active = 1
                 """,
-                (hash_password(new_password), now, user_id),
+                (hash_password(new_password), now, user_id, verified_password_hash),
             )
+            if updated_cursor.rowcount != 1:
+                raise InvalidCredentialsError("current_password")
             if token_hash:
                 conn.execute(
                     """
@@ -1134,7 +1246,10 @@ class AuthStore:
                 )
             else:
                 conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-        return _auth_user_from_row(row)
+            updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if updated is None:  # pragma: no cover - guarded by successful update
+                raise InvalidCredentialsError("inactive")
+        return _auth_user_from_row(updated)
 
     def update_user_profile(
         self,
@@ -1162,17 +1277,16 @@ class AuthStore:
             clean_username = username.strip() or str(row["username"])
             normalized_username = normalize_username(clean_username)
             username_changed = normalized_username != str(row["username_normalized"])
-            if username_changed and not verify_password(current_password, str(row["password_hash"])):
+            verified_password_hash = str(row["password_hash"])
+            if username_changed and not verify_password(current_password, verified_password_hash):
                 raise InvalidCredentialsError("current_password")
-            clean_company, clean_department = normalize_user_org(
-                company,
-                department,
-                username_normalized=normalized_username,
-                role=str(row["role"] or "user"),
-            )
-            _require_active_org_unit(conn, clean_company, clean_department)
+            # Organization membership is an authorization boundary. Profile
+            # edits may carry stale or forged organization fields, but only an
+            # administrator may change the stored assignment.
+            clean_company = str(row["company"] or "")
+            clean_department = str(row["department"] or "")
             try:
-                conn.execute(
+                updated_cursor = conn.execute(
                     """
                     UPDATE users
                     SET
@@ -1189,6 +1303,8 @@ class AuthStore:
                         job_title = ?,
                         note = ?
                     WHERE id = ?
+                      AND is_active = 1
+                      AND (? = 0 OR password_hash = ?)
                     """,
                     (
                         clean_username,
@@ -1204,10 +1320,14 @@ class AuthStore:
                         job_title.strip()[:120],
                         note.strip()[:1000],
                         user_id,
+                        int(username_changed),
+                        verified_password_hash,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise UserExistsError(clean_username) from exc
+            if updated_cursor.rowcount != 1:
+                raise InvalidCredentialsError("current_password" if username_changed else "inactive")
             if username_changed:
                 if token_hash:
                     conn.execute(
@@ -1225,10 +1345,25 @@ class AuthStore:
             return _auth_user_from_row(updated)
 
     def update_user_avatar(self, *, user_id: int, avatar_path: str, avatar_url: str) -> AuthUser | None:
+        user, _previous_path = self.replace_user_avatar(
+            user_id=user_id,
+            avatar_path=avatar_path,
+            avatar_url=avatar_url,
+        )
+        return user
+
+    def replace_user_avatar(
+        self,
+        *,
+        user_id: int,
+        avatar_path: str,
+        avatar_url: str,
+    ) -> tuple[AuthUser | None, str]:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if row is None or not bool(row["is_active"]):
-                return None
+                return None, ""
+            previous_path = str(row["avatar_path"] or "")
             conn.execute(
                 """
                 UPDATE users
@@ -1238,26 +1373,30 @@ class AuthStore:
                 (avatar_path.strip()[:1024], avatar_url.strip()[:1024], user_id),
             )
             updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            return _auth_user_from_row(updated) if updated is not None else None
+            return (_auth_user_from_row(updated) if updated is not None else None), previous_path
 
     def create_session(self, user_id: int, *, days: int) -> AuthSession:
+        with self._lock, self._connect() as conn:
+            return self._insert_session(conn, user_id, days=days)
+
+    @staticmethod
+    def _insert_session(conn: sqlite3.Connection, user_id: int, *, days: int) -> AuthSession:
         token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
         created_at = _now()
         expires_at = created_at + timedelta(days=days)
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO sessions (user_id, token_hash, created_at, expires_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    hash_session_token(token),
-                    _datetime_text(created_at),
-                    _datetime_text(expires_at),
-                    _datetime_text(created_at),
-                ),
-            )
+        conn.execute(
+            """
+            INSERT INTO sessions (user_id, token_hash, created_at, expires_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                hash_session_token(token),
+                _datetime_text(created_at),
+                _datetime_text(expires_at),
+                _datetime_text(created_at),
+            ),
+        )
         return AuthSession(token=token, expires_at=_datetime_text(expires_at))
 
     def user_for_session(self, token: str) -> AuthUser | None:
@@ -2140,11 +2279,104 @@ class AuthStore:
                     (now, now, generated_image_id),
                 )
 
+    def can_user_access_output(
+        self,
+        *,
+        user_id: int,
+        is_admin: bool,
+        relative_path: str,
+        absolute_path: Path,
+    ) -> bool:
+        if is_admin:
+            return True
+        references = _output_reference_tokens(
+            relative_path=relative_path,
+            absolute_path=absolute_path,
+        )
+        if not references:
+            return False
+        placeholders = ",".join("?" for _ in references)
+        image_match = (
+            f"(saved_image_url IN ({placeholders}) "
+            f"OR saved_image_path IN ({placeholders}) "
+            f"OR saved_metadata_url IN ({placeholders}) "
+            f"OR saved_metadata_path IN ({placeholders}))"
+        )
+        shared_match = (
+            f"(gi.saved_image_url IN ({placeholders}) "
+            f"OR gi.saved_image_path IN ({placeholders}) "
+            f"OR gi.saved_metadata_url IN ({placeholders}) "
+            f"OR gi.saved_metadata_path IN ({placeholders}))"
+        )
+        group_match = (
+            f"(gi.saved_image_url IN ({placeholders}) "
+            f"OR gi.saved_image_path IN ({placeholders}) "
+            f"OR gi.saved_metadata_url IN ({placeholders}) "
+            f"OR gi.saved_metadata_path IN ({placeholders}))"
+        )
+        with self._lock, self._connect() as conn:
+            owned = conn.execute(
+                f"SELECT 1 FROM generated_images WHERE user_id = ? AND {image_match} LIMIT 1",
+                (user_id, *references, *references, *references, *references),
+            ).fetchone()
+            if owned is not None:
+                return True
+            metadata_owned = conn.execute(
+                f"""
+                SELECT 1
+                FROM generated_images gi
+                JOIN generated_image_metadata gim ON gim.generated_image_id = gi.id
+                WHERE gi.user_id = ?
+                  AND (
+                    json_extract(gim.metadata_json, '$.source_saved_image_url') IN ({placeholders})
+                    OR json_extract(gim.metadata_json, '$.source_saved_image_path') IN ({placeholders})
+                    OR json_extract(gim.metadata_json, '$.source_image_path') IN ({placeholders})
+                  )
+                LIMIT 1
+                """,
+                (user_id, *references, *references, *references),
+            ).fetchone()
+            if metadata_owned is not None:
+                return True
+            shared = conn.execute(
+                f"""
+                SELECT 1
+                FROM shared_results s
+                JOIN generated_images gi
+                  ON gi.id = s.generated_image_id
+                 AND gi.user_id = s.sender_user_id
+                WHERE s.recipient_user_id = ? AND {shared_match}
+                LIMIT 1
+                """,
+                (user_id, *references, *references, *references, *references),
+            ).fetchone()
+            if shared is not None:
+                return True
+            user_row = conn.execute(
+                "SELECT id, username_normalized, role, company, department FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if user_row is None:
+                return False
+            room_key = _team_chat_group_from_user_row(user_row)["room_key"]
+            grouped = conn.execute(
+                f"""
+                SELECT 1
+                FROM group_saved_items item
+                JOIN generated_images gi ON gi.id = item.generated_image_id
+                WHERE item.room_key = ? AND {group_match}
+                LIMIT 1
+                """,
+                (room_key, *references, *references, *references, *references),
+            ).fetchone()
+        return grouped is not None
+
     def get_user_preferences(self, *, user_id: int) -> dict[str, Any]:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT
+                    ui_mode,
                     default_model,
                     default_responses_model,
                     default_size,
@@ -2153,6 +2385,7 @@ class AuthStore:
                     default_image_transport,
                     logo_overlay_enabled,
                     auto_copyright_check_enabled,
+                    simple_checklist_completed,
                     updated_at
                 FROM user_preferences
                 WHERE user_id = ?
@@ -2167,26 +2400,42 @@ class AuthStore:
         self,
         *,
         user_id: int,
-        default_model: str = "",
-        default_responses_model: str = "",
-        default_size: str = "",
-        default_quality: str = "",
-        default_output_format: str = "",
-        default_image_transport: str = "",
-        logo_overlay_enabled: bool = True,
-        auto_copyright_check_enabled: bool = True,
+        default_model: str | None = None,
+        default_responses_model: str | None = None,
+        default_size: str | None = None,
+        default_quality: str | None = None,
+        default_output_format: str | None = None,
+        default_image_transport: str | None = None,
+        logo_overlay_enabled: bool | None = None,
+        auto_copyright_check_enabled: bool | None = None,
+        simple_checklist_completed: bool | None = None,
+        ui_mode: str | None = None,
     ) -> dict[str, Any]:
+        if ui_mode is not None and ui_mode not in _UI_MODES:
+            raise ValueError("ui_mode must be simple or professional")
         now = _now_text()
         values = {
             "user_id": user_id,
-            "default_model": default_model.strip()[:128],
-            "default_responses_model": default_responses_model.strip()[:128],
-            "default_size": default_size.strip()[:64],
-            "default_quality": default_quality.strip()[:64],
-            "default_output_format": default_output_format.strip()[:64],
-            "default_image_transport": default_image_transport.strip()[:64],
-            "logo_overlay_enabled": 1 if logo_overlay_enabled else 0,
-            "auto_copyright_check_enabled": 1 if auto_copyright_check_enabled else 0,
+            "ui_mode": ui_mode,
+            "default_model": default_model.strip()[:128] if default_model is not None else None,
+            "default_responses_model": (
+                default_responses_model.strip()[:128] if default_responses_model is not None else None
+            ),
+            "default_size": default_size.strip()[:64] if default_size is not None else None,
+            "default_quality": default_quality.strip()[:64] if default_quality is not None else None,
+            "default_output_format": (
+                default_output_format.strip()[:64] if default_output_format is not None else None
+            ),
+            "default_image_transport": (
+                default_image_transport.strip()[:64] if default_image_transport is not None else None
+            ),
+            "logo_overlay_enabled": None if logo_overlay_enabled is None else int(logo_overlay_enabled),
+            "auto_copyright_check_enabled": (
+                None if auto_copyright_check_enabled is None else int(auto_copyright_check_enabled)
+            ),
+            "simple_checklist_completed": (
+                None if simple_checklist_completed is None else int(simple_checklist_completed)
+            ),
             "updated_at": now,
         }
         with self._lock, self._connect() as conn:
@@ -2194,6 +2443,7 @@ class AuthStore:
                 """
                 INSERT INTO user_preferences (
                     user_id,
+                    ui_mode,
                     default_model,
                     default_responses_model,
                     default_size,
@@ -2202,45 +2452,78 @@ class AuthStore:
                     default_image_transport,
                     logo_overlay_enabled,
                     auto_copyright_check_enabled,
+                    simple_checklist_completed,
                     updated_at
                 )
                 VALUES (
                     :user_id,
-                    :default_model,
-                    :default_responses_model,
-                    :default_size,
-                    :default_quality,
-                    :default_output_format,
-                    :default_image_transport,
-                    :logo_overlay_enabled,
-                    :auto_copyright_check_enabled,
+                    :ui_mode,
+                    COALESCE(:default_model, ''),
+                    COALESCE(:default_responses_model, ''),
+                    COALESCE(:default_size, ''),
+                    COALESCE(:default_quality, ''),
+                    COALESCE(:default_output_format, ''),
+                    COALESCE(:default_image_transport, ''),
+                    COALESCE(:logo_overlay_enabled, 1),
+                    COALESCE(:auto_copyright_check_enabled, 1),
+                    COALESCE(:simple_checklist_completed, 0),
                     :updated_at
                 )
                 ON CONFLICT(user_id) DO UPDATE SET
-                    default_model = excluded.default_model,
-                    default_responses_model = excluded.default_responses_model,
-                    default_size = excluded.default_size,
-                    default_quality = excluded.default_quality,
-                    default_output_format = excluded.default_output_format,
-                    default_image_transport = excluded.default_image_transport,
-                    logo_overlay_enabled = excluded.logo_overlay_enabled,
-                    auto_copyright_check_enabled = excluded.auto_copyright_check_enabled,
+                    ui_mode = COALESCE(:ui_mode, user_preferences.ui_mode),
+                    default_model = COALESCE(:default_model, user_preferences.default_model),
+                    default_responses_model = COALESCE(
+                        :default_responses_model,
+                        user_preferences.default_responses_model
+                    ),
+                    default_size = COALESCE(:default_size, user_preferences.default_size),
+                    default_quality = COALESCE(:default_quality, user_preferences.default_quality),
+                    default_output_format = COALESCE(
+                        :default_output_format,
+                        user_preferences.default_output_format
+                    ),
+                    default_image_transport = COALESCE(
+                        :default_image_transport,
+                        user_preferences.default_image_transport
+                    ),
+                    logo_overlay_enabled = COALESCE(
+                        :logo_overlay_enabled,
+                        user_preferences.logo_overlay_enabled
+                    ),
+                    auto_copyright_check_enabled = COALESCE(
+                        :auto_copyright_check_enabled,
+                        user_preferences.auto_copyright_check_enabled
+                    ),
+                    simple_checklist_completed = COALESCE(
+                        :simple_checklist_completed,
+                        user_preferences.simple_checklist_completed
+                    ),
                     updated_at = excluded.updated_at
                 """,
                 values,
             )
-        return {
-            "user_id": user_id,
-            "default_model": values["default_model"],
-            "default_responses_model": values["default_responses_model"],
-            "default_size": values["default_size"],
-            "default_quality": values["default_quality"],
-            "default_output_format": values["default_output_format"],
-            "default_image_transport": values["default_image_transport"],
-            "logo_overlay_enabled": bool(logo_overlay_enabled),
-            "auto_copyright_check_enabled": bool(auto_copyright_check_enabled),
-            "updated_at": now,
-        }
+            row = conn.execute(
+                """
+                SELECT
+                    ui_mode,
+                    default_model,
+                    default_responses_model,
+                    default_size,
+                    default_quality,
+                    default_output_format,
+                    default_image_transport,
+                    logo_overlay_enabled,
+                    auto_copyright_check_enabled,
+                    simple_checklist_completed,
+                    updated_at
+                FROM user_preferences
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:  # pragma: no cover - the upsert above guarantees a row
+            raise RuntimeError("preferences were not saved")
+        return _user_preferences_from_row(user_id, row)
 
     def record_feedback(
         self,
@@ -2861,8 +3144,11 @@ class AuthStore:
         current_username = group["username_normalized"]
         current_company = group["company"]
         current_department = group["department"]
-        with self._lock, self._connect() as conn:
-            rows = conn.execute(
+        if not current_company and not current_department:
+            rows: list[sqlite3.Row] = []
+        else:
+            with self._lock, self._connect() as conn:
+                rows = conn.execute(
                 """
                 SELECT id, username, username_normalized, display_name, avatar_url, company, department
                 FROM users
@@ -2874,7 +3160,7 @@ class AuthStore:
                 ORDER BY username COLLATE NOCASE ASC
                 """,
                 (current_user_id, current_company, current_department),
-            ).fetchall()
+                ).fetchall()
 
         include_minorli = current_username == "minorli"
         members: list[dict[str, Any]] = [
@@ -2909,7 +3195,7 @@ class AuthStore:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT username_normalized, role, company, department
+                SELECT id, username_normalized, role, company, department
                 FROM users
                 WHERE id = ?
                 """,
@@ -2923,11 +3209,14 @@ class AuthStore:
             group = _team_chat_group_from_user_row(row)
             company = group["company"]
             department = group["department"]
+            room_key = group["room_key"]
             username_normalized = str(row["username_normalized"] or "")
+        if row is None:
+            room_key = f"team:unassigned:{user_id}"
         return {
             "company": company,
             "department": department,
-            "room_key": team_chat_group_room_key(company, department),
+            "room_key": room_key,
             "username_normalized": username_normalized,
         }
 
@@ -3252,6 +3541,7 @@ class AuthStore:
         contact: str = "",
         page_url: str = "",
         user_agent: str = "",
+        notification_status: str = "not_configured",
     ) -> dict[str, Any]:
         clean_description = description.strip()[:4000]
         if not clean_description:
@@ -3260,6 +3550,7 @@ class AuthStore:
         clean_contact = contact.strip()[:256]
         clean_page_url = page_url.strip()[:1024]
         clean_user_agent = user_agent.strip()[:512]
+        clean_notification_status = notification_status.strip()[:64] or "not_configured"
         now = _now_text()
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
@@ -3275,7 +3566,7 @@ class AuthStore:
                     notification_status,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'open', 'not_configured', ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
                 """,
                 (
                     user_id,
@@ -3284,6 +3575,7 @@ class AuthStore:
                     clean_contact,
                     clean_page_url,
                     clean_user_agent,
+                    clean_notification_status,
                     now,
                 ),
             )
@@ -3296,7 +3588,7 @@ class AuthStore:
             "contact": clean_contact,
             "page_url": clean_page_url,
             "status": "open",
-            "notification_status": "not_configured",
+            "notification_status": clean_notification_status,
             "created_at": now,
         }
 
@@ -3375,10 +3667,12 @@ class AuthStore:
         now = _now_text()
         placeholders = ",".join("?" for _ in unique_recipient_ids)
         with self._lock, self._connect() as conn:
+            image: sqlite3.Row | None
             if generated_image_id is not None:
                 image = conn.execute(
                     """
                     SELECT
+                        id,
                         saved_image_path,
                         saved_image_url,
                         prompt,
@@ -3389,13 +3683,41 @@ class AuthStore:
                     """,
                     (generated_image_id, sender_user_id),
                 ).fetchone()
-                if image is None:
-                    raise PermissionError("无权分享这张图片")
-                clean_path = str(image["saved_image_path"] or "")[:1024]
-                clean_url = str(image["saved_image_url"] or "")[:1024]
-                clean_prompt = str(image["prompt"] or "")[:32_000]
-                clean_mode = str(image["mode"] or "")[:64]
-                clean_model = str(image["model"] or "")[:128]
+            else:
+                url_tokens = _clean_source_tokens(
+                    [clean_url, clean_url.lstrip("/")],
+                    max_length=1024,
+                )
+                path_tokens = _clean_source_tokens([clean_path], max_length=1024)
+                clauses: list[str] = []
+                image_params: list[Any] = [sender_user_id]
+                if url_tokens:
+                    url_placeholders = ",".join("?" for _ in url_tokens)
+                    clauses.append(f"saved_image_url IN ({url_placeholders})")
+                    image_params.extend(url_tokens)
+                if path_tokens:
+                    path_placeholders = ",".join("?" for _ in path_tokens)
+                    clauses.append(f"saved_image_path IN ({path_placeholders})")
+                    image_params.extend(path_tokens)
+                image = conn.execute(
+                    f"""
+                    SELECT id, saved_image_path, saved_image_url, prompt, mode, model
+                    FROM generated_images
+                    WHERE user_id = ?
+                      AND ({' OR '.join(clauses) if clauses else '0'})
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    tuple(image_params),
+                ).fetchone()
+            if image is None:
+                raise PermissionError("无权分享这张图片")
+            generated_image_id = int(image["id"])
+            clean_path = str(image["saved_image_path"] or "")[:1024]
+            clean_url = str(image["saved_image_url"] or "")[:1024]
+            clean_prompt = str(image["prompt"] or "")[:32_000]
+            clean_mode = str(image["mode"] or "")[:64]
+            clean_model = str(image["model"] or "")[:128]
             recipient_rows = conn.execute(
                 f"""
                 SELECT id, username
@@ -3568,6 +3890,7 @@ class AuthStore:
             "generated_image_id": "INTEGER",
         })
         _ensure_columns(conn, "user_preferences", {
+            "ui_mode": "TEXT CHECK (ui_mode IS NULL OR ui_mode IN ('simple', 'professional'))",
             "default_model": "TEXT NOT NULL DEFAULT ''",
             "default_responses_model": "TEXT NOT NULL DEFAULT ''",
             "default_size": "TEXT NOT NULL DEFAULT ''",
@@ -3576,6 +3899,7 @@ class AuthStore:
             "default_image_transport": "TEXT NOT NULL DEFAULT ''",
             "logo_overlay_enabled": "INTEGER NOT NULL DEFAULT 1",
             "auto_copyright_check_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "simple_checklist_completed": "INTEGER NOT NULL DEFAULT 0",
             "updated_at": "TEXT NOT NULL DEFAULT ''",
         })
         _ensure_columns(conn, "generation_jobs", {
@@ -3628,26 +3952,104 @@ class AuthStore:
         conn.execute(
             """
             UPDATE users
-            SET company = ?, department = ?
-            WHERE role != 'admin'
-              AND username_normalized NOT IN ('admin', 'minorli')
-              AND (company IS NULL OR company = '' OR department IS NULL OR department = '')
-            """,
-            (DEFAULT_COMPANY, DEFAULT_DEPARTMENT),
-        )
-        conn.execute(
-            """
-            UPDATE users
             SET company = '', department = ''
             WHERE role = 'admin' OR username_normalized IN ('admin', 'minorli')
             """
         )
         now = _now_text()
-        migration_applied = conn.execute(
+        share_migration_applied = conn.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?",
-            (_SCHEMA_VERSION,),
+            (_SHARED_RESULT_OWNERSHIP_SCHEMA_VERSION,),
         ).fetchone()
-        if migration_applied is None:
+        if share_migration_applied is None:
+            conn.execute(
+                """
+                UPDATE shared_results AS share
+                SET generated_image_id = (
+                    SELECT gi.id
+                    FROM generated_images gi
+                    WHERE gi.user_id = share.sender_user_id
+                      AND (
+                        (
+                            TRIM(share.saved_image_path) != ''
+                            AND gi.saved_image_path = share.saved_image_path
+                        )
+                        OR (
+                            TRIM(share.saved_image_url) != ''
+                            AND LTRIM(gi.saved_image_url, '/') = LTRIM(share.saved_image_url, '/')
+                        )
+                      )
+                    ORDER BY gi.id DESC
+                    LIMIT 1
+                )
+                WHERE share.generated_image_id IS NULL
+                """
+            )
+            conn.execute(
+                """
+                UPDATE shared_results AS share
+                SET
+                    saved_image_path = (
+                        SELECT gi.saved_image_path
+                        FROM generated_images gi
+                        WHERE gi.id = share.generated_image_id
+                          AND gi.user_id = share.sender_user_id
+                    ),
+                    saved_image_url = (
+                        SELECT gi.saved_image_url
+                        FROM generated_images gi
+                        WHERE gi.id = share.generated_image_id
+                          AND gi.user_id = share.sender_user_id
+                    ),
+                    prompt = (
+                        SELECT gi.prompt
+                        FROM generated_images gi
+                        WHERE gi.id = share.generated_image_id
+                          AND gi.user_id = share.sender_user_id
+                    ),
+                    mode = (
+                        SELECT gi.mode
+                        FROM generated_images gi
+                        WHERE gi.id = share.generated_image_id
+                          AND gi.user_id = share.sender_user_id
+                    ),
+                    model = (
+                        SELECT gi.model
+                        FROM generated_images gi
+                        WHERE gi.id = share.generated_image_id
+                          AND gi.user_id = share.sender_user_id
+                    )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM generated_images gi
+                    WHERE gi.id = share.generated_image_id
+                      AND gi.user_id = share.sender_user_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                DELETE FROM shared_results
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM generated_images gi
+                    WHERE gi.id = shared_results.generated_image_id
+                      AND gi.user_id = shared_results.sender_user_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO schema_migrations (version, name, applied_at)
+                VALUES (?, 'shared_result_image_ownership', ?)
+                """,
+                (_SHARED_RESULT_OWNERSHIP_SCHEMA_VERSION, now),
+            )
+        model_migration_applied = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (13,),
+        ).fetchone()
+        if model_migration_applied is None:
             conn.execute(
                 """
                 UPDATE user_preferences
@@ -3655,6 +4057,13 @@ class AuthStore:
                 WHERE default_responses_model = ?
                 """,
                 (DEFAULT_RESPONSES_MODEL, now, LEGACY_DEFAULT_RESPONSES_MODEL),
+            )
+            conn.execute(
+                """
+                INSERT INTO schema_migrations (version, name, applied_at)
+                VALUES (13, 'image_job_execution_metadata', ?)
+                """,
+                (now,),
             )
         for company, department in DEFAULT_ORG_UNITS:
             conn.execute(
@@ -3675,7 +4084,7 @@ class AuthStore:
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
             VALUES (?, ?, ?)
             """,
-            (_SCHEMA_VERSION, "image_job_execution_metadata", now),
+            (14, "simple_checklist_preference", now),
         )
         return migrated_sidecar_paths
 
@@ -3837,7 +4246,7 @@ def _upsert_group_saved_item_for_image(
         raise PermissionError("无权沉淀这张图片")
     user_row = conn.execute(
         """
-        SELECT username_normalized, role, company, department
+        SELECT id, username_normalized, role, company, department
         FROM users
         WHERE id = ?
         """,
@@ -3972,10 +4381,13 @@ def _team_chat_group_from_user_row(row: sqlite3.Row) -> dict[str, str]:
             username_normalized=str(row["username_normalized"] or ""),
             role=str(row["role"] or "user"),
         )
+    room_key = team_chat_group_room_key(company, department)
+    if not company and not department and "id" in set(row.keys()):
+        room_key = f"team:unassigned:{int(row['id'])}"
     return {
         "company": company,
         "department": department,
-        "room_key": team_chat_group_room_key(company, department),
+        "room_key": room_key,
     }
 
 
@@ -4088,6 +4500,8 @@ def normalize_user_org(
 ) -> tuple[str, str]:
     if normalize_role(role) == "admin" or username_normalized in SYSTEM_USERNAMES_WITHOUT_ORG:
         return "", ""
+    if not company.strip() and not department.strip():
+        return "", ""
     clean_company = company.strip()[:120] or DEFAULT_COMPANY
     clean_department = department.strip()[:120] or DEFAULT_DEPARTMENT
     return clean_company, clean_department
@@ -4185,7 +4599,19 @@ def _upsert_generated_image_metadata(
     migrated_from_path: str,
     now: str,
 ) -> None:
-    metadata_json = _serialize_metadata_json(metadata)
+    existing = conn.execute(
+        "SELECT metadata_json FROM generated_image_metadata WHERE generated_image_id = ?",
+        (generated_image_id,),
+    ).fetchone()
+    merged_metadata: dict[str, Any] = {}
+    if existing is not None:
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(str(existing["metadata_json"] or "{}"))
+            if isinstance(parsed, dict):
+                merged_metadata = parsed
+    if isinstance(metadata, dict):
+        merged_metadata = {**merged_metadata, **metadata}
+    metadata_json = _serialize_metadata_json(merged_metadata)
     if metadata_json == "{}" and not migrated_from_path:
         return
     conn.execute(
@@ -4355,6 +4781,28 @@ def _clean_source_tokens(values: list[str], *, max_length: int) -> list[str]:
         cleaned.append(token)
         seen.add(token)
     return cleaned[:20]
+
+
+def _output_reference_tokens(*, relative_path: str, absolute_path: Path) -> tuple[str, ...]:
+    cleaned = relative_path.strip().lstrip("/")[:1024]
+    if not cleaned.startswith("outputs/"):
+        return ()
+    file_url = f"files/{cleaned}"
+    try:
+        absolute = str(absolute_path.resolve(strict=False))[:1024]
+    except OSError:
+        absolute = str(absolute_path)[:1024]
+    return tuple(
+        dict.fromkeys(
+            (
+                cleaned,
+                f"/{cleaned}",
+                file_url,
+                f"/{file_url}",
+                absolute,
+            )
+        )
+    )
 
 
 def _attach_original_source_fields(item: dict[str, Any], metadata: dict[str, Any]) -> None:
@@ -4539,13 +4987,16 @@ def _default_user_preferences(user_id: int) -> dict[str, Any]:
         "default_image_transport": "",
         "logo_overlay_enabled": True,
         "auto_copyright_check_enabled": True,
+        "simple_checklist_completed": False,
         "updated_at": None,
     }
 
 
 def _user_preferences_from_row(user_id: int, row: sqlite3.Row) -> dict[str, Any]:
+    ui_mode = str(row["ui_mode"] or "")
     return {
         "user_id": user_id,
+        **({"ui_mode": ui_mode} if ui_mode in _UI_MODES else {}),
         "default_model": str(row["default_model"] or ""),
         "default_responses_model": str(row["default_responses_model"] or ""),
         "default_size": str(row["default_size"] or ""),
@@ -4554,6 +5005,7 @@ def _user_preferences_from_row(user_id: int, row: sqlite3.Row) -> dict[str, Any]
         "default_image_transport": str(row["default_image_transport"] or ""),
         "logo_overlay_enabled": bool(row["logo_overlay_enabled"]),
         "auto_copyright_check_enabled": bool(row["auto_copyright_check_enabled"]),
+        "simple_checklist_completed": bool(row["simple_checklist_completed"]),
         "updated_at": row["updated_at"],
     }
 

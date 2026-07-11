@@ -38,6 +38,10 @@ def _single_message_receive(
         if not delivered:
             delivered = True
             return message
+        if message.get("type") == "http.disconnect":
+            # ASGI 语义：断线后的每次 receive 都应继续返回 disconnect；
+            # 换成合成空请求体会让下游的断线监视误以为客户端还连着。
+            return message
         if fallback is not None:
             # After the replayed body, defer to the real receive so downstream
             # disconnect-watchers still observe ``http.disconnect``; returning

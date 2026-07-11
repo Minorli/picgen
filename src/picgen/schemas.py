@@ -621,6 +621,8 @@ class UserPreferencesRequest(BaseModel):
     default_image_transport: Literal["", "auto", "images", "responses"] = ""
     logo_overlay_enabled: bool = True
     auto_copyright_check_enabled: bool = True
+    simple_checklist_completed: bool | None = None
+    ui_mode: Literal["simple", "professional"] = "simple"
 
     @field_validator(
         "default_model",
@@ -634,6 +636,18 @@ class UserPreferencesRequest(BaseModel):
     @classmethod
     def _strip_text(cls, value: str) -> str:
         return value.strip()
+
+
+class UserUiModeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ui_mode: Literal["simple", "professional"]
+
+
+class SimpleChecklistPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    completed: bool
 
 
 class ConfigResponse(BaseModel):
@@ -651,6 +665,7 @@ class ConfigResponse(BaseModel):
     rate_limit_per_minute: int
     upstream_timeout_seconds: float
     auth_enabled: bool
+    self_registration_enabled: bool
     allow_anonymous_execution_overrides: bool
     bug_report_notifications_enabled: bool
     error_alert_notifications_enabled: bool

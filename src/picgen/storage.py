@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import uuid
+import warnings
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from io import BytesIO
@@ -46,24 +49,30 @@ def extension_for_mime(image_mime: str) -> str:
     return extension
 
 
-_FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00"})
+# ? # % 会破坏 saved_image_url：浏览器把 ? / # 当查询串和锚点截断 URL，
+# % 在 resolve_storage_path 的二次解码里被再解一次。
+_FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00", "?", "#", "%"})
 
 
-def sanitize_filename(name: str) -> str:
+def _sanitize_filename_core(name: str) -> str:
     cleaned = "".join(char for char in name if char not in _FORBIDDEN_FILENAME_CHARS).strip()
     cleaned = "-".join(cleaned.split())
     cleaned = cleaned.replace("..", "")
     cleaned = cleaned.replace(":", "-")
-    return cleaned or "image.png"
+    return cleaned
+
+
+def sanitize_filename(name: str) -> str:
+    return _sanitize_filename_core(name) or "image.png"
 
 
 def sanitize_filename_prefix(value: str) -> str:
-    # An empty prefix must stay empty — sanitize_filename's "image.png"
-    # fallback would otherwise become a literal "image.png/" output folder
-    # for anonymous (auth-disabled) saves.
+    # An empty prefix must stay empty, and a junk-only prefix ("..", "??")
+    # must not inherit sanitize_filename's "image.png" fallback — both would
+    # otherwise become a literal output folder name shared across users.
     if not value.strip():
         return ""
-    cleaned = sanitize_filename(value).strip(".-_")
+    cleaned = _sanitize_filename_core(value).strip(".-_")
     return cleaned[:48].strip(".-_") or ""
 
 
@@ -116,8 +125,16 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
             if image_bytes[index] != 0xFF:
                 index += 1
                 continue
-            marker = image_bytes[index + 1]
-            index += 2
+            # JPEG permits any number of 0xFF fill bytes before a marker.
+            # Treating the second 0xFF as the marker desynchronizes the parser.
+            while index < len(image_bytes) and image_bytes[index] == 0xFF:
+                index += 1
+            if index >= len(image_bytes):
+                break
+            marker = image_bytes[index]
+            index += 1
+            if marker == 0x00:
+                continue
             if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
                 continue
             if index + 2 > len(image_bytes):
@@ -128,7 +145,7 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
             if marker in sof_markers and segment_length >= 7:
                 height = int.from_bytes(image_bytes[index + 3 : index + 5], "big")
                 width = int.from_bytes(image_bytes[index + 5 : index + 7], "big")
-                return width, height
+                return _jpeg_display_dimensions(image_bytes, (width, height))
             index += segment_length
 
     if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP" and len(image_bytes) >= 16:
@@ -151,6 +168,35 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
             return width, height
 
     return None
+
+
+def is_decodable_image(image_bytes: bytes) -> bool:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(image_bytes)) as source:
+                width, height = source.size
+                if width <= 0 or height <= 0 or width * height > MAX_EXACT_IMAGE_PIXELS:
+                    return False
+                if source.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                    return False
+                source.verify()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _jpeg_display_dimensions(image_bytes: bytes, dimensions: tuple[int, int]) -> tuple[int, int]:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(image_bytes)) as source:
+                orientation = int(source.getexif().get(274, 1))
+    except (Image.DecompressionBombError, OSError, TypeError, ValueError):
+        return dimensions
+    if orientation in {5, 6, 7, 8}:
+        return dimensions[1], dimensions[0]
+    return dimensions
 
 
 def resize_image_to_exact_size(
@@ -179,6 +225,9 @@ def resize_image_to_exact_size(
         raise ValueError(f"unsupported image mime for resizing: {image_mime}")
 
     with Image.open(BytesIO(image_bytes)) as source:
+        decoded_width, decoded_height = source.size
+        if decoded_width * decoded_height > MAX_EXACT_IMAGE_PIXELS:
+            raise ValueError(f"source image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
         image = ImageOps.exif_transpose(source)
         if source_dimensions is None:
             source_dimensions = image.size
@@ -338,14 +387,32 @@ def save_derived_output_image(
     metadata: dict[str, object],
     suffix: str,
 ) -> dict[str, object]:
+    now = datetime.now()
     source_path = Path(source_image_path) if source_image_path else None
+    source_digest = ""
     if source_path is not None and source_path.is_file() and _is_within_outputs(source_path, outputs_dir):
-        day_dir = source_path.parent
-        source_stem = source_path.stem
+        relative_source = source_path.resolve().relative_to(outputs_dir.resolve())
+        group_prefix = ""
+        if len(relative_source.parts) >= 3:
+            try:
+                datetime.strptime(relative_source.parts[0], "%Y%m%d")
+            except ValueError:
+                pass
+            else:
+                group_prefix = relative_source.parts[1]
+        day_dir = output_group_dir(outputs_dir, now, group_prefix)
+        cleaned_source_stem = _sanitize_filename_core(source_path.stem).strip(".-_")
+        source_stem = sanitize_filename_prefix(source_path.stem)
+        if len(cleaned_source_stem) > 48:
+            source_digest = hashlib.sha256(relative_source.as_posix().encode()).hexdigest()[:12]
     else:
-        now = datetime.now()
         day_dir = outputs_dir / now.strftime("%Y%m%d")
-        source_stem = f"{mode}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        source_stem = ""
+
+    if not source_stem:
+        source_stem = f"{sanitize_filename_prefix(mode) or 'result'}-{now.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    elif source_digest:
+        source_stem = f"{source_stem[:35].rstrip('.-_')}-{source_digest}"
 
     safe_suffix = sanitize_filename_prefix(suffix) or "final"
     stem = f"{source_stem}-{safe_suffix}"
@@ -397,8 +464,6 @@ def prune_old_outputs(outputs_dir: Path, retention_days: int) -> int:
     cutoff = datetime.now() - timedelta(days=retention_days)
     removed = 0
     for entry in outputs_dir.iterdir():
-        if not entry.is_dir():
-            continue
         try:
             day = datetime.strptime(entry.name, "%Y%m%d")
         except ValueError:
@@ -407,8 +472,40 @@ def prune_old_outputs(outputs_dir: Path, retention_days: int) -> int:
         # midnight, so compare the folder's END of day against the cutoff.
         # Comparing its start (midnight) would delete files up to a day early —
         # with retention_days=1 an image saved at 23:59 would die minutes later.
-        if day + timedelta(days=1) <= cutoff:
-            shutil.rmtree(entry, ignore_errors=True)
+        if day + timedelta(days=1) > cutoff:
+            continue
+        if entry.is_symlink():
+            try:
+                entry.unlink()
+            except OSError as exc:
+                log_event(logger, logging.WARNING, "storage_prune_failed", folder=str(entry), error=type(exc).__name__)
+                continue
             removed += 1
             log_event(logger, logging.INFO, "storage_pruned", folder=str(entry))
+            continue
+        if not entry.is_dir():
+            continue
+        # Older releases wrote newly-created derived images back into the source
+        # day-folder. Preserve those legacy files until their own retention age;
+        # lstat intentionally ignores symlink targets.
+        cutoff_ts = cutoff.timestamp()
+        has_recent_file = False
+        for file_path in entry.rglob("*"):
+            try:
+                file_stat = file_path.lstat()
+                if stat.S_ISREG(file_stat.st_mode) and file_stat.st_mtime > cutoff_ts:
+                    has_recent_file = True
+                    break
+            except OSError:
+                continue
+        if has_recent_file:
+            log_event(logger, logging.INFO, "storage_prune_skipped_recent", folder=str(entry))
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            log_event(logger, logging.WARNING, "storage_prune_failed", folder=str(entry), error=type(exc).__name__)
+            continue
+        removed += 1
+        log_event(logger, logging.INFO, "storage_pruned", folder=str(entry))
     return removed

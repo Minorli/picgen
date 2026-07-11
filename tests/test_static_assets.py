@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -10,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.53"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.55"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -35,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.53"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.55"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "expandLogoSafetyRegion" in placement_js
@@ -258,14 +261,16 @@ def test_generation_progress_explains_retry_attempts_inside_preview() -> None:
     assert "setPendingResultFailure" in app_js
     assert "refs.resultPreviewEmpty.textContent = safeMessage" in app_js
     assert 'refs.resultPreviewLabel.textContent = "生成失败"' in app_js
-    assert ".preview-empty.failure" in styles_css
+    # 结果占位元素的类是 empty-placeholder；旧选择器 .preview-empty.failure
+    # 匹配不到任何节点，失败态从未变红过。
+    assert ".empty-placeholder.failure" in styles_css
 
 
 def test_copyright_risk_state_survives_workspace_restore() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "copyrightRisk: state.copyrightRisk" in app_js
-    assert "state.copyrightRisk = result.copyrightRisk" in app_js
+    assert 'normalizeRestoredReviewState(result.copyrightRisk, "copyright")' in app_js
     assert "restoreCopyrightRiskPanel" in app_js
     assert "scheduleWorkspacePersist()" in app_js
 
@@ -1180,6 +1185,7 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "/*.jpeg" in dockerignore
     assert "/*.webp" in dockerignore
     assert "!static/*.png" in dockerignore
+    assert "uv.lock" not in dockerignore.splitlines()
     assert "env_file:" not in compose
     assert f"image: minorli/picgen:{version}" in compose
     assert "picgen-data:/app/data" in compose
@@ -1191,6 +1197,7 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "apt-get" not in dockerfile
     assert "curl" not in dockerfile
     assert "urllib.request.urlopen" in dockerfile
+    assert "uv sync --frozen --no-dev" in dockerfile
     assert '"--workers", "1"' in dockerfile
     assert '"--workers", "2"' not in dockerfile
     assert "https://sub.tidba.com/v1/images/generations" in dockerfile
@@ -1233,3 +1240,747 @@ def test_frontend_rejects_oversized_image_uploads_before_reading_files() -> None
     assert "validateClientImageFile" in app_js
     assert "图片文件过大" in app_js
     assert "validateClientImageFile(file)" in app_js
+
+
+def test_frontend_concurrency_and_persistence_guards_cover_new_edge_cases() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "rerunInProgress: false" in app_js
+    assert "userContextEpoch: 0" in app_js
+    assert "preferenceSyncTail: Promise.resolve()" in app_js
+
+    auth_gate = app_js[app_js.index("function enterAuthGate") : app_js.index("function enterAppShell")]
+    assert "cancelPendingPromptConfirmation()" in auth_gate
+
+    user_switch = app_js[
+        app_js.index("function invalidateUserContext") : app_js.index("function applyAnonymousShellChrome")
+    ]
+    assert "state.userContextEpoch += 1" in user_switch
+    assert "state.activeRequestController?.abort()" in user_switch
+    session_expiry = app_js[
+        app_js.index("function handleSessionExpired") : app_js.index("function enterAuthGate")
+    ]
+    assert "setCurrentUser(null)" in session_expiry
+    fetch_json = app_js[app_js.index("async function fetchJSON") : app_js.index("function handleSessionExpired")]
+    assert fetch_json.index("ensureUserContextCurrent(requestUserContextEpoch)") < fetch_json.index(
+        "if (response.status === 401)"
+    )
+
+    user_scope_reset = app_js[
+        app_js.index("function resetWorkspaceForUserScope") : app_js.index("function openWorkspaceDb")
+    ]
+    assert "state.persistenceReady = false" in user_scope_reset
+    assert "clearResult()" in user_scope_reset
+    assert "clearGenerateForm()" in user_scope_reset
+    assert "clearEditForm()" in user_scope_reset
+    assert "resetItineraryMapExample()" in user_scope_reset
+    bootstrap_start = app_js.index("async function startAuthenticatedApp")
+    authenticated_bootstrap = app_js[bootstrap_start : app_js.index("\n\ninit()", bootstrap_start)]
+    assert authenticated_bootstrap.index("resetWorkspaceForUserScope()") < authenticated_bootstrap.index(
+        "state.history = loadJSON(historyStorageKey(), [])"
+    )
+
+    load_workspace = app_js[
+        app_js.index("async function loadWorkspaceSnapshot") : app_js.index("async function saveWorkspaceSnapshot")
+    ]
+    assert load_workspace.index("const storageKey = workspaceStorageKey()") < load_workspace.index(
+        "await openWorkspaceDb()"
+    )
+    save_workspace = app_js[
+        app_js.index("async function saveWorkspaceSnapshot") : app_js.index("function sanitizeRawResponse")
+    ]
+    assert "storageKey = workspaceStorageKey()" in save_workspace
+    assert "store.put(snapshot, storageKey)" in save_workspace
+    workspace_snapshot = app_js[
+        app_js.index("function createWorkspaceSnapshot") : app_js.index("function scheduleWorkspacePersist")
+    ]
+    assert "ownerUserId: state.currentUser?.id ?? null" in workspace_snapshot
+
+    preferences_sync = app_js[
+        app_js.index("async function syncUserPreferences") : app_js.index("function getImageTransport")
+    ]
+    assert "state.preferenceSyncTail" in preferences_sync
+    assert "userContextIsCurrent" in preferences_sync
+    assert "user_context_epoch" not in preferences_sync
+
+    post_json = app_js[app_js.index("async function postJSON") : app_js.index("async function postJSONSilent")]
+    assert "options.userContextEpoch" in post_json
+    for function_name, next_function in (
+        ("submitAIItineraryMap", "resetItineraryMapExample"),
+        ("submitVariantGenerate", "submitGenerate"),
+        ("submitGenerate", "submitEdit"),
+        ("submitEdit", "workspaceHasDraftContent"),
+    ):
+        block = app_js[
+            app_js.index(f"async function {function_name}") : app_js.index(f"function {next_function}")
+        ]
+        assert "userContextEpoch" in block
+        assert "userContextIsCurrent" in block
+
+    candidate_switch = app_js[
+        app_js.index("function selectResultCandidate") : app_js.index("function renderResultCandidates")
+    ]
+    assert "state.copyrightRiskRequestSeq += 1" in candidate_switch
+    assert "state.textFidelityRequestSeq += 1" in candidate_switch
+
+    workspace_snapshot = app_js[
+        app_js.index("function createWorkspaceSnapshot") : app_js.index("function scheduleWorkspacePersist")
+    ]
+    assert "checkedCandidateIndex: state.checkedCandidateIndex" in workspace_snapshot
+    workspace_restore = app_js[
+        app_js.index("async function restoreWorkspaceState") : app_js.index("function currentFormSnapshot")
+    ]
+    assert "legacyMultiCandidateCheck" in workspace_restore
+    assert "旧工作区没有记录检查对应的候选" in workspace_restore
+    persist = app_js[
+        app_js.index("function scheduleWorkspacePersist") : app_js.index("async function restoreWorkspaceState")
+    ]
+    assert "state.suppressSettingsPersist" in persist
+    pagehide = app_js[app_js.index('window.addEventListener("pagehide"') : app_js.index("async function init")]
+    assert "state.suppressSettingsPersist" in pagehide
+
+    save_json = app_js[app_js.index("function saveJSON") : app_js.index("function escapeHTML")]
+    assert "return true" in save_json
+    assert "return false" in save_json
+    save_settings = app_js[app_js.index("function saveSettings") : app_js.index("function loadSettings")]
+    assert "if (!saveJSON" in save_settings
+
+    coordinate_merge = app_js[
+        app_js.index("function mergeItineraryCoordinateStops") : app_js.index("function itineraryCoordinateHelpText")
+    ]
+    assert "exactNameMatches" in coordinate_merge
+    assert "name.includes(coordName)" not in coordinate_merge
+    assert "!coordName" in coordinate_merge
+
+    external_result_reset = app_js[
+        app_js.index("function resetReviewStateForExternalResult") : app_js.index("function openSharedResult")
+    ]
+    assert "state.resultGenerationSeq += 1" in external_result_reset
+    assert "state.copyrightRiskRequestSeq += 1" in external_result_reset
+    assert "state.textFidelityRequestSeq += 1" in external_result_reset
+    assert "state.generatedImageDetailRequestSeq += 1" in external_result_reset
+    assert "state.checkedCandidateIndex = null" in external_result_reset
+    assert 'setError("")' in external_result_reset
+    assert "resetReviewStateForExternalResult()" in app_js[
+        app_js.index("function openSharedResult") : app_js.index("function galleryItemToAsset")
+    ]
+    assert "resetReviewStateForExternalResult()" in app_js[
+        app_js.index("function openGalleryLikeImage") : app_js.index("function openGalleryItem")
+    ]
+
+    candidate_switch = app_js[
+        app_js.index("function selectResultCandidate") : app_js.index("function renderResultCandidates")
+    ]
+    assert "state.candidateReviewStates" in candidate_switch
+    assert "reviewPayloadForCandidate" in candidate_switch
+    assert "reviewStatusNeedsRetry" in candidate_switch
+
+    set_result = app_js[app_js.index("async function setResult") : app_js.index("function historySummary")]
+    assert 'setRiskPanel("等待检查"' in set_result
+    assert 'setTextFidelityPanel("等待检查"' in set_result
+    assert 'refs.shareResultPanel?.classList.add("hidden")' in set_result
+
+    pending_result = app_js[
+        app_js.index("function previewPendingResult") : app_js.index("function candidateImageSource")
+    ]
+    assert "normalizePendingReviewSnapshot" in pending_result
+    assert "state.resultGenerationSeq += 1" in pending_result
+    assert "state.copyrightRiskRequestSeq += 1" in pending_result
+    assert "state.textFidelityRequestSeq += 1" in pending_result
+    assert 'refs.shareResultPanel?.classList.add("hidden")' in pending_result
+
+    risk_check = app_js[
+        app_js.index("async function checkCopyrightRisk") : app_js.index("async function checkTextFidelity")
+    ]
+    assert risk_check.count("riskRequestSeq !== state.copyrightRiskRequestSeq") >= 6
+    fidelity_check = app_js[
+        app_js.index("async function checkTextFidelity") : app_js.index("async function fileToDataURL")
+    ]
+    assert fidelity_check.count("fidelityRequestSeq !== state.textFidelityRequestSeq") >= 8
+
+    rerun = app_js[
+        app_js.index("async function regenerateFromBadFeedback") : app_js.index("function validateAuthFormInputs")
+    ]
+    assert "state.rerunInProgress" in rerun
+    assert "if (!submitted)" in rerun
+    rerun_last = app_js[
+        app_js.index("async function rerunLastGeneration") : app_js.index("function getGenerateSampleCount")
+    ]
+    assert "state.rerunInProgress = true" in rerun_last
+    assert "state.rerunInProgress = false" in rerun_last
+    assert "mergeRerunDraftSnapshots" in rerun_last
+
+    form_snapshot = app_js[app_js.index("function currentFormSnapshot") : app_js.index("function getSizeSnapshotValue")]
+    assert "generateWidth" in form_snapshot
+    assert "generateHeight" in form_snapshot
+    apply_snapshot = app_js[
+        app_js.index("function applyFormSnapshot") : app_js.index("function rememberRegenerationRequest")
+    ]
+    assert "snapshot.generateWidth" in apply_snapshot
+    assert "snapshot.generateHeight" in apply_snapshot
+
+    feedback = app_js[
+        app_js.index("async function submitResultFeedback") : app_js.index("async function submitBadFeedbackReason")
+    ]
+    assert feedback.index("state.feedbackSubmitting") < feedback.index("updateFeedbackSelection")
+    assert "feedbackResultGenerationSeq" in feedback
+    assert "feedbackCandidateIndex" in feedback
+    assert feedback.count("feedbackTargetIsCurrent()") >= 3
+
+    workspace_restore = app_js[
+        app_js.index("async function restoreWorkspaceState") : app_js.index("function currentFormSnapshot")
+    ]
+    assert "normalizeRestoredReviewState" in workspace_restore
+
+    push_history = app_js[app_js.index("function pushHistory") : app_js.index("async function postJSON")]
+    assert "const nextHistory" in push_history
+    assert "if (!saveJSON" in push_history
+
+    draft_check = app_js[app_js.index("function workspaceHasDraftContent") : app_js.index("function clearGenerateForm")]
+    assert "state.lastResultImage" in draft_check
+    assert "state.editImage" in draft_check
+    assert "state.editMaskImage" in draft_check
+    assert "creativeBriefSnapshot" in draft_check
+    assert "DEFAULT_ITINERARY_TITLE" in draft_check
+
+    clear_history = app_js[
+        app_js.index('refs.clearHistoryButton.addEventListener("click"') : app_js.index(
+            'refs.generateTab.addEventListener("click"'
+        )
+    ]
+    assert "if (!saveJSON" in clear_history
+
+    new_task = app_js[
+        app_js.index('refs.newTaskButton.addEventListener("click"') : app_js.index(
+            'refs.saveSettingsButton.addEventListener("click"'
+        )
+    ]
+    assert "cancelPendingPromptConfirmation()" in new_task
+
+    new_task_shortcut = app_js[
+        app_js.rindex("if (", 0, app_js.index('event.key.toLowerCase() === "k"')) : app_js.index(
+            'if (isTypingElement(document.activeElement))'
+        )
+    ]
+    assert "isTypingElement(document.activeElement)" in new_task_shortcut
+    assert "promptConfirmModal" in new_task_shortcut
+
+    generated_detail = app_js[
+        app_js.index("async function openGeneratedImageDetail") : app_js.index("function openGalleryLikeImage")
+    ]
+    assert "generatedImageDetailRequestSeq" in generated_detail
+    assert "requestSeq !== state.generatedImageDetailRequestSeq" in generated_detail
+
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="retryResultReviewButton"' in index_html
+    assert "retrySelectedCandidateReview" in app_js
+
+    shortcuts = app_js[app_js.index("// macOS 上 Option+数字") : app_js.index('if (event.key === "/")')]
+    assert shortcuts.count("!isTypingElement(document.activeElement)") >= 3
+
+
+def test_itinerary_coordinate_merge_prefers_exact_name_and_date() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function mergeItineraryCoordinateStops") : app_js.index("function itineraryCoordinateHelpText")
+    ]
+    expression = """
+const textStops = [
+  { date: "D1", name: "巴黎北站", transport: "" },
+  { date: "D2", name: "巴黎", transport: "" },
+  { date: "D3", name: "巴黎南站", transport: "" },
+];
+const coordinates = [
+  { date: "D2", name: "巴黎", lat: 48.8566, lng: 2.3522, transport: "火车" },
+];
+const ambiguous = [
+  { date: "", name: "巴黎", lat: 1, lng: 2, transport: "" },
+];
+console.log(JSON.stringify({
+  exact: mergeItineraryCoordinateStops(textStops, coordinates),
+  ambiguous: mergeItineraryCoordinateStops(
+    [textStops[0], textStops[2]],
+    ambiguous,
+  ),
+  conflictingDateAndName: mergeItineraryCoordinateStops(
+    [
+      { date: "D1", name: "巴黎", transport: "" },
+      { date: "D2", name: "里昂", transport: "" },
+    ],
+    [{ date: "D2", name: "巴黎", lat: 9, lng: 10, transport: "火车" }],
+  ),
+  substringCollision: mergeItineraryCoordinateStops(
+    [{ date: "D1", name: "东京都", transport: "" }],
+    [{ date: "D1", name: "京都", lat: 35.0116, lng: 135.7681, transport: "火车" }],
+  ),
+}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", f"{function_source}\n{expression}"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert "lat" not in result["exact"][0]
+    assert result["exact"][1]["lat"] == 48.8566
+    assert result["exact"][1]["transport"] == "火车"
+    assert all("lat" not in stop for stop in result["ambiguous"])
+    assert all("lat" not in stop for stop in result["conflictingDateAndName"])
+    assert all("lat" not in stop for stop in result["substringCollision"])
+
+
+def test_rerun_snapshot_merge_preserves_edits_made_while_request_is_running() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function isPlainSnapshotObject") : app_js.index("async function rerunLastGeneration")
+    ]
+    expression = """
+const original = {
+  generatePrompt: "draft prompt",
+  quality: "high",
+  generateSize: "1088x2240",
+  generateSizePreset: "1088x2240",
+  generateWidth: "1088",
+  generateHeight: "2240",
+  creativeBrief: { destination: "draft destination", mood: "draft mood" },
+};
+const baseline = {
+  generatePrompt: "rerun prompt",
+  quality: "low",
+  generateSize: "1024x1024",
+  generateSizePreset: "1024x1024",
+  generateWidth: "1024",
+  generateHeight: "1024",
+  creativeBrief: { destination: "rerun destination", mood: "rerun mood" },
+};
+const latest = {
+  generatePrompt: "new prompt typed while waiting",
+  quality: "low",
+  generateSize: "custom",
+  generateSizePreset: "custom",
+  generateWidth: "1536",
+  generateHeight: "",
+  creativeBrief: { destination: "rerun destination", mood: "new mood while waiting" },
+};
+console.log(JSON.stringify(mergeRerunDraftSnapshots(original, baseline, latest)));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", f"{function_source}\n{expression}"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "generatePrompt": "new prompt typed while waiting",
+        "quality": "high",
+        "generateSize": "custom",
+        "generateSizePreset": "custom",
+        "generateWidth": "1536",
+        "generateHeight": "",
+        "creativeBrief": {
+            "destination": "draft destination",
+            "mood": "new mood while waiting",
+        },
+    }
+
+
+def test_hidden_size_radios_and_desktop_result_actions_cannot_expand_the_page() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+    size_radio = styles_css[styles_css.index(".size-picker input {") : styles_css.index(".size-picker span {")]
+
+    assert "width: 1px" in size_radio
+    assert "height: 1px" in size_radio
+    assert "min-height: 0" in size_radio
+    assert "clip-path: inset(50%)" in size_radio
+    assert "@media (min-width: 821px) and (max-width: 1600px)" in styles_css
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in styles_css
+
+
+def test_simple_itinerary_template_headers_are_not_parsed_as_route_stops() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function isItineraryInstructionSection") : app_js.index(
+            "function mergeItineraryCoordinateStops"
+        )
+    ]
+    expression = """
+const prompt = [
+  "标题：北疆秋日之旅",
+  "副标题/日期：9/5 - 9/12",
+  "逐日行程：",
+  "D1 乌鲁木齐 → 布尔津",
+  "D2 布尔津 → 喀纳斯",
+].join("\\n");
+console.log(JSON.stringify(parseItineraryTextStops(prompt)));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", f"{function_source}\n{expression}"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stops = json.loads(completed.stdout)
+
+    assert [stop["name"] for stop in stops] == ["乌鲁木齐", "布尔津", "喀纳斯"]
+    assert all(stop["name"] != "9/12" for stop in stops)
+
+
+def test_simple_mode_dom_and_existing_submit_path_contract() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    for element_id in (
+        "uiModeToggleButton",
+        "simpleModePanel",
+        "simpleScenarioPicker",
+        "simpleScenarioGrid",
+        "simpleScenarioForm",
+        "simpleScenarioFields",
+        "simpleGenerateButton",
+        "simpleFirstRunChecklist",
+        "simpleResultSkeleton",
+        "simpleResultEmpty",
+        "simpleShareResultButton",
+        "simpleMoreActionsButton",
+        "simpleMoreActionsMenu",
+        "resultPanelTitle",
+        "resultPanelSubtitle",
+    ):
+        assert f'id="{element_id}"' in index_html
+
+    assert "function applyUiMode(" in app_js
+    assert "function renderSimpleScenarioCards(" in app_js
+    assert "function renderSimpleScenarioForm(" in app_js
+    assert "function assembleSimpleScenarioPrompt(" in app_js
+    assert "async function submitSimpleScenario(" in app_js
+    assert "await submitGenerate()" in app_js
+    assert "await submitEdit()" in app_js
+    assert "await submitAIItineraryMap()" in app_js
+    assert "ui_mode: state.uiMode" in app_js
+    assert "simpleDraft: simpleDraftSnapshot()" in app_js
+    assert 'refs.resultPanelTitle.textContent = simple ? "成品预览" : "结果对比"' in app_js
+    assert (
+        'refs.resultPanelSubtitle.textContent = simple ? "生成完成后可放大查看" : "并排查看源图与结果图"'
+        in app_js
+    )
+    assert '.replace(/([：:])(?=- )/g, "$1\\n")' in app_js
+    assert "function currentSimpleListValues()" in app_js
+    assert "const currentSelected = new Set(" in app_js
+    assert 'view: "picker"' in app_js
+    assert "function simpleScenarioAcceptsReferenceImage(" in app_js
+    assert "preserveSceneRecipe" in app_js
+    assert "function uiModePreferencesPayload()" in app_js
+    initialize_mode = app_js[
+        app_js.index("function initializeUiMode") : app_js.index("function renderPromptRecipeCards")
+    ]
+    assert "sync: false" in initialize_mode
+    assemble_block = app_js[
+        app_js.index("function assembleSimpleScenarioPrompt") : app_js.index("function simpleRequiredFieldMissing")
+    ]
+    assert ".filter((line, index)" not in assemble_block
+    assert "templateLines" in assemble_block
+    continue_edit = app_js[
+        app_js.index("function continueEditingFromResult") : app_js.index("function startVariantFromResult")
+    ]
+    assert 'state.uiMode === "simple"' in continue_edit
+    start_variant = app_js[
+        app_js.index("function startVariantFromResult") : app_js.index("async function handleClipboardPaste")
+    ]
+    assert "void rerunLastGeneration()" in start_variant
+    assert "right: calc(100% + var(--ux-space-2));" in styles_css
+    assert "order: 99;" in styles_css
+    assert "body.ui-simple-mode #resultPanel > .debug-panel" in styles_css
+    assert "max-height: var(--ux-result-preview-max-height);" in styles_css
+
+
+def test_simple_mode_scene_covers_and_official_icon_sprite_are_real_assets() -> None:
+    icons_svg = (ROOT_DIR / "static" / "icons.svg").read_text(encoding="utf-8")
+
+    assert icons_svg.count("<symbol ") == 30
+    assert "Copyright (c) 2021 Bytedance" in icons_svg
+    assert 'viewBox="0 0 48 48"' in icons_svg
+    assert 'stroke="currentColor"' in icons_svg
+    assert 'stroke-width="4"' in icons_svg
+
+    for filename in (
+        "scene-poster.jpg",
+        "scene-itinerary.jpg",
+        "scene-ranking.jpg",
+        "scene-edit.jpg",
+        "scene-free.jpg",
+    ):
+        payload = (ROOT_DIR / "static" / filename).read_bytes()
+        assert payload.startswith(b"\xff\xd8\xff")
+        assert len(payload) > 10_000
+
+
+def test_simple_mode_css_uses_the_phase_zero_token_layer() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert styles_css.count("--ux-primary-") >= 10
+    simple_css = styles_css.split("/* Simple mode: start */", 1)[1].split("/* Simple mode: end */", 1)[0]
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", simple_css)
+    assert all(
+        value.strip().startswith("var(")
+        for value in re.findall(r"box-shadow:\s*([^;]+)", simple_css)
+    )
+    assert not re.search(r"(?:transition|animation)(?:-duration)?:\s*[^;]*(?:\d+ms|\d*\.\d+s)", simple_css)
+    assert "var(--ux-" in simple_css
+    assert ".simple-input:focus:not(:disabled)" in simple_css
+    assert ".simple-textarea:focus:not(:disabled)" in simple_css
+    assert ".simple-dynamic-input:focus:not(:disabled)" in simple_css
+    assert "width: min(calc(100% - (var(--ux-space-4) * 2)), var(--ux-checklist-width));" in simple_css
+    assert "icons.svg#icon-" in (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+
+def test_release_blocker_frontend_guards_are_present() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    auth_gate = app_js[app_js.index("function enterAuthGate") : app_js.index("function enterAppShell")]
+    assert "self_registration_enabled" in auth_gate
+    assert "registrationEnabled" in auth_gate
+    auth_submit = app_js[
+        app_js.index("async function submitAuthForm") : app_js.index("async function submitPasswordResetRequest")
+    ]
+    assert "authPayload.company" not in auth_submit
+    assert auth_submit.index("await startAuthenticatedApp()") < auth_submit.index("enterAppShell()")
+
+    invalidation = app_js[
+        app_js.index("function invalidateUserContext") : app_js.index("function userContextIsCurrent")
+    ]
+    assert "state.preferenceSyncController?.abort()" in invalidation
+    assert "state.preferenceSyncTail = Promise.resolve()" in invalidation
+    assert "state.simpleChecklistCompletionTimer" in invalidation
+
+    reset = app_js[app_js.index("function resetWorkspaceForUserScope") : app_js.index("function openWorkspaceDb")]
+    assert "renderGalleryItems([])" in reset
+    assert "renderSharedResults([])" in reset
+
+    rerun = app_js[app_js.index("async function rerunLastGeneration") : app_js.index("function getGenerateSampleCount")]
+    assert "const userContextEpoch = state.userContextEpoch" in rerun
+    assert rerun.index("if (!userContextIsCurrent(userContextEpoch))") < rerun.index("const latestSnapshot")
+
+    preference_sync = app_js[
+        app_js.index("async function syncUserPreferences") : app_js.index("function getImageTransport")
+    ]
+    assert "signal: controller.signal" in preference_sync
+    assert 'endpoint = "/api/preferences"' in preference_sync
+    assert 'method = "PUT"' in preference_sync
+    assert 'endpoint: "/api/preferences/ui-mode"' in app_js
+    assert 'endpoint: "/api/preferences/simple-checklist"' in app_js
+
+    checklist = app_js[app_js.index("function loadSimpleChecklistState") : app_js.index("function median")]
+    assert "simple_checklist_completed" in checklist
+    assert "const completionUserContextEpoch" in checklist
+    assert "completionStorageKey" in checklist
+
+    paste = app_js[app_js.index("async function handleClipboardPaste") : app_js.index("function bindPreviewTrigger")]
+    assert "useSimpleImageFieldFile(recipe, imageField, file)" in paste
+
+    simple_sync = app_js[
+        app_js.index("function syncSimpleScenarioToProfessional") : app_js.index("async function submitSimpleScenario")
+    ]
+    assert "simpleEditSourceSize" in simple_sync
+    upload = app_js[app_js.index("async function useImageFile") : app_js.index("async function useMaskFile")]
+    assert "width:" in upload
+    assert "height:" in upload
+    assert 'createSpriteIcon("loading", "ux-icon simple-upload-loading")' in app_js
+
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".simple-upload-zone:hover:not(:disabled):not([aria-busy=\"true\"])" in styles_css
+    assert ".simple-upload-zone:active:not(:disabled):not([aria-busy=\"true\"])" in styles_css
+    assert ".simple-upload-zone:disabled" in styles_css
+    assert ".simple-upload-zone[aria-busy=\"true\"]" in styles_css
+
+
+def test_file_reads_use_channel_scoped_latest_request_and_busy_lifecycle() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    state_block = app_js[app_js.index("const state = {") : app_js.index("const refs = {")]
+    assert "latestFileReadEpoch: 0" in state_block
+    assert "latestFileReadSequences: {}" in state_block
+    assert "latestFileReadBusyChannels: new Set()" in state_block
+
+    for channel in (
+        'editImage: "edit-image"',
+        'editMask: "edit-mask"',
+        'styleReference: "style-reference"',
+        'materialReference: "material-reference"',
+        'generateReference: "generate-reference"',
+    ):
+        assert channel in app_js
+
+    invalidation = app_js[
+        app_js.index("function invalidateUserContext") : app_js.index("function userContextIsCurrent")
+    ]
+    assert "invalidateLatestFileReads()" in invalidation
+
+    lifecycle = app_js[
+        app_js.index("function latestFileReadChannelIsBusy") : app_js.index("function simpleImageAsset")
+    ]
+    assert "state.latestFileReadSequences[request.channel] === request.sequence" in lifecycle
+    assert "request.userContextEpoch === state.userContextEpoch" in lifecycle
+    assert "request.latestFileReadEpoch === state.latestFileReadEpoch" in lifecycle
+    assert "request.contextIsCurrent?.() !== false" in lifecycle
+    assert "error.staleLatestFileRead = true" in lifecycle
+    assert "finishLatestFileRead(request)" in lifecycle
+    assert "if (!latestFileReadRequestOwnsBusyState(request))" in lifecycle
+
+    upload = app_js[
+        app_js.index("async function useSimpleImageFieldFile") : app_js.index("function renderSimpleImageField")
+    ]
+    assert "await runLatestFileRead(" in upload
+    assert "contextIsCurrent:" in upload
+    assert 'state.simpleDraft.view === "form"' in upload
+    assert "onApplied:" in upload
+
+    reader_boundaries = (
+        ("async function useImageFile", "async function useMaskFile", "setEditImage("),
+        ("async function useMaskFile", "async function useGenerateReferenceFile", "setEditMaskImage("),
+        (
+            "async function useGenerateReferenceFile",
+            "async function useStyleReferenceFile",
+            "setGenerateReferenceImage(",
+        ),
+        ("async function useStyleReferenceFile", "async function useMaterialReferenceFile", "setStyleReferenceImage("),
+        (
+            "async function useMaterialReferenceFile",
+            "async function submitVariantGenerate",
+            "setMaterialReferenceImage(",
+        ),
+    )
+    for start, end, setter in reader_boundaries:
+        reader = app_js[app_js.index(start) : app_js.index(end)]
+        assert "commitGuard = null" in reader
+        assert reader.index("commitGuard?.()") < reader.index(setter)
+
+    rendered_upload = app_js[
+        app_js.index("function renderSimpleImageField") : app_js.index("function renderSimpleScenarioForm")
+    ]
+    assert "latestFileReadChannelForSimpleRecipe(recipe)" in rendered_upload
+    assert "bindLatestFileReadControls(dropzone, input, channel)" in rendered_upload
+
+    professional_bindings = app_js[app_js.index("function bindReferenceDropzone") : app_js.index("function bindEvents")]
+    assert "runLatestFileRead(channel, file, handler)" in professional_bindings
+    bind_events = app_js[app_js.index("function bindEvents") : app_js.index("async function init")]
+    assert "FILE_READ_CHANNELS.styleReference" in bind_events
+    assert "FILE_READ_CHANNELS.materialReference" in bind_events
+    assert "FILE_READ_CHANNELS.editImage" in bind_events
+    assert "FILE_READ_CHANNELS.editMask" in bind_events
+
+
+def test_file_read_invalidation_covers_clear_auto_source_and_mode_changes() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    clear_reference = app_js[
+        app_js.index("function clearGenerateReferenceImage") : app_js.index("function clearSourcePreview")
+    ]
+    assert "invalidateLatestFileReadChannels(" in clear_reference
+    assert "FILE_READ_CHANNELS.styleReference" in clear_reference
+    assert "FILE_READ_CHANNELS.materialReference" in clear_reference
+    assert "FILE_READ_CHANNELS.generateReference" in clear_reference
+
+    clear_mask = app_js[
+        app_js.index("function clearEditMaskImage") : app_js.index("function useLastResultAsEditSource")
+    ]
+    assert "invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editMask)" in clear_mask
+
+    auto_source = app_js[app_js.index("function useLastResultAsEditSource") : app_js.index("function setMode")]
+    assert "invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editImage)" in auto_source
+
+    set_mode = app_js[app_js.index("function setMode") : app_js.index("function canComparePreviews")]
+    assert "invalidateLatestFileReads()" in set_mode
+
+    apply_ui_mode = app_js[app_js.index("function applyUiMode") : app_js.index("function initializeUiMode")]
+    assert "invalidateLatestFileReads()" in apply_ui_mode
+
+
+def test_simple_picker_edit_upload_uses_latest_read_busy_and_loading_states() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    cards = app_js[
+        app_js.index("function renderSimpleScenarioCards") : app_js.index("function handleSimpleEditImageFile")
+    ]
+    assert "bindLatestFileReadControls(card, refs.simpleEditImageInput, FILE_READ_CHANNELS.editImage)" in cards
+    assert 'createSpriteIcon("loading", "ux-icon simple-scenario-card-loading")' in cards
+
+    picker_upload = app_js[
+        app_js.index("async function handleSimpleEditImageFile") : app_js.index("function showSimpleScenarioPicker")
+    ]
+    assert "await runLatestFileRead(" in picker_upload
+    assert "FILE_READ_CHANNELS.editImage" in picker_upload
+    assert "contextIsCurrent:" in picker_upload
+    assert 'state.uiMode === "simple"' in picker_upload
+    assert 'state.simpleDraft.view === "picker"' in picker_upload
+    assert "onApplied:" in picker_upload
+
+    assert ".simple-scenario-card-loading" in styles_css
+    assert '.simple-scenario-card[aria-busy="true"] .simple-scenario-card-loading' in styles_css
+
+
+def test_user_scoped_refreshes_ignore_stale_request_errors() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    function_boundaries = (
+        ("async function refreshUsageSummary", "async function refreshImageStats"),
+        ("async function refreshImageStats", "function updateAdminPanelVisibility"),
+        ("async function refreshShareRecipients", "function showSharePanel"),
+        ("async function refreshSharedResults", "function resetReviewStateForExternalResult"),
+        ("async function refreshGenerationJobs", "async function openGeneratedImageDetail"),
+        ("async function loadUserPreferences", "async function syncUserPreferences"),
+    )
+    for start, end in function_boundaries:
+        block = app_js[app_js.index(start) : app_js.index(end)]
+        assert "catch (error)" in block
+        assert "if (error?.staleUserContext)" in block
+        stale_guard = block.index("if (error?.staleUserContext)")
+        assert block.index("return", stale_guard) > stale_guard
+
+
+def test_latest_file_read_programmatic_sources_and_busy_controls_are_coordinated() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    set_busy = app_js[app_js.index("function setBusy") : app_js.index("function cancelActiveRequest")]
+    assert "syncLatestFileReadControls()" in set_busy
+
+    setter_expectations = (
+        ("function setGenerateReferenceImage", "function setStyleReferenceImage", "generateReference"),
+        ("function setStyleReferenceImage", "function setMaterialReferenceImage", "styleReference"),
+        ("function setMaterialReferenceImage", "function clearGenerateReferenceImage", "materialReference"),
+        ("function setEditImage", "function setEditMaskImage", "editImage"),
+        ("function setEditMaskImage", "function clearEditMaskImage", "editMask"),
+    )
+    for start, end, channel in setter_expectations:
+        setter = app_js[app_js.index(start) : app_js.index(end)]
+        assert "preserveLatestFileRead = false" in setter
+        assert f"invalidateLatestFileReadChannel(FILE_READ_CHANNELS.{channel})" in setter
+
+    readers = app_js[app_js.index("async function useImageFile") : app_js.index("async function submitVariantGenerate")]
+    assert readers.count("preserveLatestFileRead: true") == 5
+
+    group_asset = app_js[
+        app_js.index("function useGroupAssetAsReference") : app_js.index("async function refreshTeamChatGroupContext")
+    ]
+    assert "invalidateLatestFileReadChannels(" in group_asset
+    assert "FILE_READ_CHANNELS.styleReference" in group_asset
+    assert "FILE_READ_CHANNELS.materialReference" in group_asset
+
+    result_commit = app_js[app_js.index("async function setResult") : app_js.index("function historySummary")]
+    assert "invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editImage)" in result_commit
+
+    professional_dropzone = app_js[
+        app_js.index("function bindReferenceDropzone") : app_js.index("function bindEvents")
+    ]
+    assert professional_dropzone.count("latestFileReadInteractionBlocked(channel)") >= 3
+    bind_events = app_js[app_js.index("function bindEvents") : app_js.index("async function init")]
+    assert bind_events.count("latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editImage)") >= 3
+    assert bind_events.count("latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editMask)") >= 3

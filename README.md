@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.53**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.55**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,13 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.53 主要特性
+## 0.1.55 主要特性
+
+- **并发认证加固**：旧密码校验、账号锁复核和会话创建绑定在同一事务中，密码重置或并发锁定后不再产生有效旧密码会话；不同格式头像并发上传也不会互相删除。
+- **尺寸重试按画幅选优**：上游多次返回错误尺寸时，优先保留最接近目标画幅和尺寸的候选，不再误选像素更多但方向错误的图片；额外调用次数和失败原因会写入图片元数据。
+- **前端异步状态隔离**：会话过期会取消未完成的提示词确认，候选切换会作废旧版权/文字检查，历史参数重跑不会覆盖当前工作区草稿。
+- **存储与格式边界修复**：派生图写入当天目录并清理危险文件名，保留期扫描不跟随符号链接，JPEG EXIF 方向和 SVG 非法 XML 字符得到正确处理。
+- **通知不再阻塞提交**：Bug 通知先记录 `pending` 后在后台更新结果，异常会被消费和记录，进程停机时执行限时收尾。
 
 - **统一生图入口**：生成、参考图、延展和编辑统一提交 `/api/image-jobs`，由服务端根据尺寸、模式和输入图选择 Images Generate、Images Edit 或 Responses，前端不再自行猜测调用路径。
 - **模型信息分权展示**：普通用户工作台不再展示或提交模型、通道、接口和思考等级；管理员高级设置可覆盖这些参数，并可在任务中心查看实际执行的 transport、model 和 reasoning effort。
@@ -97,10 +103,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.53 .
+docker build -t minorli/picgen:0.1.55 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.53
+  minorli/picgen:0.1.55
 ```
 
 或：
@@ -115,10 +121,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.53`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.55`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.53 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.55 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -158,6 +164,7 @@ IMAGE=minorli/picgen VERSION=0.1.53 PLATFORM=linux/amd64 ./scripts/docker-build-
 | `PICGEN_CORS_ALLOW_ORIGINS` | 允许跨域来源（逗号分隔，空=禁用 CORS） | 空 |
 | `PICGEN_PROXY_AUTH_TOKEN` | 可选 Bearer 鉴权 token；未设置则不校验 | 空 |
 | `PICGEN_AUTH_ENABLED` | 启用应用内账号登录 | `true` |
+| `PICGEN_SELF_REGISTRATION_ENABLED` | 允许用户自助注册；生产环境默认关闭 | `false` |
 | `PICGEN_ALLOW_ANONYMOUS_EXECUTION_OVERRIDES` | 关闭登录时允许浏览器覆盖上游 URL、Key、模型和 reasoning；仅限可信本地环境 | `false` |
 | `PICGEN_ADMIN_USERNAME` / `PICGEN_ADMIN_PASSWORD` | 内置管理员账号；生产环境必须设置管理员密码 | `admin` / 空 |
 | `PICGEN_PUBLIC_BASE_URL` | 生成密码重置邮件链接时使用的公网地址 | 请求来源 |
@@ -181,10 +188,12 @@ uv run picgen --print-config
 
 输出会自动脱敏 `default_api_key`、`proxy_auth_token` 与 Bug 反馈 webhook URL。
 
-应用内注册默认开放。启用认证时，新用户可以自助注册普通账号；系统同时内置
-`PICGEN_ADMIN_USERNAME` 对应的管理员账号，`PICGEN_ADMIN_PASSWORD` 设置后会在启动时创建或更新该
-管理员密码。普通用户只能查看自己的用量；管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈，
-并维护用户。
+生产环境默认关闭自助注册。系统内置 `PICGEN_ADMIN_USERNAME` 对应的管理员账号，
+`PICGEN_ADMIN_PASSWORD` 设置后会在启动时创建或更新管理员密码。管理员登录后可在“用户管理”创建账号，
+并在“组织与部门”先添加公司/部门，再用用户 ID 将账号分配到相应组织。确需开放自助注册时，显式设置
+`PICGEN_SELF_REGISTRATION_ENABLED=true` 并重启服务；使用 Docker Compose 时可在部署环境或 Compose 的
+`.env` 文件中设置。自助注册的新账号仍不属于任何组织，必须由管理员分配。普通用户只能查看自己的用量；
+管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈并维护用户。
 
 即使关闭 `PICGEN_AUTH_ENABLED`，执行参数覆盖默认仍是关闭的，必须由服务端提供上游 Key 和 URL。只有完全可信的
 本地开发环境才应启用 `PICGEN_ALLOW_ANONYMOUS_EXECUTION_OVERRIDES=true`；启用后页面会显示高级设置。管理员若填写
@@ -228,7 +237,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.53 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.55 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+<!--
+Arco Design outline icons, adapted as an SVG symbol sprite.
+Copyright (c) 2021 Bytedance, Inc. and its affiliates.
+
+MIT License: Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including without
+limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom
+the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+Source: https://github.com/arco-design/arco-design, commit 79516eebaaf11f3459508f2579dd851e4e76a22f
+-->
+  <!-- interactive-button/outline/upload.svg -->
+  <symbol id="icon-upload" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M14.9301 17.0711L24.0012 8L33.0723 17.0711M24.0023 33.1421L24.0023 8.14214M40 35V41H8V35" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/image.svg -->
+  <symbol id="icon-image" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M24 33L33 24V33H24ZM24 33L20.5 28.5L17 33H24ZM39 41H9C7.89543 41 7 40.1046 7 39V9C7 7.89543 7.89543 7 9 7H39C40.1046 7 41 7.89543 41 9V39C41 40.1046 40.1046 41 39 41ZM15 15H17V17H15V15Z" stroke-linecap="butt"></path>
+<path d="M33 33V24L24 33H33Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<path d="M23.5 33L20.5 29L17.5 33H23.5Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<rect x="15" y="15" width="2" height="2" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></rect>
+  </symbol>
+  <!-- edit/outline/edit.svg -->
+  <symbol id="icon-edit" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M30.4791 19.0378L36.2129 13.304C36.6034 12.9135 36.6034 12.2803 36.2129 11.8898L30.6272 6.30412C30.2367 5.9136 29.6035 5.9136 29.213 6.30412L23.4791 12.0379M30.4791 19.0378L15.763 33.7539C15.6039 33.913 15.3957 34.0138 15.1722 34.04L9.12522 34.748C8.5006 34.8211 7.96432 34.3064 8.01179 33.6793L8.48941 27.3693C8.50746 27.1308 8.61036 26.9067 8.77945 26.7376L23.4791 12.0379M30.4791 19.0378L23.4791 12.0379M6 41.9996L42 41.9996" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/location.svg -->
+  <symbol id="icon-location" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<circle cx="24" cy="19" r="5" stroke-linecap="butt"></circle>
+<path d="M39 20.4054C39 28.9136 24 43 24 43C24 43 9 28.9136 9 20.4054C9 11.8972 15.7157 5 24 5C32.2843 5 39 11.8972 39 20.4054Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/calendar.svg -->
+  <symbol id="icon-calendar" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M7 22H41M14 5V13M34 5V13M8 41H40C40.5523 41 41 40.5523 41 40V10C41 9.44772 40.5523 9 40 9H8C7.44772 9 7 9.44772 7 10V40C7 40.5523 7.44772 41 8 41Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/list.svg -->
+  <symbol id="icon-list" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M13 24H43M5 12H9M13 36H43M13 12H43M5 24H9M5 36H9" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/download.svg -->
+  <symbol id="icon-download" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M33.0721 22.0711L24.0011 31.1421L14.93 22.0711M24 5V31M40 35V41H8V35" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/share-alt.svg -->
+  <symbol id="icon-share-alt" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M32.4422 21.5523C33.1683 20.0423 34.7124 19.0001 36.5 19.0001C38.9853 19.0001 41 21.0148 41 23.5001C41 25.9853 38.9853 28.0001 36.5 28.0001C34.7637 28.0001 33.2571 27.0167 32.5067 25.5766M32.4422 21.5523L15.5578 13.4477M32.4422 21.5523C32.1588 22.1417 32 22.8023 32 23.5001C32 24.2491 32.183 24.9553 32.5067 25.5766M15.5578 13.4477C14.8317 14.9577 13.2876 16 11.5 16C9.01472 16 7 13.9853 7 11.5C7 9.01472 9.01472 7 11.5 7C13.5894 7 15.3463 8.42403 15.8529 10.3545C16.122 11.38 16.0176 12.4916 15.5578 13.4477ZM15.4933 34.4235C14.7429 32.9833 13.2363 32 11.5 32C9.01472 32 7 34.0147 7 36.5C7 38.9853 9.01472 41 11.5 41C14.8342 41 17.0033 37.3215 15.4933 34.4235ZM15.4933 34.4235L32.5067 25.5766" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/refresh.svg -->
+  <symbol id="icon-refresh" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M38.837 18C36.4634 12.1363 30.7148 8 24 8C15.1634 8 8 15.1634 8 24C8 32.8366 15.1634 40 24 40C31.4554 40 37.7198 34.9009 39.4959 28M40 8V18H30" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/close.svg -->
+  <symbol id="icon-close" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M9.85742 9.85791L23.9996 24M23.9996 24L38.1417 38.1422M23.9996 24L38.1417 9.85791M23.9996 24L9.85742 38.1422" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/check.svg -->
+  <symbol id="icon-check" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M41.6776 11.0503L19.0502 33.6777L6.32227 20.9498" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/exclamation-circle.svg -->
+  <symbol id="icon-exclamation-circle" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M24 27.9999L24 13.9999M24 29.9999L24 33.9999M6 24C6 14.0589 14.0589 6 24 6C33.9411 6 42 14.0589 42 24C42 33.9411 33.9411 42 24 42C14.0589 42 6 33.9411 6 24Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/info-circle.svg -->
+  <symbol id="icon-info-circle" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M24 20.0001V34.0001M24 18.0001V14.0001M42 24C42 33.9411 33.9411 42 24 42C14.0589 42 6 33.9411 6 24C6 14.0589 14.0589 6 24 6C33.9411 6 42 14.0589 42 24Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/loading.svg -->
+  <symbol id="icon-loading" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M42 24C42 33.9411 33.9411 42 24 42C14.0589 42 6 33.9411 6 24C6 14.0589 14.0589 6 24 6" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- direction/outline/arrow-left.svg -->
+  <symbol id="icon-arrow-left" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M20.2721 11.27L7.54417 23.9979L20.2721 36.7259M43 24L8.70451 24" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- direction/outline/arrow-right.svg -->
+  <symbol id="icon-arrow-right" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M27.7279 11.27L40.4558 23.9979L27.7279 36.7259M5 24L39.2955 24" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- direction/outline/arrow-down.svg -->
+  <symbol id="icon-arrow-down" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M11.2695 27.7279L23.9975 40.4558L36.7254 27.7279M23.9995 5V39.2955" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- direction/outline/arrow-up.svg -->
+  <symbol id="icon-arrow-up" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M11.2695 20.2721L23.9975 7.54417L36.7254 20.2721M23.9995 43V8.70451" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- edit/outline/zoom-in.svg -->
+  <symbol id="icon-zoom-in" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M32.6066 32.6066C35.3211 29.8921 37 26.1421 37 22C37 13.7157 30.2843 7 22 7C13.7157 7 7 13.7157 7 22C7 30.2843 13.7157 37 22 37C26.1421 37 29.8921 35.3211 32.6066 32.6066ZM32.6066 32.6066L41.5 41.5M29 22H15M22 29V15" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- edit/outline/zoom-out.svg -->
+  <symbol id="icon-zoom-out" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M32.6066 32.6066C35.3211 29.8921 37 26.1421 37 22C37 13.7157 30.2843 7 22 7C13.7157 7 7 13.7157 7 22C7 30.2843 13.7157 37 22 37C26.1421 37 29.8921 35.3211 32.6066 32.6066ZM32.6066 32.6066L41.5 41.5M29 22H15" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/history.svg -->
+  <symbol id="icon-history" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M6 24C6 14.0589 14.0589 6 24 6C33.9411 6 42 14.0589 42 24C42 33.9411 33.9411 42 24 42C17.7391 42 12.2248 38.8035 9 33.9534M6 24L5.5 23.2426H6.5L6 24ZM32 26H23V17" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/settings.svg -->
+  <symbol id="icon-settings" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M18.7967 6.73236C18.917 6.29954 19.311 6 19.7602 6H28.2401C28.6893 6 29.0834 6.29954 29.2036 6.73236L30.489 11.3599C30.6349 11.8852 31.1747 12.1968 31.7025 12.0605L36.3531 10.8599C36.788 10.7476 37.2445 10.9391 37.4691 11.3281L41.709 18.6719C41.9336 19.0609 41.8712 19.552 41.5565 19.8725L38.1917 23.2994C37.8098 23.6884 37.8098 24.3116 38.1917 24.7006L41.5565 28.1275C41.8712 28.4481 41.9336 28.9391 41.709 29.3281L37.4691 36.6719C37.2445 37.0609 36.788 37.2524 36.3531 37.1401L31.7025 35.9395C31.1747 35.8032 30.6349 36.1148 30.489 36.6401L29.2036 41.2676C29.0834 41.7005 28.6893 42 28.2401 42H19.7602C19.311 42 18.917 41.7005 18.7967 41.2676L17.5114 36.6403C17.3654 36.115 16.8257 35.8034 16.2979 35.9397L11.6481 37.1401C11.2131 37.2524 10.7567 37.0609 10.5321 36.6719L6.29215 29.3281C6.06755 28.9391 6.12991 28.4481 6.44463 28.1275L9.80941 24.7006C10.1914 24.3116 10.1914 23.6884 9.80941 23.2994L6.44464 19.8725C6.12992 19.552 6.06755 19.0609 6.29216 18.6719L10.5321 11.3281C10.7567 10.9391 11.2131 10.7476 11.6481 10.8599L16.2979 12.0603C16.8257 12.1966 17.3654 11.885 17.5114 11.3597L18.7967 6.73236Z" stroke-linecap="butt"></path>
+<path d="M30.0002 24C30.0002 27.3137 27.3139 30 24.0002 30C20.6864 30 18.0002 27.3137 18.0002 24C18.0002 20.6863 20.6864 18 24.0002 18C27.3139 18 30.0002 20.6863 30.0002 24Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/user.svg -->
+  <symbol id="icon-user" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M7 37C7 32.0294 11.0294 29 16 29H32C36.9706 29 41 32.0294 41 37V40C41 40.5523 40.5523 41 40 41H8C7.44772 41 7 40.5523 7 40V37Z" stroke-linecap="butt"></path>
+<circle cx="24" cy="15" r="8" stroke-linecap="butt"></circle>
+  </symbol>
+  <!-- interactive-button/outline/send.svg -->
+  <symbol id="icon-send" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M14 24L7 19V7L41 24L7 41V29L14 24ZM14 24H39" stroke-miterlimit="3.8637" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/plus.svg -->
+  <symbol id="icon-plus" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M5 24H43M24 5L24 43" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- interactive-button/outline/more.svg -->
+  <symbol id="icon-more" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M38 25L38 23L40 23L40 25L38 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<path d="M23 25L23 23L25 23L25 25L23 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<path d="M8 25L8 23L10 23L10 25L8 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<path d="M38 25L38 23L40 23L40 25L38 25Z" stroke-linecap="butt"></path>
+<path d="M23 25L23 23L25 23L25 25L23 25Z" stroke-linecap="butt"></path>
+<path d="M8 25L8 23L10 23L10 25L8 25Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- edit/outline/copy.svg -->
+  <symbol id="icon-copy" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M20 6H38C39.1046 6 40 6.89543 40 8V30M8 16V40C8 41.1046 8.89095 42 9.99552 42H30.0026C31.1072 42 32 41.1131 32 40.0085V15.9968C32 14.8922 31.1046 14 30 14H10C8.89543 14 8 14.8954 8 16Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- edit/outline/delete.svg -->
+  <symbol id="icon-delete" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M5 11L10.5 11M10.5 11L10.5 40C10.5 40.5523 10.9477 41 11.5 41L36.5 41C37.0523 41 37.5 40.5523 37.5 40V11M10.5 11L16 11M37.5 11L43 11M37.5 11L32 11M16 11V7L32 7V11M16 11L32 11" stroke-linecap="butt"></path>
+<path d="M20 18V33M28 18V33" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- tips/outline/clock-circle.svg -->
+  <symbol id="icon-clock-circle" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M24 14V24H33.5M42 24C42 33.9411 33.9411 42 24 42C14.0589 42 6 33.9411 6 24C6 14.0589 14.0589 6 24 6C33.9411 6 42 14.0589 42 24Z" stroke-linecap="butt"></path>
+  </symbol>
+  <!-- general/outline/file-image.svg -->
+  <symbol id="icon-file-image" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
+<path d="M26 33L31 27V33H26ZM26 33L23 29L19 33H26ZM37 42H11C9.89543 42 9 41.1046 9 40V8C9 6.89543 9.89543 6 11 6H32L39 13V40C39 41.1046 38.1046 42 37 42ZM17 19H18V20H17V19Z" stroke-linecap="butt"></path>
+  </symbol>
+</svg>

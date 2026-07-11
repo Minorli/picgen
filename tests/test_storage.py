@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from io import BytesIO
@@ -24,6 +25,14 @@ from picgen.storage import (
 def _png_bytes(width: int, height: int, color: tuple[int, int, int] = (20, 120, 200)) -> bytes:
     output = BytesIO()
     Image.new("RGB", (width, height), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _oriented_jpeg_bytes(width: int, height: int, orientation: int) -> bytes:
+    output = BytesIO()
+    exif = Image.Exif()
+    exif[274] = orientation
+    Image.new("RGB", (width, height), (20, 120, 200)).save(output, format="JPEG", exif=exif)
     return output.getvalue()
 
 
@@ -327,6 +336,26 @@ def test_resize_image_to_exact_size_rejects_oversized_source_before_decode() -> 
         resize_image_to_exact_size(bytes(image_bytes), "image/png", (20, 40))
 
 
+def test_detect_jpeg_dimensions_skips_repeated_marker_fill_bytes() -> None:
+    image_bytes = _oriented_jpeg_bytes(100, 200, 1)
+    padded_marker = image_bytes[:3] + b"\xff" + image_bytes[3:]
+
+    assert Image.open(BytesIO(padded_marker)).size == (100, 200)
+    assert detect_image_dimensions(padded_marker) == (100, 200)
+
+
+def test_resize_rechecks_jpeg_pixel_limit_after_pillow_opens_image() -> None:
+    image_bytes = bytearray(_oriented_jpeg_bytes(100, 200, 1))
+    image_bytes[3:3] = b"\xff"
+    sof_index = image_bytes.find(b"\xff\xc0")
+    assert sof_index > 0
+    image_bytes[sof_index + 5 : sof_index + 7] = (4096).to_bytes(2, "big")
+    image_bytes[sof_index + 7 : sof_index + 9] = (4096).to_bytes(2, "big")
+
+    with pytest.raises(ValueError, match="source image exceeds"):
+        resize_image_to_exact_size(bytes(image_bytes), "image/jpeg", (20, 40))
+
+
 def test_detect_webp_vp8_lossy_dimensions() -> None:
     image_bytes = (
         b"RIFF"
@@ -430,13 +459,62 @@ def test_prune_old_outputs_removes_old_folders(tmp_path: Path) -> None:
     (keep / "a.png").write_bytes(b"x")
     old = outputs / (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
     old.mkdir(parents=True)
-    (old / "b.png").write_bytes(b"x")
+    stale_file = old / "b.png"
+    stale_file.write_bytes(b"x")
+    # 文件 mtime 也要是旧的：文件夹里存在保留期内的新文件时（比如给旧图
+    # 贴 LOGO 产出的成品）整个文件夹会被跳过，不再按名字整删。
+    old_ts = (datetime.now() - timedelta(days=30)).timestamp()
+    os.utime(stale_file, (old_ts, old_ts))
 
     removed = prune_old_outputs(outputs, retention_days=7)
 
     assert removed == 1
     assert not old.exists()
     assert keep.exists()
+
+
+def test_prune_old_outputs_does_not_follow_recent_symlink(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    old = outputs / (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+    old.mkdir(parents=True)
+    external = tmp_path / "recent.png"
+    external.write_bytes(b"recent")
+    (old / "external.png").symlink_to(external)
+
+    removed = prune_old_outputs(outputs, retention_days=7)
+
+    assert removed == 1
+    assert not old.exists()
+    assert external.exists()
+
+
+def test_prune_old_outputs_unlinks_dated_directory_symlink_without_following_it(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "recent.png").write_bytes(b"recent")
+    linked_day = outputs / (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+    linked_day.symlink_to(external, target_is_directory=True)
+
+    removed = prune_old_outputs(outputs, retention_days=7)
+
+    assert removed == 1
+    assert not linked_day.exists()
+    assert (external / "recent.png").exists()
+
+
+def test_detect_image_dimensions_honors_jpeg_exif_orientation() -> None:
+    image_bytes = _oriented_jpeg_bytes(100, 200, orientation=6)
+    large_app2 = b"\xff\xe2" + (65535).to_bytes(2, "big") + (b"x" * 65533)
+    image_bytes = image_bytes[:2] + large_app2 + image_bytes[2:]
+
+    assert detect_image_dimensions(image_bytes) == (200, 100)
+    resized, image_mime, metadata = resize_image_to_exact_size(image_bytes, "image/jpeg", (200, 100))
+
+    assert resized == image_bytes
+    assert image_mime == "image/jpeg"
+    assert metadata == {}
 
 
 def test_prune_old_outputs_noop_when_disabled(tmp_path: Path) -> None:

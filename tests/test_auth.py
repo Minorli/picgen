@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from test_api import TINY_PNG_B64
+from PIL import Image
+from test_api import TINY_PNG_B64, valid_png_b64
 
 ADMIN_PASSWORD = "correct horse battery admin"
 USER_PASSWORD = "correct horse battery"
@@ -27,6 +30,29 @@ def test_auth_required_blocks_generation(make_client, settings_factory):
     assert response.status_code == 401
     assert response.json()["code"] == "unauthorized"
     fake.run_json.assert_not_awaited()
+
+
+def test_registration_does_not_use_post_commit_session_fallback(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    from picgen.auth import AuthStore
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("registration session must be inserted with the user transaction")
+
+    monkeypatch.setattr(AuthStore, "create_session", fail_if_called)
+    settings = settings_factory(auth_enabled=True)
+    client, _, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/auth/register",
+        json={"username": "atomic-user", "password": USER_PASSWORD},
+    )
+
+    assert response.status_code == 200
+    assert client.get("/api/me").status_code == 200
 
 
 def test_ensure_columns_tolerates_duplicate_column_race():
@@ -73,8 +99,8 @@ def test_bootstrap_admin_login_and_open_registration(make_client, settings_facto
     assert registered["username"] == "alice"
     assert registered["role"] == "user"
     assert registered["is_admin"] is False
-    assert registered["company"] == "6renyou"
-    assert registered["department"] == "PD & OPS"
+    assert registered["company"] == ""
+    assert registered["department"] == ""
 
     duplicate = client.post(
         "/api/auth/register",
@@ -735,6 +761,118 @@ def test_user_can_change_own_password_and_other_sessions_are_revoked(make_client
     assert new_password.status_code == 200
 
 
+def test_concurrent_admin_reset_invalidates_inflight_old_password_change(tmp_path, monkeypatch):
+    import picgen.auth as auth_module
+    from picgen.auth import AuthStore, InvalidCredentialsError
+
+    db_path = tmp_path / "auth.sqlite3"
+    user_store = AuthStore(db_path)
+    user_store.initialize()
+    user = user_store.create_user("alice", USER_PASSWORD)
+    admin = user_store.create_user("admin-review", ADMIN_PASSWORD, role="admin")
+    admin_store = AuthStore(db_path)
+    verified = threading.Event()
+    resume = threading.Event()
+    real_verify_password = auth_module.verify_password
+    errors = []
+
+    def delayed_verify(password, encoded):
+        result = real_verify_password(password, encoded)
+        if threading.current_thread().name == "stale-password-change" and result:
+            verified.set()
+            assert resume.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(auth_module, "verify_password", delayed_verify)
+
+    def change_password():
+        try:
+            user_store.change_user_password(
+                user_id=user.id,
+                current_password=USER_PASSWORD,
+                new_password="stale user selected password",
+            )
+        except Exception as exc:  # captured for deterministic cross-thread assertion
+            errors.append(exc)
+
+    worker = threading.Thread(target=change_password, name="stale-password-change")
+    worker.start()
+    assert verified.wait(timeout=5)
+    admin_store.reset_user_password(
+        user_id=user.id,
+        password="administrator reset password",
+        admin_user_id=admin.id,
+    )
+    resume.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], InvalidCredentialsError)
+    assert admin_store.authenticate("alice", "administrator reset password").id == user.id
+
+
+def test_concurrent_admin_reset_invalidates_inflight_old_password_username_change(tmp_path, monkeypatch):
+    import picgen.auth as auth_module
+    from picgen.auth import AuthStore, InvalidCredentialsError
+
+    db_path = tmp_path / "auth.sqlite3"
+    user_store = AuthStore(db_path)
+    user_store.initialize()
+    user = user_store.create_user("alice", USER_PASSWORD)
+    admin = user_store.create_user("admin-review", ADMIN_PASSWORD, role="admin")
+    admin_store = AuthStore(db_path)
+    verified = threading.Event()
+    resume = threading.Event()
+    real_verify_password = auth_module.verify_password
+    errors = []
+
+    def delayed_verify(password, encoded):
+        result = real_verify_password(password, encoded)
+        if threading.current_thread().name == "stale-username-change" and result:
+            verified.set()
+            assert resume.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(auth_module, "verify_password", delayed_verify)
+
+    def change_username():
+        try:
+            user_store.update_user_profile(
+                user_id=user.id,
+                username="alice-renamed",
+                current_password=USER_PASSWORD,
+                display_name="",
+                wechat="",
+                phone_country_code="+86",
+                phone="",
+                email="",
+                company="6renyou",
+                department="PD & OPS",
+                team="",
+                job_title="",
+                note="",
+            )
+        except Exception as exc:  # captured for deterministic cross-thread assertion
+            errors.append(exc)
+
+    worker = threading.Thread(target=change_username, name="stale-username-change")
+    worker.start()
+    assert verified.wait(timeout=5)
+    admin_store.reset_user_password(
+        user_id=user.id,
+        password="administrator reset password",
+        admin_user_id=admin.id,
+    )
+    resume.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], InvalidCredentialsError)
+    assert admin_store.authenticate("alice", "administrator reset password").id == user.id
+
+
 def test_user_profile_can_update_username_and_optional_fields(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True)
     client, _, _ = make_client(settings=settings)
@@ -780,8 +918,8 @@ def test_user_profile_can_update_username_and_optional_fields(make_client, setti
     assert profile["phone_country_code"] == "+86"
     assert profile["phone"] == "13800138000"
     assert profile["email"] == "alice@example.com"
-    assert profile["company"] == "6renyou"
-    assert profile["department"] == "PD & OPS"
+    assert profile["company"] == ""
+    assert profile["department"] == ""
     assert profile["team"] == "市场部"
     assert profile["job_title"] == "设计运营"
     assert profile["note"] == "偏好旅行海报和酒店质感。"
@@ -855,6 +993,67 @@ def test_user_profile_rejects_duplicate_username_and_saves_avatar(make_client, s
     assert blocked_json.status_code == 403
 
 
+def test_concurrent_avatar_files_are_not_deleted_before_database_selection(tmp_path, settings_factory):
+    from picgen.auth import AuthStore
+    from picgen.routes import _delete_previous_user_avatar, _save_user_avatar
+
+    settings = settings_factory(data_dir=tmp_path / "data", auth_db_path=tmp_path / "auth.sqlite3")
+    store = AuthStore(settings.resolved_auth_db_path)
+    store.initialize()
+    user = store.create_user("alice", USER_PASSWORD)
+
+    def image_bytes(image_format: str) -> bytes:
+        output = BytesIO()
+        Image.new("RGB", (8, 8), (30, 100, 180)).save(output, format=image_format)
+        return output.getvalue()
+
+    initial_path, initial_url = _save_user_avatar(
+        settings=settings,
+        user=user,
+        image_bytes=image_bytes("WEBP"),
+        image_mime="image/webp",
+    )
+    current_user = store.update_user_avatar(
+        user_id=user.id,
+        avatar_path=str(initial_path),
+        avatar_url=initial_url,
+    )
+    assert current_user is not None
+
+    first_path, first_url = _save_user_avatar(
+        settings=settings,
+        user=current_user,
+        image_bytes=image_bytes("JPEG"),
+        image_mime="image/jpeg",
+    )
+    second_path, second_url = _save_user_avatar(
+        settings=settings,
+        user=current_user,
+        image_bytes=image_bytes("PNG"),
+        image_mime="image/png",
+    )
+    assert first_path.exists()
+    assert second_path.exists()
+
+    first_user, first_replaced = store.replace_user_avatar(
+        user_id=user.id,
+        avatar_path=str(first_path),
+        avatar_url=first_url,
+    )
+    assert first_user is not None
+    _delete_previous_user_avatar(settings=settings, previous_path=first_replaced, new_path=first_path)
+    second_user, second_replaced = store.replace_user_avatar(
+        user_id=user.id,
+        avatar_path=str(second_path),
+        avatar_url=second_url,
+    )
+    assert second_user is not None
+    _delete_previous_user_avatar(settings=settings, previous_path=second_replaced, new_path=second_path)
+
+    assert second_path.exists()
+    assert not first_path.exists()
+
+
 def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, settings_factory):
     settings = settings_factory(
         auth_enabled=True,
@@ -862,7 +1061,9 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
         default_api_key="sk-test",
     )
     client, fake, resolved_settings = make_client(settings=settings)
-    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    # 544x1120 与 1088x2240 同比例：归一化放大仍然允许（1x1 这类变比例
+    # 返回现在会按原图保存、不再裁剪，见 test_regressions 的宽高比守卫）。
+    fake.run_json.return_value = {"data": [{"b64_json": valid_png_b64(544, 1120)}], "created": 1}
 
     admin_login = client.post(
         "/api/auth/login",
@@ -928,7 +1129,7 @@ def test_admin_creates_user_and_usage_scope_is_role_limited(make_client, setting
     assert metadata["username"] == "alice"
     assert metadata["saved_image_width"] == 1088
     assert metadata["saved_image_height"] == 2240
-    assert metadata["upstream_actual_size"] == "1x1"
+    assert metadata["upstream_actual_size"] == "544x1120"
     assert metadata["image_size_normalized"] is True
 
     fetched_image = client.get(f"/{payload['saved_image_url']}")
@@ -1254,8 +1455,8 @@ def test_auth_store_migrates_legacy_database_and_tracks_generation_lifecycle(mak
         ).fetchone()
         assert user["role"] == "user"
         assert bool(user["is_active"])
-        assert user["company"] == "6renyou"
-        assert user["department"] == "PD & OPS"
+        assert user["company"] == ""
+        assert user["department"] == ""
         assert user["last_seen_at"]
         job = conn.execute(
             "SELECT * FROM generation_jobs WHERE id = ?",
@@ -1643,7 +1844,13 @@ def test_bug_report_is_recorded_and_admin_can_review_it(make_client, settings_fa
     )
     assert report_response.status_code == 200
     report_payload = report_response.json()
-    assert report_payload["notification"]["configured"] is False
+    # 通知改为后台发送：响应不再内联等待通知结果。
+    assert report_payload["notification"] == {
+        "configured": False,
+        "sent": False,
+        "status": "not_configured",
+        "error": "",
+    }
     assert report_payload["report"]["notification_status"] == "not_configured"
     assert report_payload["report"]["title"] == "下载按钮没有反应"
 
@@ -1683,6 +1890,7 @@ def test_bug_report_uses_telegram_admin_notification_when_configured(
     monkeypatch.setattr("picgen.routes.send_bug_report_notification", _fake_send_bug_report_notification)
     settings = settings_factory(
         auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
         error_alert_telegram_bot_token="123:abc",
         error_alert_telegram_chat_id="-100123456",
     )
@@ -1705,12 +1913,123 @@ def test_bug_report_uses_telegram_admin_notification_when_configured(
 
     assert report_response.status_code == 200
     payload = report_response.json()
-    assert payload["notification"]["configured"] is True
-    assert payload["notification"]["sent"] is True
-    assert payload["report"]["notification_status"] == "sent"
+    # Telegram 不可达时内联等待最坏要 ~48s，通知已改为后台任务发送：
+    # 响应立即返回初始状态，发送结果由后台补写进 DB。
+    assert payload["notification"] == {
+        "configured": True,
+        "sent": False,
+        "status": "pending",
+        "error": "",
+    }
+    assert payload["report"]["notification_status"] == "pending"
+
+    deadline = time.time() + 5
+    while len(notifications) < 1 and time.time() < deadline:
+        time.sleep(0.05)
     assert len(notifications) == 1
     assert notifications[0]["settings"].error_alert_telegram_chat_id == "-100123456"
     assert notifications[0]["username"] == "alice"
+
+    client.post("/api/auth/logout")
+    admin_login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    )
+    assert admin_login.status_code == 200
+    status = ""
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        reports = client.get("/api/bug-reports").json()["reports"]
+        status = reports[0]["notification_status"]
+        if status == "sent":
+            break
+        time.sleep(0.05)
+    assert status == "sent"
+
+
+def test_bug_report_background_notification_failure_is_recorded(
+    make_client,
+    settings_factory,
+    monkeypatch,
+):
+    async def _failed_notification(**_kwargs):
+        raise RuntimeError("telegram unavailable")
+
+    monkeypatch.setattr("picgen.routes.send_bug_report_notification", _failed_notification)
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    client, _, _ = make_client(settings=settings)
+    assert client.post("/api/auth/register", json={"username": "alice", "password": USER_PASSWORD}).status_code == 200
+
+    response = client.post(
+        "/api/bug-reports",
+        json={"title": "失败通知", "description": "通知服务暂时不可用"},
+    )
+    assert response.status_code == 200
+    assert response.json()["report"]["notification_status"] == "pending"
+
+    client.post("/api/auth/logout")
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    ).status_code == 200
+    status = ""
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        status = client.get("/api/bug-reports").json()["reports"][0]["notification_status"]
+        if status == "failed":
+            break
+        time.sleep(0.05)
+    assert status == "failed"
+
+
+def test_shutdown_marks_pending_bug_report_notification_cancelled(
+    settings_factory,
+    monkeypatch,
+):
+    import asyncio
+
+    from picgen.auth import AuthStore
+    from picgen.main import create_app
+    from picgen.routes import drain_notification_tasks as real_drain
+
+    started = threading.Event()
+
+    async def _never_finishes(**_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def _fast_drain():
+        await real_drain(timeout_seconds=0.01)
+
+    monkeypatch.setattr("picgen.routes.send_bug_report_notification", _never_finishes)
+    monkeypatch.setattr("picgen.main.drain_notification_tasks", _fast_drain)
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        error_alert_telegram_bot_token="123:abc",
+        error_alert_telegram_chat_id="-100123456",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/auth/register",
+            json={"username": "alice", "password": USER_PASSWORD},
+        ).status_code == 200
+        response = client.post(
+            "/api/bug-reports",
+            json={"title": "停机通知", "description": "等待停机取消"},
+        )
+        assert response.status_code == 200
+        assert response.json()["report"]["notification_status"] == "pending"
+        assert started.wait(timeout=2)
+
+    reports = AuthStore(settings.resolved_auth_db_path).list_bug_reports()
+    assert reports[0]["notification_status"] == "cancelled"
 
 
 def test_result_share_flow_between_users(make_client, settings_factory):
@@ -2081,6 +2400,17 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     )
     assert bob.status_code == 200
 
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    ).status_code == 200
+    for registered_user in (alice.json()["user"], bob.json()["user"]):
+        assigned = client.put(
+            f"/api/admin/users/{registered_user['id']}/org",
+            json={"company": "6renyou", "department": "PD & OPS", "reason": "测试分组"},
+        )
+        assert assigned.status_code == 200
+
     members = alice_client.get("/api/team-chat/members")
     assert members.status_code == 200
     member_names = [item["username"] for item in members.json()["members"]]
@@ -2200,7 +2530,11 @@ def test_team_chat_messages_initial_load_returns_latest_window(make_client, sett
 
 
 def test_team_chat_group_is_scoped_by_company_and_department(make_client, settings_factory):
-    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password=ADMIN_PASSWORD,
+        default_api_key="sk-test",
+    )
     client, _, _ = make_client(settings=settings)
 
     alice_client = TestClient(client.app)
@@ -2217,7 +2551,7 @@ def test_team_chat_group_is_scoped_by_company_and_department(make_client, settin
     )
     assert bob.status_code == 200
 
-    invalid_register = client.post(
+    forged_register = client.post(
         "/api/auth/register",
         json={
             "username": "eve",
@@ -2226,10 +2560,11 @@ def test_team_chat_group_is_scoped_by_company_and_department(make_client, settin
             "department": "PD & OPS",
         },
     )
-    assert invalid_register.status_code == 400
-    assert invalid_register.json()["code"] == "validation_error"
+    assert forged_register.status_code == 200
+    assert forged_register.json()["user"]["company"] == ""
+    assert forged_register.json()["user"]["department"] == ""
 
-    invalid_profile = alice_client.put(
+    forged_profile = alice_client.put(
         "/api/me/profile",
         json={
             "username": "alice",
@@ -2237,8 +2572,9 @@ def test_team_chat_group_is_scoped_by_company_and_department(make_client, settin
             "department": "Marketing",
         },
     )
-    assert invalid_profile.status_code == 400
-    assert invalid_profile.json()["code"] == "validation_error"
+    assert forged_profile.status_code == 200
+    assert forged_profile.json()["user"]["company"] == ""
+    assert forged_profile.json()["user"]["department"] == ""
 
     carol_client = TestClient(client.app)
     carol = carol_client.post(
@@ -2246,6 +2582,18 @@ def test_team_chat_group_is_scoped_by_company_and_department(make_client, settin
         json={"username": "carol", "password": USER_PASSWORD},
     )
     assert carol.status_code == 200
+
+    admin_client = TestClient(client.app)
+    assert admin_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": ADMIN_PASSWORD},
+    ).status_code == 200
+    for registered_user in (alice.json()["user"], bob.json()["user"], carol.json()["user"]):
+        assigned = admin_client.put(
+            f"/api/admin/users/{registered_user['id']}/org",
+            json={"company": "6renyou", "department": "PD & OPS", "reason": "测试分组"},
+        )
+        assert assigned.status_code == 200
 
     alice_members = alice_client.get("/api/team-chat/members")
     assert alice_members.status_code == 200
@@ -2285,6 +2633,7 @@ def test_admin_org_dictionary_group_assets_stats_and_summary(make_client, settin
         json={"username": "alice", "password": USER_PASSWORD},
     )
     assert alice.status_code == 200
+    alice_id = alice.json()["user"]["id"]
 
     bob_client = TestClient(client.app)
     bob = bob_client.post(
@@ -2301,7 +2650,14 @@ def test_admin_org_dictionary_group_assets_stats_and_summary(make_client, settin
     )
     assert admin_login.status_code == 200
 
-    public_orgs = client.get("/api/org-units")
+    for user_id in (alice_id, bob_id):
+        assigned = admin_client.put(
+            f"/api/admin/users/{user_id}/org",
+            json={"company": "6renyou", "department": "PD & OPS", "reason": "初始分组"},
+        )
+        assert assigned.status_code == 200
+
+    public_orgs = alice_client.get("/api/org-units")
     assert public_orgs.status_code == 200
     assert ("6renyou", "PD & OPS") in {
         (item["company"], item["department"]) for item in public_orgs.json()["org_units"]
