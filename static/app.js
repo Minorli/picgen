@@ -1,11 +1,11 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.55"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.56"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.55"
+} from "./responses-settings.mjs?v=0.1.56"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -4031,12 +4031,12 @@ async function submitShareResult() {
       return
     }
     const count = Array.isArray(data.shares) ? data.shares.length : payload.recipient_ids.length
-    setShareStatus(`已分享给 ${count} 人`)
     if (refs.shareResultNoteInput) {
       refs.shareResultNoteInput.value = ""
     }
     state.shareSelectedRecipientIds = new Set()
     renderShareRecipientOptions()
+    setShareStatus(`已分享给 ${count} 人`)
   } catch {
     setShareStatus("分享失败")
     setError("分享时网络连接错误")
