@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.44**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.55**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,8 +14,21 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.44 主要特性
+## 0.1.55 主要特性
 
+- **并发认证加固**：旧密码校验、账号锁复核和会话创建绑定在同一事务中，密码重置或并发锁定后不再产生有效旧密码会话；不同格式头像并发上传也不会互相删除。
+- **尺寸重试按画幅选优**：上游多次返回错误尺寸时，优先保留最接近目标画幅和尺寸的候选，不再误选像素更多但方向错误的图片；额外调用次数和失败原因会写入图片元数据。
+- **前端异步状态隔离**：会话过期会取消未完成的提示词确认，候选切换会作废旧版权/文字检查，历史参数重跑不会覆盖当前工作区草稿。
+- **存储与格式边界修复**：派生图写入当天目录并清理危险文件名，保留期扫描不跟随符号链接，JPEG EXIF 方向和 SVG 非法 XML 字符得到正确处理。
+- **通知不再阻塞提交**：Bug 通知先记录 `pending` 后在后台更新结果，异常会被消费和记录，进程停机时执行限时收尾。
+
+- **统一生图入口**：生成、参考图、延展和编辑统一提交 `/api/image-jobs`，由服务端根据尺寸、模式和输入图选择 Images Generate、Images Edit 或 Responses，前端不再自行猜测调用路径。
+- **模型信息分权展示**：普通用户工作台不再展示或提交模型、通道、接口和思考等级；管理员高级设置可覆盖这些参数，并可在任务中心查看实际执行的 transport、model 和 reasoning effort。
+- **实际执行记录一致**：任务完成时用上游真实执行信息更新 `generation_jobs`，避免页面显示 `gpt-image-2`、任务表记录 `gpt-5.5`、实际请求却使用 `gpt-5.6-sol` 的不一致。
+- **精确尺寸服务端路由**：`1088x2240`、`3840x2160` 和其它合法非 Images 原生尺寸自动走 Responses + `gpt-5.6-sol` + `reasoning.effort=xhigh`；Images 原生尺寸按是否有输入图选择生成或编辑接口。
+- **Responses 旧模型彻底退役**：修复 IndexedDB 工作区快照在设置迁移后再次写回 `gpt-5.5`；数据库升级到 schema v13，前端同步迁移本地设置和工作区，服务端对所有入口无条件把精确旧默认值归一化为 `gpt-5.6-sol`。
+- **LOGO 标准位置优先**：官方 LOGO 默认固定在左上标准位置，只有候选区域的归一化复杂度同时达到绝对和相对改善阈值才会移动；评分覆盖扩大后的安全区，并提高 LOGO 本体区域权重，惩罚邻近文字和高密度边缘。
+- **Responses 运行时配置**：现有用户保存的旧默认 `gpt-5.5` 会一次性迁移到 `gpt-5.6-sol`；默认思考等级通过 `PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT` 配置，当前为 `xhigh`，无需重新改代码。
 - **编辑前后文字对比**：编辑模式自动把"编辑前/编辑后"两张图分别转写并程序化比对，未被要求修改的
   文字发生变化会立即在文字一致性面板提示（个别形近字可能超出自动识别能力，面板会注明需人工复核）。
 - **无标签提示词也做文字校验**：提示词里没有"标题：/亮点："等标签时（表格、自由排版很常见），
@@ -29,7 +42,7 @@
   上游连接被掐断正确重试、保留期清理不再提前一天删图、关闭登录时路线图/匿名保存可用等。
 - **透明 LOGO 成品**：最终成品只叠加官方透明 PNG，不再因为深色或复杂背景自动绘制半透明底板；Telegram 通知默认超时提高到 15 秒并记录可诊断的失败类型。
 - **标题/正文文字分层**：主标题在逐字准确和高识别度前提下，允许商业美术字、手写标题、立体描边、金属或笔刷字效；正文、地名、日期、序号、说明和贴士继续严格清晰逐字。
-- **上游原图交付**：普通海报和编辑图仍会把用户选择的 `size` 传给上游；若上游返回不同尺寸，PicGen 不缩放、不裁切、不终止，按上游原始图片保存并在界面提示实际尺寸。路线图仍可按行程内容推测构图尺寸。
+- **严格尺寸兜底**：普通海报、编辑图和 Responses 图像工具仍会把用户选择的 `size` 传给上游；若上游按比例降采样，PicGen 会在本地用高质量 cover fit 保存为请求的精确画布，并在响应 metadata 里保留 `upstream_actual_size` 便于排障。路线图仍可按行程内容推测构图尺寸。
 - **默认最高图片质量**：OpenAI Images / Responses 图像工具默认发送 `quality: "high"`，兼容 `gpt-image-2` 的官方最高质量参数。
 - **异步 + 连接池**：底层用 `httpx.AsyncClient`，含连接池、分段超时、指数退避重试。
 - **类型化校验**：所有请求/响应走 Pydantic v2 模型，参数错误统一以中文报错返回。
@@ -90,10 +103,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.44 .
+docker build -t minorli/picgen:0.1.55 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.44
+  minorli/picgen:0.1.55
 ```
 
 或：
@@ -108,10 +121,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.44`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.55`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.44 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.55 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -124,9 +137,10 @@ IMAGE=minorli/picgen VERSION=0.1.44 PLATFORM=linux/amd64 ./scripts/docker-build-
 - `https://sub.tidba.com/v1/images/edits`
 - `https://sub.tidba.com/v1/responses`
 
-用户首次登录后只需要在页面里填写 API Key。该 Key 按登录用户保存在当前浏览器本地存储，容器重启不会清除；
-如果需要全站共用一个服务端默认 Key，可在运行容器时设置 `PICGEN_DEFAULT_API_KEY`，或在持久化 volume 里创建
-`/app/data/.env` 写入该变量。
+普通用户不接触 API Key、模型或上游地址。部署时应设置全站服务端 Key：运行容器时传入
+`PICGEN_DEFAULT_API_KEY`，或在持久化 volume 的 `/app/data/.env` 中写入该变量。管理员高级设置仅用于诊断或
+切换自定义提供者；自定义 Key 只会发送给本次实际选中的自定义端点，不会串用到默认提供者。一个 Key 只能覆盖
+同一 scheme、host 和 port 的自定义端点；多个不同提供者必须分开配置。
 
 ## 配置
 
@@ -138,16 +152,20 @@ IMAGE=minorli/picgen VERSION=0.1.44 PLATFORM=linux/amd64 ./scripts/docker-build-
 | --- | --- | --- |
 | `PICGEN_DEFAULT_API_KEY` | 服务端默认上游 key（浏览器留空即用此值） | 空 |
 | `PICGEN_DEFAULT_GENERATE_URL` / `PICGEN_DEFAULT_EDIT_URL` / `PICGEN_DEFAULT_RESPONSES_URL` | 上游接口 URL | Tidb 兼容代理 |
-| `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.5` |
+| `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2` / `gpt-5.6-sol` |
+| `PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT` | `gpt-5.6-sol` 默认思考等级，可选 `low/medium/high/xhigh/max/ultra`；其它模型为兼容性不发送该字段 | `xhigh` |
 | `PICGEN_DEFAULT_SIZE` | 默认生图尺寸；当前按 6 人游主场景设置 | `1088x2240` |
 | `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 1200 |
 | `PICGEN_UPSTREAM_MAX_RETRIES` | 5xx / 网络瞬时错误重试次数 | 2 |
+| `PICGEN_SIZE_MISMATCH_MAX_RETRIES` | 上游按比例缩小返回时自动重新生成的次数（仅精确尺寸+单张；保留最接近目标的一次结果）。上游确定性缩小时开重试只会重复扣费，默认关闭 | 0 |
 | `PICGEN_UPSTREAM_MAX_CONNECTIONS` | 连接池上限 | 64 |
 | `PICGEN_RATE_LIMIT_PER_MINUTE` / `PICGEN_RATE_LIMIT_BURST` | 限流配额 | 120 / 20 |
 | `PICGEN_MAX_REQUEST_BODY_BYTES` / `PICGEN_MAX_IMAGE_BYTES` | 请求与图片大小上限 | 64 MB / 32 MB |
 | `PICGEN_CORS_ALLOW_ORIGINS` | 允许跨域来源（逗号分隔，空=禁用 CORS） | 空 |
 | `PICGEN_PROXY_AUTH_TOKEN` | 可选 Bearer 鉴权 token；未设置则不校验 | 空 |
 | `PICGEN_AUTH_ENABLED` | 启用应用内账号登录 | `true` |
+| `PICGEN_SELF_REGISTRATION_ENABLED` | 允许用户自助注册；生产环境默认关闭 | `false` |
+| `PICGEN_ALLOW_ANONYMOUS_EXECUTION_OVERRIDES` | 关闭登录时允许浏览器覆盖上游 URL、Key、模型和 reasoning；仅限可信本地环境 | `false` |
 | `PICGEN_ADMIN_USERNAME` / `PICGEN_ADMIN_PASSWORD` | 内置管理员账号；生产环境必须设置管理员密码 | `admin` / 空 |
 | `PICGEN_PUBLIC_BASE_URL` | 生成密码重置邮件链接时使用的公网地址 | 请求来源 |
 | `PICGEN_SMTP_HOST` / `PICGEN_SMTP_PORT` | SMTP 主机与端口 | 空 / `465` |
@@ -170,10 +188,16 @@ uv run picgen --print-config
 
 输出会自动脱敏 `default_api_key`、`proxy_auth_token` 与 Bug 反馈 webhook URL。
 
-应用内注册默认开放。启用认证时，新用户可以自助注册普通账号；系统同时内置
-`PICGEN_ADMIN_USERNAME` 对应的管理员账号，`PICGEN_ADMIN_PASSWORD` 设置后会在启动时创建或更新该
-管理员密码。普通用户只能查看自己的用量；管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈，
-并维护用户。
+生产环境默认关闭自助注册。系统内置 `PICGEN_ADMIN_USERNAME` 对应的管理员账号，
+`PICGEN_ADMIN_PASSWORD` 设置后会在启动时创建或更新管理员密码。管理员登录后可在“用户管理”创建账号，
+并在“组织与部门”先添加公司/部门，再用用户 ID 将账号分配到相应组织。确需开放自助注册时，显式设置
+`PICGEN_SELF_REGISTRATION_ENABLED=true` 并重启服务；使用 Docker Compose 时可在部署环境或 Compose 的
+`.env` 文件中设置。自助注册的新账号仍不属于任何组织，必须由管理员分配。普通用户只能查看自己的用量；
+管理员可以查看所有用户用量、结果满意度反馈、Bug 反馈并维护用户。
+
+即使关闭 `PICGEN_AUTH_ENABLED`，执行参数覆盖默认仍是关闭的，必须由服务端提供上游 Key 和 URL。只有完全可信的
+本地开发环境才应启用 `PICGEN_ALLOW_ANONYMOUS_EXECUTION_OVERRIDES=true`；启用后页面会显示高级设置。管理员若填写
+自定义上游 URL，必须同时填写该上游自己的 API Key，PicGen 不会把服务端默认 Key 自动发送到其它地址。
 
 忘记密码支持邮箱自助重置。用户在 Profile 里填写邮箱后，提交“忘记密码”会收到一次性重置链接；
 链接默认 30 分钟有效，成功重置后会清掉该用户其它会话。为避免账号枚举，接口无论账号是否存在都返回同一句
@@ -213,19 +237,19 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.44 默认把所有图像操作收敛到 **OpenAI Images API + `gpt-image-2`**：
+PicGen 0.1.55 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
-| 全新生成（无参考图） | `/api/generate` → `/v1/images/generations` | `gpt-image-2` |
-| 参考图生成 | `/api/edit` → `/v1/images/edits`（`mode: "reference"`） | `gpt-image-2` |
-| 基于结果延展 | `/api/edit` → `/v1/images/edits`（`mode: "variant"`） | `gpt-image-2` |
-| 编辑现有图 | `/api/edit` → `/v1/images/edits`（`mode: "edit"`） | `gpt-image-2` |
+| Images 原生尺寸、无参考图 | `/api/image-jobs` → `/v1/images/generations` | `gpt-image-2` |
+| Images 原生尺寸、含输入图 | `/api/image-jobs` → `/v1/images/edits` | `gpt-image-2` |
+| `1088x2240`、`3840x2160` 或其它合法精确尺寸 | `/api/image-jobs` → `/v1/responses` | `gpt-5.6-sol` + `xhigh` |
 
-页面"连接设置"里可一键切换为 **Responses API + `gpt-5.5`** 兜底通道，用于无法直接调
-Images Edit 的兼容代理（例如 sub2api ChatGPT OAuth）。Responses 通道开启后，编辑 / 参考图 /
-延展会改走 `/api/responses-image` + 流式 `image_generation` 工具，并优先把参考图上传到
-同源 `/v1/files` 拿 `file_id`，必要时回退到内联 Base64。
+普通用户只选择任务模式和尺寸，不显示模型或通道。管理员可在高级设置里使用自动路由、优先 Images 或强制
+Responses，并覆盖模型、接口和 reasoning effort。非 Images 原生精确尺寸即使选择 Images 仍会切到 Responses，
+避免上游静默返回错误尺寸。Responses 参考图会优先上传到同源 `/v1/files` 获取 `file_id`，必要时回退内联 Base64。
+旧 `/api/generate`、`/api/edit` 和 `/api/responses-image` 仅为未刷新页面与既有客户端保留；登录后的普通用户即使
+继续提交 URL、Key、模型或 reasoning 覆盖，服务端也会忽略这些字段并使用部署配置。
 
 ## 接口概览
 
@@ -234,6 +258,7 @@ Images Edit 的兼容代理（例如 sub2api ChatGPT OAuth）。Responses 通道
 | `/api/config` | GET | 返回前端用的配置（不含 key 明文） |
 | `/api/health` | GET | 进程健康 |
 | `/api/ready` | GET | 联动健康（磁盘、HTTP 客户端、版本） |
+| `/api/image-jobs` | POST | 统一生成、参考图、延展和编辑入口，由服务端选择实际通道 |
 | `/api/generate` | POST | 调上游 Images 生成接口（默认通道） |
 | `/api/edit` | POST | 调上游 Images 编辑接口（默认通道，含参考图 / 延展 / 编辑） |
 | `/api/responses-image` | POST | 调上游 Responses + `image_generation` 工具，含 SSE 流解析（兜底通道） |
@@ -288,7 +313,8 @@ Responses 兜底通道默认 `stream: true`，并优先把参考图上传到同�
 
 ```json
 {
-  "model": "gpt-5.5",
+  "model": "gpt-5.6-sol",
+  "reasoning": {"effort": "xhigh"},
   "stream": true,
   "input": [
     {
@@ -372,13 +398,11 @@ uv run picgen --prune-now
 
 1. `./scripts/bootstrap.sh && ./scripts/dev.sh`
 2. 浏览器访问 `http://127.0.0.1:8000`
-3. 在"连接设置"里填 API Key、生成接口 URL、编辑接口 URL
-   - 默认通道（Images API）只需要 `生成接口 URL` 与 `编辑接口 URL`
-   - 切到 Responses 兜底通道时再填 `Responses 图像接口 URL` 与 `Responses 主模型`
-4. "生成图片"模式直接出图（走 `/v1/images/generations` + gpt-image-2）
-5. "编辑图片"模式拖入图片或粘贴剪贴板，提交后走 `/v1/images/edits`
-6. 想"换风格保持主体"切到生成区的"基于当前结果延展"，自动以最新结果为参考图调 `/v1/images/edits`
-7. 兼容代理不支持 Images Edit 时，把"图像通道"切到 Responses
+3. 普通用户选择尺寸并填写提示词；模型、通道、上游 URL 和 Key 由服务端管理
+4. Images 原生尺寸无输入图时走 `/v1/images/generations`，有输入图时走 `/v1/images/edits`
+5. `1088x2240`、`3840x2160` 等非原生精确尺寸自动走 Responses + `gpt-5.6-sol` + `xhigh`
+6. 想"换风格保持主体"时切到生成区的"基于当前结果延展"，系统会自动携带最新结果
+7. 管理员需要诊断兼容代理时，可在"高级设置"里强制 Responses 或填写自定义端点与对应 Key
 
 快捷操作：
 
@@ -398,7 +422,7 @@ PicGen 不会自动重试这类错误，以免触发更严格的封锁。
 
 `/v1/images/edits` + `gpt-image-2` 在某些 OAuth 池兼容代理上可能在 ~3 分钟后 502。
 在"连接设置 → 图像通道"切到 Responses，把 Responses 接口 URL 配为相同站点的
-`/v1/responses`、模型用上游已验证的 `gpt-5.5`，编辑 / 参考图 / 延展会自动改走流式
+`/v1/responses`、模型用上游已验证的 `gpt-5.6-sol`，编辑 / 参考图 / 延展会自动改走流式
 `image_generation` 工具。带参考图时 PicGen 会先上传到 `/v1/files` 再用 `file_id` 调用。
 
 ## 协作与开源

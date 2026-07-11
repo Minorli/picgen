@@ -9,6 +9,7 @@ from .upstream.payload import decode_base64_blob
 # SQLite stores INTEGER as signed 64-bit; binding a larger Python int raises
 # OverflowError. Cap id-shaped fields here so out-of-range input is a clean 422.
 _SQLITE_MAX_INT = 2**63 - 1
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 class FilePayload(BaseModel):
@@ -111,6 +112,8 @@ class ResponsesImageRequest(_ImageOptions):
     prompt: str = Field(default="")
     endpoint_url: str | None = None
     model: str | None = Field(default=None, max_length=128)
+    reasoning_effort: ReasoningEffort | None = None
+    responses_model_storage_version: int | None = Field(default=None, ge=0, le=1000)
     api_key: str | None = Field(default=None, max_length=512)
     size: str | None = Field(default=None, max_length=64)
     image: FilePayload | None = None
@@ -163,6 +166,54 @@ class TextFidelityContract(BaseModel):
             cleaned.append(text[:200])
             seen.add(text)
         return cleaned
+
+
+class ImageJobAdvancedOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str | None = Field(default=None, max_length=512)
+    generate_url: str | None = Field(default=None, max_length=2048)
+    edit_url: str | None = Field(default=None, max_length=2048)
+    responses_url: str | None = Field(default=None, max_length=2048)
+    images_model: str | None = Field(default=None, max_length=128)
+    responses_model: str | None = Field(default=None, max_length=128)
+    preferred_transport: Literal["auto", "images", "responses"] = "auto"
+    reasoning_effort: ReasoningEffort | None = None
+
+
+class ImageJobRequest(_ImageOptions):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    prompt: str = Field(default="")
+    mode: Literal["generate", "reference", "edit", "variant"] = "generate"
+    size: str | None = Field(default=None, max_length=64)
+    sample_count: int = Field(default=1, ge=1, le=3)
+    image: FilePayload | None = None
+    images: list[FilePayload] = Field(default_factory=list, max_length=16)
+    mask: FilePayload | None = None
+    allow_inline_fallback: bool = True
+    logo_requested: bool = False
+    itinerary_id: str | None = Field(default=None, max_length=64)
+    source_generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
+    prompt_mode: Literal["free", "recipe"] = "free"
+    original_prompt: str | None = Field(default=None, max_length=32_000)
+    recipe_id: str | None = Field(default=None, max_length=128)
+    recipe_version: str | None = Field(default=None, max_length=64)
+    text_contract: TextFidelityContract = Field(default_factory=TextFidelityContract)
+    advanced: ImageJobAdvancedOptions | None = None
+
+    @model_validator(mode="after")
+    def _validate_image_job(self) -> ImageJobRequest:
+        self.prompt = _require_prompt(self.prompt, empty_message="图片提示词不能为空")
+        if self.itinerary_id is not None:
+            self.itinerary_id = self.itinerary_id.strip()
+        if self.original_prompt is not None:
+            self.original_prompt = self.original_prompt.strip()
+        if self.recipe_id is not None:
+            self.recipe_id = self.recipe_id.strip()
+        if self.recipe_version is not None:
+            self.recipe_version = self.recipe_version.strip()
+        return self
 
 
 class TextFidelityRequest(BaseModel):
@@ -563,12 +614,15 @@ class UserPreferencesRequest(BaseModel):
 
     default_model: str = Field(default="", max_length=128)
     default_responses_model: str = Field(default="", max_length=128)
+    responses_model_storage_version: int | None = Field(default=None, ge=0, le=1000)
     default_size: str = Field(default="", max_length=64)
     default_quality: Literal["", "auto", "low", "medium", "high"] = ""
     default_output_format: Literal["", "png", "jpeg", "webp"] = ""
-    default_image_transport: Literal["", "images", "responses"] = ""
+    default_image_transport: Literal["", "auto", "images", "responses"] = ""
     logo_overlay_enabled: bool = True
     auto_copyright_check_enabled: bool = True
+    simple_checklist_completed: bool | None = None
+    ui_mode: Literal["simple", "professional"] = "simple"
 
     @field_validator(
         "default_model",
@@ -584,12 +638,25 @@ class UserPreferencesRequest(BaseModel):
         return value.strip()
 
 
+class UserUiModeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    ui_mode: Literal["simple", "professional"]
+
+
+class SimpleChecklistPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    completed: bool
+
+
 class ConfigResponse(BaseModel):
     generate_url: str
     edit_url: str
     responses_url: str
     default_model: str
     default_responses_model: str
+    default_responses_reasoning_effort: ReasoningEffort
     default_size: str
     has_default_api_key: bool
     storage_dir: str
@@ -598,6 +665,8 @@ class ConfigResponse(BaseModel):
     rate_limit_per_minute: int
     upstream_timeout_seconds: float
     auth_enabled: bool
+    self_registration_enabled: bool
+    allow_anonymous_execution_overrides: bool
     bug_report_notifications_enabled: bool
     error_alert_notifications_enabled: bool
     password_reset_email_enabled: bool

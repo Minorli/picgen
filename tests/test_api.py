@@ -5,11 +5,14 @@ import json
 import math
 import re
 import sqlite3
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 
 import anyio
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.types import Scope
 
 from picgen.errors import APIError
@@ -17,17 +20,26 @@ from picgen.itinerary_map import build_itinerary_map_plan, project_itinerary_poi
 from picgen.main import create_app
 from picgen.middleware import BodySizeLimitMiddleware
 from picgen.notifications import NotificationResult
-from picgen.routes import _with_timing
+from picgen.routes import (
+    _notification_tasks,
+    _run_handler_until_client_disconnect,
+    _spawn_notification_task,
+    _with_timing,
+)
 from picgen.upstream import parse_sse_json_events, stream_events_to_image_payload
 
 TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
 
 def png_b64_with_dimensions(width: int, height: int) -> str:
-    image = bytearray(base64.b64decode(TINY_PNG_B64))
-    image[16:20] = width.to_bytes(4, "big")
-    image[20:24] = height.to_bytes(4, "big")
-    return base64.b64encode(image).decode("ascii")
+    return valid_png_b64(width, height)
+
+
+@lru_cache(maxsize=32)
+def valid_png_b64(width: int, height: int, color: tuple[int, int, int] = (60, 120, 220)) -> str:
+    output = BytesIO()
+    Image.new("RGB", (width, height), color).save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
 
 
 def test_health_endpoint_reports_ok(make_client):
@@ -70,8 +82,10 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     payload = response.json()
     assert payload["has_default_api_key"] is True
     assert payload["responses_url"] == "https://sub.tidba.com/v1/responses"
-    assert payload["default_responses_model"] == "gpt-5.5"
+    assert payload["default_responses_model"] == "gpt-5.6-sol"
+    assert payload["default_responses_reasoning_effort"] == "xhigh"
     assert payload["default_size"] == "1088x2240"
+    assert payload["allow_anonymous_execution_overrides"] is True
     assert "sk-secret" not in response.text
     assert "123:abc" not in response.text
     assert "-100123456" not in response.text
@@ -158,6 +172,55 @@ def test_recipes_endpoint_allows_no_auth_mode(make_client, settings_factory):
         "hotel-texture",
         "route-map-comic",
     }
+
+
+def test_recipes_endpoint_exposes_five_simple_mode_scene_cards(make_client, settings_factory):
+    settings = settings_factory(auth_enabled=False)
+    client, _, _ = make_client(settings=settings)
+
+    response = client.get("/api/recipes")
+
+    assert response.status_code == 200
+    recipes = response.json()["recipes"]
+    scene_recipes = sorted(
+        (recipe for recipe in recipes if recipe.get("scene_card")),
+        key=lambda recipe: recipe["scene_card"]["order"],
+    )
+    assert [
+        (
+            recipe["scene_card"]["title"],
+            recipe["scene_card"]["cover"],
+            recipe["scene_card"]["submit"]["kind"],
+        )
+        for recipe in scene_recipes
+    ] == [
+        ("竖版海报", "scene-poster.jpg", "generate"),
+        ("行程路线图", "scene-itinerary.jpg", "itinerary"),
+        ("清单/榜单", "scene-ranking.jpg", "generate"),
+        ("改一张图", "scene-edit.jpg", "edit"),
+        ("自由创作", "scene-free.jpg", "generate"),
+    ]
+
+    expected_fields = {
+        "竖版海报": {"title", "subtitle", "highlights", "price", "atmosphere", "reference_image", "size"},
+        "行程路线图": {"title", "subtitle", "itinerary"},
+        "清单/榜单": {"title", "items", "style", "size"},
+        "改一张图": {"image", "instruction", "quick_actions"},
+        "自由创作": {"prompt", "size"},
+    }
+    for recipe in scene_recipes:
+        card = recipe["scene_card"]
+        assert card["cover"]
+        assert card["subtitle"]
+        assert card["template"]
+        assert card["default_size"] == recipe["default_size"]
+        assert isinstance(card["fields"], list) and card["fields"]
+        assert {"name", "label", "kind", "required"} <= set(card["fields"][0])
+        assert {field["name"] for field in card["fields"]} == expected_fields[card["title"]]
+
+    itinerary = next(recipe for recipe in scene_recipes if recipe["scene_card"]["title"] == "行程路线图")
+    itinerary_fields = {field["name"]: field for field in itinerary["scene_card"]["fields"]}
+    assert itinerary_fields["subtitle"]["required"] is True
 
 
 def test_removed_prompt_detour_endpoints_are_not_exposed(make_client, settings_factory):
@@ -310,11 +373,11 @@ def test_generate_defaults_to_one_candidate_without_sample_count(make_client, se
     assert "Vatican City" in upstream_payload["prompt"]
 
 
-def test_generate_returns_mismatched_poster_size_from_upstream(make_client, settings_factory):
+def test_generate_normalizes_mismatched_poster_size_from_upstream(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_json.return_value = {
-        "data": [{"b64_json": png_b64_with_dimensions(864, 1821)}],
+        "data": [{"b64_json": valid_png_b64(10, 20)}],
         "created": 1,
     }
 
@@ -325,23 +388,73 @@ def test_generate_returns_mismatched_poster_size_from_upstream(make_client, sett
             "endpoint_url": "https://api.openai.com/v1/images/generations",
             "prompt": "生成一张 6 人游竖版旅行海报",
             "model": "gpt-image-2",
-            "size": "1088x2240",
+            "size": "20x40",
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["size"] == "1088x2240"
-    assert payload["requested_size"] == "1088x2240"
-    assert payload["saved_image_width"] == 864
-    assert payload["saved_image_height"] == 1821
-    assert payload["actual_size"] == "864x1821"
-    assert payload["size_mismatch"] is True
-    assert payload["images"][0]["saved_image_width"] == 864
-    assert payload["images"][0]["saved_image_height"] == 1821
-    assert payload["images"][0]["actual_size"] == "864x1821"
-    assert payload["images"][0]["size_mismatch"] is True
+    assert payload["size"] == "20x40"
+    assert payload["requested_size"] == "20x40"
+    assert payload["saved_image_width"] == 20
+    assert payload["saved_image_height"] == 40
+    assert payload["actual_size"] == "20x40"
+    assert payload["upstream_actual_size"] == "10x20"
+    assert payload["image_size_normalized"] is True
+    assert payload["size_mismatch"] is False
+    assert payload["images"][0]["saved_image_width"] == 20
+    assert payload["images"][0]["saved_image_height"] == 40
+    assert payload["images"][0]["actual_size"] == "20x40"
+    assert payload["images"][0]["upstream_actual_size"] == "10x20"
+    assert payload["images"][0]["image_size_normalized"] is True
+    assert payload["images"][0]["size_mismatch"] is False
     assert payload["saved_image_url"].startswith("files/outputs/")
+
+
+def test_generate_normalizes_default_poster_size_when_size_omitted(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test", default_size="20x40")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [{"b64_json": valid_png_b64(10, 20)}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张 6 人游竖版旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved_image_width"] == 20
+    assert payload["saved_image_height"] == 40
+    assert payload["upstream_actual_size"] == "10x20"
+    assert payload["image_size_normalized"] is True
+
+
+def test_generate_rejects_oversized_exact_canvas(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张超大海报",
+            "model": "gpt-image-2",
+            "size": "99999x99999",
+        },
+    )
+
+    assert response.status_code == 400
+    assert fake.run_json.await_count == 0
+    assert "尺寸" in response.json()["error"]
 
 
 def test_generate_rejects_restricted_destination_without_upstream_call(make_client, settings_factory):
@@ -945,7 +1058,7 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
             "title": "日本纵贯路线",
             "subtitle": "9/5 - 9/19",
             "size": "1792x1792",
-            "model": "gpt-image-2",
+            "model": "custom-responses-model",
             "stops": [
                 {"date": "9/5", "name": "札幌", "lat": 43.0618, "lng": 141.3545, "transport": "抵达"},
                 {"date": "9/12", "name": "东京", "lat": 35.6762, "lng": 139.6503, "transport": "火车"},
@@ -985,6 +1098,9 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert fake.run_file_upload.await_args.args[2]["filename"] == "itinerary-geometry-control.png"
     assert fake.run_file_upload.await_args.args[2]["content_type"] == "image/png"
     upstream_payload = fake.run_responses.await_args.args[2]
+    assert fake.run_responses.await_args.args[1] == "sk-test"
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert upstream_payload["tools"][0]["size"] == "1792x1792"
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -1297,9 +1413,84 @@ def test_itinerary_map_render_fails_when_artwork_payload_is_invalid(make_client,
 
     assert response.status_code == 502
     payload = response.json()
-    assert payload["code"] == "upstream_error"
-    assert "图片生成服务暂时不可用" in payload["error"]
-    assert "上游返回的图片格式无效" in payload["details"]
+    assert payload["code"] == "upstream_no_image"
+    assert "没有生成成功" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    "invalid_image",
+    ["not-base64", base64.b64encode(b"plain text, not an image").decode("ascii")],
+)
+def test_generate_rejects_invalid_upstream_image_candidate(
+    make_client,
+    settings_factory,
+    invalid_image,
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": invalid_image}], "created": 1}
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "upstream_no_image"
+
+
+def test_generate_rejects_remote_candidate_with_non_image_signature(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"url": "https://cdn.example.test/not-image.png"}], "created": 1}
+    fake.fetch_image.return_value = (b"not actually an image", "image/png")
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "upstream_no_image"
+
+
+def test_generate_rejects_forged_png_header_without_decodable_pixels(make_client, settings_factory):
+    forged_png = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        + (1088).to_bytes(4, "big")
+        + (2240).to_bytes(4, "big")
+    )
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.return_value = {
+        "data": [{"b64_json": base64.b64encode(forged_png).decode("ascii")}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成一张旅行海报",
+            "model": "gpt-image-2",
+            "size": "1088x2240",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "upstream_no_image"
 
 
 def test_itinerary_map_render_respects_logo_toggle(make_client, settings_factory):
@@ -1369,6 +1560,7 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
             "title": "欧洲漫画路线",
             "subtitle": "6/1 - 6/8",
             "generate_background": False,
+            "model": "custom-coordinate-model",
             "stops": [
                 {"date": "D1", "name": "巴黎", "transport": "火车"},
                 {"date": "D2", "name": "罗马", "transport": "飞机"},
@@ -1386,7 +1578,8 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
     assert payload["plan"]["stops"][1]["lng"] == 12.4964
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.5"
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert "可解析 JSON" in upstream_payload["instructions"]
     assert "经纬度" in upstream_payload["instructions"]
     prompt_text = upstream_payload["input"][0]["content"][0]["text"]
@@ -2265,7 +2458,39 @@ def test_responses_image_requires_prompt(make_client):
     assert response.json()["error"] == "Responses 图像提示词不能为空"
 
 
-def test_responses_image_saves_streamed_image(make_client, settings_factory):
+def test_responses_image_v3_client_legacy_model_is_normalized(make_client, settings_factory):
+    settings = settings_factory(
+        default_api_key="sk-test",
+        default_responses_model="gpt-5.5",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": TINY_PNG_B64}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "生成一张小图",
+            "model": "gpt-5.5",
+            "responses_model_storage_version": 3,
+            "mode": "generate",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "gpt-5.6-sol"
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
+
+
+def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
+    make_client, settings_factory
+):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
@@ -2281,6 +2506,7 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
             "endpoint_url": "https://api.openai.com/v1/responses",
             "prompt": "生成一张小图",
             "model": "gpt-5.5",
+            "responses_model_storage_version": 4,
             "mode": "reference",
         },
     )
@@ -2288,13 +2514,14 @@ def test_responses_image_saves_streamed_image(make_client, settings_factory):
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "reference"
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert payload["saved_image_url"].startswith("files/outputs/")
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
     assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
+    assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
 
 
@@ -2459,11 +2686,11 @@ def test_responses_image_records_reference_source_generation_id(make_client, set
     assert job_row["size"] == "1088x2240"
 
 
-def test_responses_image_returns_mismatched_poster_size_from_upstream(make_client, settings_factory):
+def test_responses_image_normalizes_mismatched_poster_size_from_upstream(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
-        "data": [{"b64_json": png_b64_with_dimensions(1024, 1536)}],
+        "data": [{"b64_json": valid_png_b64(10, 20)}],
         "created": 1,
     }
 
@@ -2475,27 +2702,58 @@ def test_responses_image_returns_mismatched_poster_size_from_upstream(make_clien
             "prompt": "生成严格尺寸海报",
             "model": "gpt-5.5",
             "mode": "generate",
-            "size": "1088x2240",
+            "size": "20x40",
             "quality": "high",
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["size"] == "1088x2240"
-    assert payload["requested_size"] == "1088x2240"
-    assert payload["saved_image_width"] == 1024
-    assert payload["saved_image_height"] == 1536
-    assert payload["actual_size"] == "1024x1536"
-    assert payload["size_mismatch"] is True
-    assert payload["images"][0]["saved_image_width"] == 1024
-    assert payload["images"][0]["saved_image_height"] == 1536
-    assert payload["images"][0]["actual_size"] == "1024x1536"
-    assert payload["images"][0]["size_mismatch"] is True
+    assert payload["size"] == "20x40"
+    assert payload["requested_size"] == "20x40"
+    assert payload["saved_image_width"] == 20
+    assert payload["saved_image_height"] == 40
+    assert payload["actual_size"] == "20x40"
+    assert payload["upstream_actual_size"] == "10x20"
+    assert payload["image_size_normalized"] is True
+    assert payload["size_mismatch"] is False
+    assert payload["images"][0]["saved_image_width"] == 20
+    assert payload["images"][0]["saved_image_height"] == 40
+    assert payload["images"][0]["actual_size"] == "20x40"
+    assert payload["images"][0]["upstream_actual_size"] == "10x20"
+    assert payload["images"][0]["image_size_normalized"] is True
+    assert payload["images"][0]["size_mismatch"] is False
     assert payload["saved_image_url"].startswith("files/outputs/")
 
 
-def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_factory):
+def test_responses_image_normalizes_default_poster_size_when_size_omitted(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test", default_size="20x40")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": valid_png_b64(10, 20)}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "生成严格尺寸海报",
+            "model": "gpt-5.6-sol",
+            "mode": "generate",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved_image_width"] == 20
+    assert payload["saved_image_height"] == 40
+    assert payload["upstream_actual_size"] == "10x20"
+    assert payload["image_size_normalized"] is True
+
+
+def test_copyright_risk_normalizes_gpt55_and_uses_inline_images(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_responses.return_value = {
@@ -2507,6 +2765,7 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
         json={
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/responses",
+            "model": "gpt-5.5",
             "prompt": "生成一张活动图",
             "images": [
                 {
@@ -2520,10 +2779,11 @@ def test_copyright_risk_uses_gpt55_and_inline_images(make_client, settings_facto
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert "风险等级：低" in payload["risk_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.5"
+    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["reasoning"]["effort"] == "xhigh"
     assert "版权" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
     content = upstream_payload["input"][0]["content"]
@@ -2549,6 +2809,7 @@ def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, se
         json={
             "api_key": "sk-test",
             "endpoint_url": "https://api.openai.com/v1/responses",
+            "model": "gpt-5.5",
             "prompt": "把“铁帆鱿鱼”改成“铁煎章鱼”，把“11日从头吃到尾”改成“舌尖盛宴”",
             "text_contract": {
                 "required": ["舌尖盛宴", "铁煎章鱼"],
@@ -2566,10 +2827,11 @@ def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, se
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert payload["passed"] is False
     assert "铁煎章鱼" in payload["fidelity_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["reasoning"]["effort"] == "xhigh"
     assert "文字一致性验收助手" in upstream_payload["instructions"]
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -2970,6 +3232,43 @@ def test_with_timing_cancels_handler_when_client_disconnects(settings_factory):
 
     anyio.run(run_check)
     assert cancelled is True
+
+
+def test_handler_error_wins_over_simultaneous_disconnect(settings_factory):
+    class DisconnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    async def failed_handler(_body, _settings, _client, _user):
+        raise APIError(502, "upstream failed", code="upstream_error")
+
+    async def run_check():
+        with pytest.raises(APIError) as exc_info:
+            await _run_handler_until_client_disconnect(
+                handler=failed_handler,
+                body={},
+                settings=settings_factory(default_api_key="sk-test"),
+                client=object(),
+                user=None,
+                request=DisconnectedRequest(),
+            )
+        assert exc_info.value.code == "upstream_error"
+
+    anyio.run(run_check)
+
+
+def test_notification_task_exception_is_consumed_and_logged(caplog):
+    async def run_check():
+        async def failed_notification():
+            raise RuntimeError("notification failed")
+
+        _spawn_notification_task(failed_notification())
+        await anyio.sleep(0.01)
+        assert not _notification_tasks
+
+    with caplog.at_level("ERROR"):
+        anyio.run(run_check)
+    assert "notification_task_failed" in caplog.text
 
 
 def test_responses_sse_parser_keeps_partial_image() -> None:

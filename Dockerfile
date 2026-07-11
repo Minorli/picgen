@@ -1,20 +1,22 @@
+FROM ghcr.io/astral-sh/uv:0.11.28 AS uv
+
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install only the runtime dependencies first for better layer caching.
-COPY pyproject.toml README.md ./
-COPY src ./src
+# Install the exact locked runtime dependency graph first for layer caching.
+COPY --from=uv /uv /uvx /bin/
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-RUN pip install --upgrade pip \
-    && pip install "fastapi>=0.115.0" "uvicorn[standard]>=0.30.0" "httpx>=0.27.0" \
-                   "pydantic>=2.7.0" "pydantic-settings>=2.4.0" "anyio>=4.4.0" \
-    && pip install --no-deps . \
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable \
     && python -m compileall -q /app/src
 
 COPY static ./static

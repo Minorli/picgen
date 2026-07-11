@@ -1,6 +1,6 @@
 services:
   picgen:
-    image: minorli/picgen:0.1.44
+    image: minorli/picgen:0.1.55
     build:
       context: .
     ports:
@@ -14,11 +14,13 @@ services:
       PICGEN_DATA_DIR: "/app/data"
       PICGEN_ENV_FILE: "/app/data/.env"
       PICGEN_AUTH_ENABLED: "true"
+      PICGEN_SELF_REGISTRATION_ENABLED: "${PICGEN_SELF_REGISTRATION_ENABLED:-false}"
       PICGEN_ADMIN_USERNAME: "${PICGEN_ADMIN_USERNAME:-admin}"
       PICGEN_ADMIN_PASSWORD: "${PICGEN_ADMIN_PASSWORD:-}"
       PICGEN_DEFAULT_GENERATE_URL: "https://sub.tidba.com/v1/images/generations"
       PICGEN_DEFAULT_EDIT_URL: "https://sub.tidba.com/v1/images/edits"
       PICGEN_DEFAULT_RESPONSES_URL: "https://sub.tidba.com/v1/responses"
+      PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT: "${PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT:-xhigh}"
     volumes:
       - picgen-data:/app/data
     restart: unless-stopped

@@ -1,7 +1,33 @@
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.55"
+import {
+  DEFAULT_RESPONSES_MODEL,
+  RESPONSES_MODEL_STORAGE_VERSION,
+  RESPONSES_REASONING_STORAGE_VERSION,
+  migrateStoredResponsesReasoningSettings,
+  migrateStoredResponsesSettings,
+} from "./responses-settings.mjs?v=0.1.55"
+
+const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
+const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
 const STORAGE_KEY = "picgen-console-settings-v2"
 const LEGACY_STORAGE_KEY = "picgen-console-settings-v1"
 const HISTORY_KEY = "picgen-console-history-v1"
 const TEAM_CHAT_RECENT_DM_KEY = "picgen-team-chat-recent-dms-v1"
+const UI_MODE_KEY = "picgen-ui-mode-v1"
+const SIMPLE_CHECKLIST_KEY = "picgen-simple-checklist-v1"
+const UI_MODES = new Set(["simple", "professional"])
+const SIMPLE_SCENE_ICONS = Object.freeze({
+  "travel-poster-premium": "image",
+  "route-map-comic": "location",
+  "list-ranking": "list",
+  "image-edit": "edit",
+  "free-create": "plus",
+})
+const PROFESSIONAL_PROMPT_RECIPE_IDS = new Set([
+  "travel-poster-premium",
+  "hotel-texture",
+  "wild-retreat",
+])
 const COMPANY_LOGO_URL = "6renyou.png"
 const COMPANY_LOGO_NAME = "6renyou.png"
 const COMPANY_LOGO_MIME = "image/png"
@@ -45,7 +71,6 @@ const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
-const IMAGES_API_EXACT_SIZES = new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -114,11 +139,22 @@ const SIZE_PRESETS = [
   "2160x3840",
 ]
 
+const FILE_READ_CHANNELS = Object.freeze({
+  editImage: "edit-image",
+  editMask: "edit-mask",
+  styleReference: "style-reference",
+  materialReference: "material-reference",
+  generateReference: "generate-reference",
+})
+
 const state = {
   activeMode: "generate",
   generateIntent: "fresh",
   serverConfig: null,
   currentUser: null,
+  userContextEpoch: 0,
+  preferenceSyncTail: Promise.resolve(),
+  preferenceSyncController: null,
   authMode: "login",
   passwordResetToken: "",
   appReady: false,
@@ -139,6 +175,8 @@ const state = {
   resultGenerationSeq: 0,
   resultCandidates: [],
   selectedCandidateIndex: 0,
+  candidateReviewStates: {},
+  lastReviewPayload: null,
   progressTimer: null,
   progressStartedAt: 0,
   progressPhase: "idle",
@@ -178,6 +216,7 @@ const state = {
   debugLines: [],
   persistTimer: null,
   toastTimer: null,
+  toastHideTimer: null,
   persistenceReady: false,
   isBusy: false,
   companyLogoCanvas: null,
@@ -191,6 +230,7 @@ const state = {
   gallerySearch: "",
   galleryFavoriteOnly: false,
   gallerySearchTimer: null,
+  generatedImageDetailRequestSeq: 0,
   generationJobs: [],
   currentGalleryMeta: {
     generatedImageId: null,
@@ -227,11 +267,35 @@ const state = {
   teamChatQuotedMessage: null,
   teamChatOpenMenuId: null,
   teamChatSending: false,
+  suppressSettingsPersist: false,
+  feedbackSubmitting: false,
+  rerunInProgress: false,
+  rerunExecutionSnapshot: null,
+  checkedCandidateIndex: null,
+  promptConfirmCancel: null,
   adminOrgUnits: [],
   orgUnits: [],
   promptMode: "free",
   promptRecipes: [],
   selectedRecipeId: "",
+  uiMode: "professional",
+  workspaceUiMode: "",
+  simpleDraft: {
+    scenarioId: "",
+    view: "picker",
+    values: {},
+  },
+  latestFileReadEpoch: 0,
+  latestFileReadSequences: {},
+  latestFileReadBusyChannels: new Set(),
+  simpleChecklist: {
+    steps: [],
+    dismissed: false,
+    completed: false,
+  },
+  simpleChecklistCompletionTimer: null,
+  userGeneratedImageCount: null,
+  simpleFirstRunEligible: null,
 }
 
 const refs = {
@@ -312,8 +376,11 @@ const refs = {
   editUrlInput: document.querySelector("#editUrlInput"),
   responsesUrlInput: document.querySelector("#responsesUrlInput"),
   responsesModelInput: document.querySelector("#responsesModelInput"),
+  responsesReasoningEffortSelect: document.querySelector("#responsesReasoningEffortSelect"),
   imageTransportInputs: Array.from(document.querySelectorAll('input[name="imageTransport"]')),
   imageTransportHint: document.querySelector("#imageTransportHint"),
+  connectionSettings: document.querySelector("#connectionSettings"),
+  connectionSettingsLink: document.querySelector("#connectionSettingsLink"),
   settingsHint: document.querySelector("#settingsHint"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
@@ -338,6 +405,29 @@ const refs = {
   clearGalleryFiltersButton: document.querySelector("#clearGalleryFiltersButton"),
   requestStatus: document.querySelector("#requestStatus"),
   requestBadge: document.querySelector("#requestBadge"),
+  uiModeToggleButton: document.querySelector("#uiModeToggleButton"),
+  uiModeToggleLabel: document.querySelector("#uiModeToggleLabel"),
+  simpleModePanel: document.querySelector("#simpleModePanel"),
+  simpleScenarioPicker: document.querySelector("#simpleScenarioPicker"),
+  simpleScenarioGrid: document.querySelector("#simpleScenarioGrid"),
+  simpleScenarioForm: document.querySelector("#simpleScenarioForm"),
+  simpleScenarioTitle: document.querySelector("#simpleScenarioTitle"),
+  simpleScenarioSubtitle: document.querySelector("#simpleScenarioSubtitle"),
+  simpleScenarioFields: document.querySelector("#simpleScenarioFields"),
+  simpleEditImageInput: document.querySelector("#simpleEditImageInput"),
+  simpleBackButton: document.querySelector("#simpleBackButton"),
+  simpleGenerateButton: document.querySelector("#simpleGenerateButton"),
+  simpleTimingEstimate: document.querySelector("#simpleTimingEstimate"),
+  simpleFormAlert: document.querySelector("#simpleFormAlert"),
+  simpleFormAlertText: document.querySelector("#simpleFormAlertText"),
+  simpleWorkflowSteps: Array.from(document.querySelectorAll("[data-simple-workflow-step]")),
+  simpleFirstRunChecklist: document.querySelector("#simpleFirstRunChecklist"),
+  simpleChecklistCloseButton: document.querySelector("#simpleChecklistCloseButton"),
+  simpleChecklistSteps: Array.from(document.querySelectorAll("[data-simple-checklist-step]")),
+  simpleGallerySection: document.querySelector("#simpleGallerySection"),
+  simpleGalleryRefreshButton: document.querySelector("#simpleGalleryRefreshButton"),
+  simpleGalleryList: document.querySelector("#simpleGalleryList"),
+  simpleGalleryEmpty: document.querySelector("#simpleGalleryEmpty"),
   generateTab: document.querySelector("#generateTab"),
   editTab: document.querySelector("#editTab"),
   itineraryTab: document.querySelector("#itineraryTab"),
@@ -420,6 +510,8 @@ const refs = {
   clearEditButton: document.querySelector("#clearEditButton"),
   editButton: document.querySelector("#editButton"),
   comparisonGrid: document.querySelector("#comparisonGrid"),
+  resultPanelTitle: document.querySelector("#resultPanelTitle"),
+  resultPanelSubtitle: document.querySelector("#resultPanelSubtitle"),
   sourcePreviewCard: document.querySelector("#sourcePreviewCard"),
   sourcePreviewLabel: document.querySelector("#sourcePreviewLabel"),
   sourcePreviewTrigger: document.querySelector("#sourcePreviewTrigger"),
@@ -438,6 +530,8 @@ const refs = {
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
   generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
   generationOverlaySteps: document.querySelector("#generationOverlaySteps"),
+  simpleResultSkeleton: document.querySelector("#simpleResultSkeleton"),
+  simpleResultEmpty: document.querySelector("#simpleResultEmpty"),
   resultPrompt: document.querySelector("#resultPrompt"),
   resultMeta: document.querySelector("#resultMeta"),
   resultTiming: document.querySelector("#resultTiming"),
@@ -450,6 +544,7 @@ const refs = {
   copyrightRiskPanel: document.querySelector("#copyrightRiskPanel"),
   copyrightRiskStatus: document.querySelector("#copyrightRiskStatus"),
   copyrightRiskText: document.querySelector("#copyrightRiskText"),
+  retryResultReviewButton: document.querySelector("#retryResultReviewButton"),
   textFidelityPanel: document.querySelector("#textFidelityPanel"),
   textFidelityStatus: document.querySelector("#textFidelityStatus"),
   textFidelityText: document.querySelector("#textFidelityText"),
@@ -470,8 +565,12 @@ const refs = {
   hoverShareButton: document.querySelector("#hoverShareButton"),
   saveGroupAssetButton: document.querySelector("#saveGroupAssetButton"),
   copyPromptButton: document.querySelector("#copyPromptButton"),
+  simpleShareResultButton: document.querySelector("#simpleShareResultButton"),
+  simpleMoreActionsButton: document.querySelector("#simpleMoreActionsButton"),
+  simpleMoreActionsMenu: document.querySelector("#simpleMoreActionsMenu"),
   errorMessage: document.querySelector("#errorMessage"),
   toastMessage: document.querySelector("#toastMessage"),
+  toastMessageText: document.querySelector("#toastMessageText"),
   errorDetails: document.querySelector("#errorDetails"),
   errorDetailsText: document.querySelector("#errorDetailsText"),
   debugOutput: document.querySelector("#debugOutput"),
@@ -605,7 +704,15 @@ function loadJSON(key, fallbackValue) {
 }
 
 function saveJSON(key, value) {
-  window.localStorage.setItem(key, JSON.stringify(value))
+  // localStorage 满（历史里嵌了大 data URL）时不能让一次成功的生成
+  // 在收尾阶段抛错、被上层当成生成失败。
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+    return true
+  } catch (error) {
+    console.warn("localStorage 写入失败，本次不保存", key, error)
+    return false
+  }
 }
 
 function escapeHTML(value) {
@@ -633,6 +740,14 @@ function historyStorageKey() {
   return scopedStorageKey(HISTORY_KEY)
 }
 
+function uiModeStorageKey() {
+  return scopedStorageKey(UI_MODE_KEY)
+}
+
+function simpleChecklistStorageKey() {
+  return scopedStorageKey(SIMPLE_CHECKLIST_KEY)
+}
+
 function teamChatRecentDmStorageKey() {
   return scopedStorageKey(TEAM_CHAT_RECENT_DM_KEY)
 }
@@ -654,6 +769,7 @@ function proxyTokenHeaders() {
 }
 
 async function fetchJSON(url, options = {}) {
+  const requestUserContextEpoch = state.userContextEpoch
   const response = await fetch(url, {
     credentials: "same-origin",
     ...options,
@@ -669,18 +785,27 @@ async function fetchJSON(url, options = {}) {
   } catch {
     data = {}
   }
+  ensureUserContextCurrent(requestUserContextEpoch)
   if (response.status === 401) {
-    state.appReady = false
-    state.persistenceReady = false
-    state.lastReadyUserId = null
-    stopTeamChatPolling()
-    enterAuthGate("login", "登录已过期，请重新登录。")
+    handleSessionExpired()
   }
+  ensureUserContextCurrent(requestUserContextEpoch)
   return { response, data }
 }
 
+function handleSessionExpired() {
+  state.appReady = false
+  state.persistenceReady = false
+  state.lastReadyUserId = null
+  stopTeamChatPolling()
+  setCurrentUser(null)
+  enterAuthGate("login", "登录已过期，请重新登录。")
+}
+
 function enterAuthGate(mode = state.authMode || "login", message = "") {
-  state.authMode = mode === "register" ? "register" : "login"
+  const registrationEnabled = state.serverConfig?.self_registration_enabled === true
+  state.authMode = mode === "register" && registrationEnabled ? "register" : "login"
+  cancelPendingPromptConfirmation()
   // 会话过期常发生在聊天/资料弹窗打开时；这些弹窗是 .desktop-shell 的
   // 兄弟节点，不随 auth-gate 隐藏，不关掉会盖在登录表单上面。
   ;[
@@ -689,6 +814,7 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
     refs.bugReportModal,
     refs.changePasswordModal,
     refs.promptConfirmModal,
+    refs.previewModal,
   ].forEach((modal) => {
     if (modal && !modal.classList.contains("hidden")) {
       modal.classList.add("hidden")
@@ -707,22 +833,24 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   }
   if (refs.authSubtitle) {
     refs.authSubtitle.textContent = state.authMode === "register"
-      ? "填写用户名、密码、公司和部门即可创建账号。"
-      : "已有账号可直接登录；新用户可以注册后进入图像工作台。"
+      ? "填写用户名和密码创建账号，组织由管理员分配。"
+      : registrationEnabled
+        ? "已有账号可直接登录；新用户可以注册后进入图像工作台。"
+        : "请使用管理员创建的账号登录。"
   }
   if (refs.loginAuthButton) {
     refs.loginAuthButton.textContent = state.authMode === "register" ? "创建账号" : "登录"
   }
   if (refs.registerAuthButton) {
-    refs.registerAuthButton.classList.remove("hidden")
-    refs.registerAuthButton.removeAttribute("aria-hidden")
-    refs.registerAuthButton.tabIndex = 0
+    refs.registerAuthButton.classList.toggle("hidden", !registrationEnabled)
+    refs.registerAuthButton.setAttribute("aria-hidden", String(!registrationEnabled))
+    refs.registerAuthButton.tabIndex = registrationEnabled ? 0 : -1
     refs.registerAuthButton.textContent = state.authMode === "register" ? "已有账号，去登录" : "注册"
   }
   if (refs.authPasswordInput) {
     refs.authPasswordInput.autocomplete = state.authMode === "register" ? "new-password" : "current-password"
   }
-  refs.authOrgFields?.classList.toggle("hidden", state.authMode !== "register")
+  refs.authOrgFields?.classList.add("hidden")
   if (refs.authError) {
     refs.authError.textContent = message
   }
@@ -809,8 +937,41 @@ function enterPasswordResetConfirm(token) {
   window.setTimeout(() => refs.passwordResetNewPasswordInput?.focus(), 0)
 }
 
+function invalidateUserContext() {
+  state.userContextEpoch += 1
+  invalidateLatestFileReads()
+  state.activeRequestCancelled = true
+  state.activeRequestController?.abort()
+  state.activeRequestController = null
+  state.preferenceSyncController?.abort()
+  state.preferenceSyncController = null
+  state.preferenceSyncTail = Promise.resolve()
+  window.clearTimeout(state.simpleChecklistCompletionTimer)
+  state.simpleChecklistCompletionTimer = null
+}
+
+function userContextIsCurrent(epoch) {
+  return epoch === state.userContextEpoch
+}
+
+function ensureUserContextCurrent(epoch) {
+  if (userContextIsCurrent(epoch)) {
+    return
+  }
+  const error = new Error("用户已切换，已忽略旧账号的异步结果。")
+  error.cancelled = true
+  error.staleUserContext = true
+  throw error
+}
+
 function setCurrentUser(user) {
-  state.currentUser = user || null
+  const nextUser = user || null
+  const previousUserId = state.currentUser?.id ?? null
+  const nextUserId = nextUser?.id ?? null
+  if (previousUserId !== nextUserId) {
+    invalidateUserContext()
+  }
+  state.currentUser = nextUser
   if (!state.currentUser) {
     resetTeamChatState()
   }
@@ -824,6 +985,20 @@ function setCurrentUser(user) {
     renderAvatarElement(refs.userAvatar, state.currentUser, "user-avatar")
   }
   updateAdminPanelVisibility()
+}
+
+function applyAnonymousShellChrome() {
+  // 认证关闭的本地模式没有账号概念；"修改密码/退出/Team Chat"在这里
+  // 全是死路（退出甚至会落到一个登不进去的登录页），干脆藏掉。
+  refs.changePasswordButton?.classList.add("hidden")
+  refs.logoutButton?.classList.add("hidden")
+  refs.teamChatButton?.classList.add("hidden")
+  if (refs.openProfileButton) {
+    refs.openProfileButton.disabled = true
+  }
+  if (refs.currentUsername) {
+    refs.currentUsername.textContent = "本地模式"
+  }
 }
 
 function renderAvatarElement(element, user, imageClassName = "") {
@@ -848,6 +1023,7 @@ function renderAvatarElement(element, user, imageClassName = "") {
 async function checkAuthSession({ showLogin = true } = {}) {
   if (state.serverConfig?.auth_enabled === false) {
     setCurrentUser(null)
+    applyAnonymousShellChrome()
     enterAppShell()
     return true
   }
@@ -872,7 +1048,6 @@ async function checkAuthSession({ showLogin = true } = {}) {
     return false
   }
   setCurrentUser(data.user)
-  enterAppShell()
   return true
 }
 
@@ -896,7 +1071,10 @@ async function refreshUsageSummary() {
     }
     const megabytes = row.saved_bytes ? (row.saved_bytes / 1024 / 1024).toFixed(1) : "0.0"
     refs.userUsageSummary.textContent = `${row.request_count} 次请求 · ${row.image_count} 张图 · ${megabytes} MB`
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
     refs.userUsageSummary.textContent = "用量统计暂时不可用。"
   }
   await refreshAdminUsers()
@@ -911,27 +1089,39 @@ async function refreshUsageSummary() {
 
 async function refreshImageStats() {
   if (state.serverConfig?.auth_enabled === false || !refs.userImageStats || !state.currentUser) {
+    state.userGeneratedImageCount = state.serverConfig?.auth_enabled === false ? 0 : null
     refs.userImageStats?.classList.add("hidden")
     return
   }
   try {
     const { response, data } = await fetchJSON("/api/image-stats", { cache: "no-store" })
     if (!response.ok || !data.stats) {
+      state.userGeneratedImageCount = null
       refs.userImageStats.classList.add("hidden")
       return
     }
     const mine = Number(data.stats.current_user_generated_image_count || 0)
     const platform = Number(data.stats.platform_generated_image_count || 0)
+    state.userGeneratedImageCount = mine
     refs.userImageStats.textContent = `我的 ${mine} 张 · 平台 ${platform} 张`
     refs.userImageStats.classList.remove("hidden")
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
+    state.userGeneratedImageCount = null
     refs.userImageStats.classList.add("hidden")
   }
 }
 
 function updateAdminPanelVisibility() {
   const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  const canManageExecution = canManageExecutionSettings()
   refs.adminPanel?.classList.toggle("hidden", !isAdmin)
+  refs.connectionSettings?.classList.toggle("hidden", !canManageExecution)
+  refs.connectionSettingsLink?.classList.toggle("hidden", !canManageExecution)
+  refs.debugOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
+  refs.rawResponseOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
   if (!isAdmin && refs.adminUsersList) {
     refs.adminUsersList.innerHTML = ""
   }
@@ -944,6 +1134,21 @@ function updateAdminPanelVisibility() {
   if (!isAdmin && refs.passwordResetRequestsList) {
     refs.passwordResetRequestsList.innerHTML = ""
   }
+}
+
+function canManageExecutionSettings() {
+  const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+  const trustedLocalMode = state.serverConfig?.auth_enabled === false
+    && state.serverConfig?.allow_anonymous_execution_overrides === true
+  return Boolean(isAdmin || trustedLocalMode)
+}
+
+function canViewExecutionDetails() {
+  return canManageExecutionSettings()
+}
+
+function executionReviewServiceLabel() {
+  return canViewExecutionDetails() ? DEFAULT_RESPONSES_MODEL : "智能检查服务"
 }
 
 function formatAdminBytes(bytes) {
@@ -977,7 +1182,7 @@ function renderAdminUsers(users) {
           <span>${Number(user.image_count || 0)} 张</span>
           <span>${formatAdminBytes(Number(user.saved_bytes || 0))}</span>
         </div>
-        <button class="ghost-button admin-delete-user-button" type="button" data-user-id="${user.id}" ${disabled}>删除</button>
+        <button class="ghost-button admin-delete-user-button" type="button" data-user-id="${user.id}" data-username="${escapeHTML(user.username || "")}" ${disabled}>删除</button>
       </article>
     `
   }).join("")
@@ -1056,8 +1261,6 @@ function renderDepartmentSelect(select, units, selectedCompany) {
 function renderOrgUnitControls() {
   renderOrgUnitSelect(refs.authCompanyInput, state.orgUnits)
   renderDepartmentSelect(refs.authDepartmentInput, state.orgUnits, refs.authCompanyInput?.value || "6renyou")
-  renderOrgUnitSelect(refs.profileCompanyInput, state.orgUnits)
-  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
   renderOrgUnitSelect(refs.adminOrgUnitSelect, state.orgUnits, { includeNewlineValue: true })
   renderOrgUnitSelect(refs.adminAnnouncementOrgSelect, state.orgUnits, { includeNewlineValue: true })
 }
@@ -1583,6 +1786,10 @@ function selectedPromptRecipe() {
   return state.promptRecipes.find((recipe) => recipe.id === recipeId) || null
 }
 
+function professionalPromptRecipes() {
+  return state.promptRecipes.filter((recipe) => PROFESSIONAL_PROMPT_RECIPE_IDS.has(recipe.id))
+}
+
 function promptRecipeAppendText(recipe = selectedPromptRecipe()) {
   if (!recipe?.prompt_suffix) {
     return ""
@@ -1779,9 +1986,7 @@ function renderPromptRecipes() {
   placeholder.value = ""
   placeholder.textContent = "选择配方"
   refs.promptRecipeSelect.append(placeholder)
-  state.promptRecipes
-    .filter((recipe) => recipe.mode === "generate")
-    .forEach((recipe) => {
+  professionalPromptRecipes().forEach((recipe) => {
       const option = document.createElement("option")
       option.value = recipe.id
       option.textContent = recipe.title
@@ -1793,9 +1998,11 @@ function renderPromptRecipes() {
   updatePromptRecipeSummary()
   updateEffectivePromptPreview()
   renderPromptRecipeCards()
+  renderSimpleScenarioCards()
 }
 
 async function loadPromptRecipes() {
+  renderSimpleScenarioLoading()
   try {
     const { response, data } = await fetchJSON("api/recipes", { cache: "no-store" })
     if (!response.ok) {
@@ -1811,12 +2018,1225 @@ async function loadPromptRecipes() {
   }
 }
 
+function createSpriteIcon(name, className = "ux-icon") {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use")
+  svg.setAttribute("class", className)
+  svg.setAttribute("aria-hidden", "true")
+  use.setAttribute("href", `icons.svg#icon-${name}`)
+  svg.append(use)
+  return svg
+}
+
+function replaceWithIconLabel(element, iconName, label) {
+  if (!element) {
+    return
+  }
+  const text = document.createElement("span")
+  text.textContent = label
+  element.replaceChildren(createSpriteIcon(iconName), text)
+}
+
+function simpleSceneRecipes() {
+  return state.promptRecipes
+    .filter((recipe) => recipe?.scene_card)
+    .slice()
+    .sort((left, right) => Number(left.scene_card.order || 0) - Number(right.scene_card.order || 0))
+}
+
+function simpleSceneRecipe(recipeId = state.simpleDraft.scenarioId) {
+  return simpleSceneRecipes().find((recipe) => recipe.id === recipeId) || null
+}
+
+function simpleDraftSnapshot() {
+  return {
+    scenarioId: state.simpleDraft.scenarioId || "",
+    view: state.simpleDraft.view === "form" ? "form" : "picker",
+    values: Object.fromEntries(
+      Object.entries(state.simpleDraft.values || {}).map(([key, value]) => [
+        key,
+        Array.isArray(value) ? [...value] : value,
+      ]),
+    ),
+  }
+}
+
+function simpleDraftHasContent() {
+  return Object.values(state.simpleDraft.values || {}).some((value) => (
+    Array.isArray(value)
+      ? value.some((item) => String(item || "").trim())
+      : String(value || "").trim()
+  ))
+}
+
+function restoreSimpleDraft(snapshot) {
+  const recipeId = typeof snapshot?.scenarioId === "string" ? snapshot.scenarioId : ""
+  const sourceValues = snapshot?.values && typeof snapshot.values === "object" ? snapshot.values : {}
+  state.simpleDraft = {
+    scenarioId: recipeId,
+    view: snapshot?.view === "form" && recipeId ? "form" : "picker",
+    values: Object.fromEntries(
+      Object.entries(sourceValues).map(([key, value]) => [
+        key,
+        Array.isArray(value) ? [...value] : typeof value === "string" ? value : "",
+      ]),
+    ),
+  }
+}
+
+function initialSimpleFieldValue(field, sceneCard) {
+  if (field.kind === "list") {
+    return [""]
+  }
+  if (field.kind === "chips") {
+    return []
+  }
+  if (field.kind === "size") {
+    return field.options?.[0]?.value || sceneCard.default_size || "1024x1024"
+  }
+  return ""
+}
+
+function initialSimpleValues(recipe) {
+  const sceneCard = recipe?.scene_card || {}
+  return Object.fromEntries(
+    (sceneCard.fields || []).map((field) => [field.name, initialSimpleFieldValue(field, sceneCard)]),
+  )
+}
+
+function updateSimpleFieldValue(fieldName, nextValue) {
+  state.simpleDraft = {
+    ...state.simpleDraft,
+    values: {
+      ...state.simpleDraft.values,
+      [fieldName]: Array.isArray(nextValue) ? [...nextValue] : nextValue,
+    },
+  }
+  clearSimpleFormAlert()
+  scheduleWorkspacePersist()
+}
+
+function simpleSceneIconName(recipe) {
+  return SIMPLE_SCENE_ICONS[recipe.id] || (recipe.scene_card?.submit?.kind === "edit" ? "edit" : "image")
+}
+
+function renderSimpleScenarioLoading() {
+  if (!refs.simpleScenarioGrid) {
+    return
+  }
+  refs.simpleScenarioGrid.setAttribute("aria-busy", "true")
+  refs.simpleScenarioGrid.replaceChildren()
+  for (let index = 0; index < 5; index += 1) {
+    const skeleton = document.createElement("div")
+    skeleton.className = "simple-scenario-loading"
+    skeleton.setAttribute("aria-hidden", "true")
+    refs.simpleScenarioGrid.append(skeleton)
+  }
+}
+
+function renderSimpleScenarioCards() {
+  if (!refs.simpleScenarioGrid) {
+    return
+  }
+  refs.simpleScenarioGrid.setAttribute("aria-busy", "false")
+  refs.simpleScenarioGrid.replaceChildren()
+  const recipes = simpleSceneRecipes()
+  if (!recipes.length) {
+    const alert = document.createElement("div")
+    alert.className = "ux-alert ux-alert-error"
+    const copy = document.createElement("span")
+    copy.textContent = "场景暂时不可用，请切到专业模式继续。"
+    alert.append(createSpriteIcon("exclamation-circle"), copy)
+    refs.simpleScenarioGrid.append(alert)
+    return
+  }
+
+  recipes.forEach((recipe) => {
+    const scene = recipe.scene_card
+    const card = document.createElement("button")
+    card.type = "button"
+    card.className = "simple-scenario-card"
+    card.dataset.scenarioId = recipe.id
+    card.setAttribute("aria-label", `${scene.title}：${scene.subtitle}`)
+
+    const cover = document.createElement("img")
+    cover.src = scene.cover
+    cover.alt = ""
+    cover.loading = "eager"
+
+    const icon = document.createElement("span")
+    icon.className = "simple-scenario-icon"
+    icon.append(createSpriteIcon(simpleSceneIconName(recipe)))
+
+    const copy = document.createElement("span")
+    copy.className = "simple-scenario-copy"
+    const title = document.createElement("strong")
+    title.textContent = scene.title
+    const subtitle = document.createElement("span")
+    subtitle.textContent = scene.subtitle
+    copy.append(title, subtitle)
+
+    let cardLoadingIcon = null
+    if (scene.submit?.kind === "edit") {
+      const uploadHint = document.createElement("span")
+      uploadHint.className = "simple-scenario-upload-hint"
+      uploadHint.append(createSpriteIcon("upload"), document.createTextNode("点击、拖拽或粘贴图片"))
+      copy.append(uploadHint)
+      cardLoadingIcon = createSpriteIcon("loading", "ux-icon simple-scenario-card-loading")
+      bindLatestFileReadControls(card, refs.simpleEditImageInput, FILE_READ_CHANNELS.editImage)
+      card.addEventListener("click", () => refs.simpleEditImageInput?.click())
+      ;["dragenter", "dragover"].forEach((eventName) => {
+        card.addEventListener(eventName, (event) => {
+          event.preventDefault()
+          card.classList.add("dragging")
+        })
+      })
+      ;["dragleave", "dragend", "drop"].forEach((eventName) => {
+        card.addEventListener(eventName, (event) => {
+          event.preventDefault()
+          if (eventName !== "drop") {
+            card.classList.remove("dragging")
+          }
+        })
+      })
+      card.addEventListener("drop", (event) => {
+        card.classList.remove("dragging")
+        const file = event.dataTransfer?.files?.[0]
+        if (file) {
+          void handleSimpleEditImageFile(file)
+        }
+      })
+    } else {
+      card.addEventListener("click", () => openSimpleScenario(recipe.id))
+    }
+
+    card.append(cover, icon, copy)
+    if (cardLoadingIcon) {
+      card.append(cardLoadingIcon)
+    }
+    refs.simpleScenarioGrid.append(card)
+  })
+}
+
+async function handleSimpleEditImageFile(file) {
+  const recipe = simpleSceneRecipes().find((item) => item.scene_card?.submit?.kind === "edit")
+  if (!recipe || !file) {
+    return
+  }
+  const contextIsCurrent = () => state.uiMode === "simple"
+    && state.simpleDraft.view === "picker"
+  try {
+    return await runLatestFileRead(FILE_READ_CHANNELS.editImage, file, useImageFile, {
+      contextIsCurrent: contextIsCurrent,
+      onApplied: () => {
+        openSimpleScenario(recipe.id)
+        updateSimpleFieldValue("image", file.name)
+        renderSimpleScenarioForm()
+        setError("")
+      },
+    })
+  } catch (error) {
+    if (!contextIsCurrent()) {
+      return false
+    }
+    setSimpleFormAlert(error.message || "无法读取这张图片。")
+    setError(error.message, error.details)
+    return false
+  }
+}
+
+function showSimpleScenarioPicker() {
+  invalidateLatestFileReads()
+  state.simpleDraft = {
+    ...state.simpleDraft,
+    view: "picker",
+  }
+  refs.simpleScenarioPicker?.classList.remove("hidden")
+  refs.simpleScenarioForm?.classList.add("hidden")
+  setSimpleWorkflowStep(1)
+  clearSimpleFormAlert()
+  scheduleWorkspacePersist()
+}
+
+function openSimpleScenario(recipeId) {
+  const recipe = simpleSceneRecipe(recipeId)
+  if (!recipe) {
+    setSimpleFormAlert("这个场景暂时不可用。")
+    return
+  }
+  if (state.simpleDraft.scenarioId !== recipeId || state.simpleDraft.view !== "form") {
+    invalidateLatestFileReads()
+  }
+  const values = state.simpleDraft.scenarioId === recipeId
+    ? state.simpleDraft.values
+    : initialSimpleValues(recipe)
+  state.simpleDraft = {
+    scenarioId: recipeId,
+    view: "form",
+    values: Object.fromEntries(
+      Object.entries(values).map(([key, value]) => [key, Array.isArray(value) ? [...value] : value]),
+    ),
+  }
+  refs.simpleScenarioPicker?.classList.add("hidden")
+  refs.simpleScenarioForm?.classList.remove("hidden")
+  setSimpleWorkflowStep(2)
+  markSimpleChecklistStep(1)
+  renderSimpleScenarioForm()
+  scheduleWorkspacePersist()
+}
+
+function simpleFieldLabel(field) {
+  const row = document.createElement("div")
+  row.className = "simple-field-label"
+  const label = document.createElement("span")
+  label.textContent = field.label
+  if (field.required) {
+    const required = document.createElement("span")
+    required.className = "simple-field-required"
+    required.textContent = " *"
+    label.append(required)
+  }
+  row.append(label)
+  if (field.max_items) {
+    const hint = document.createElement("small")
+    hint.textContent = `最多 ${field.max_items} 条`
+    row.append(hint)
+  }
+  return row
+}
+
+function renderSimpleTextField(field, value) {
+  const shell = document.createElement("div")
+  shell.className = "simple-input-shell"
+  const input = document.createElement(field.kind === "textarea" ? "textarea" : "input")
+  input.className = field.kind === "textarea" ? "simple-textarea" : "simple-input"
+  input.dataset.simpleField = field.name
+  input.name = field.name
+  input.required = Boolean(field.required)
+  input.placeholder = field.placeholder || ""
+  input.value = typeof value === "string" ? value : ""
+  if (field.kind !== "textarea") {
+    input.type = "text"
+  }
+  input.addEventListener("input", () => updateSimpleFieldValue(field.name, input.value))
+  const spinner = document.createElement("span")
+  spinner.className = "simple-input-loading"
+  spinner.setAttribute("aria-hidden", "true")
+  spinner.append(createSpriteIcon("loading"))
+  shell.append(input, spinner)
+  return shell
+}
+
+function renderSimpleListField(field, value) {
+  const wrapper = document.createElement("div")
+  wrapper.className = "simple-dynamic-list"
+  const values = Array.isArray(value) && value.length ? [...value] : [""]
+  const maxItems = Math.max(1, Number(field.max_items) || 8)
+  function currentSimpleListValues() {
+    const current = state.simpleDraft.values[field.name]
+    return Array.isArray(current) ? [...current] : [...values]
+  }
+
+  values.forEach((itemValue, index) => {
+    const row = document.createElement("div")
+    row.className = "simple-dynamic-row"
+    const input = document.createElement("input")
+    input.type = "text"
+    input.className = "simple-dynamic-input"
+    input.dataset.simpleField = field.name
+    input.value = itemValue
+    input.placeholder = field.placeholder || `第 ${index + 1} 条`
+    input.setAttribute("aria-label", `${field.label} ${index + 1}`)
+    input.addEventListener("input", () => {
+      const nextValues = currentSimpleListValues()
+        .map((current, currentIndex) => currentIndex === index ? input.value : current)
+      updateSimpleFieldValue(field.name, nextValues)
+    })
+
+    const remove = document.createElement("button")
+    remove.type = "button"
+    remove.className = "ux-icon-button"
+    remove.title = "删除这一条"
+    remove.setAttribute("aria-label", `删除${field.label}第 ${index + 1} 条`)
+    remove.disabled = values.length <= 1
+    remove.append(createSpriteIcon("delete"))
+    remove.addEventListener("click", () => {
+      updateSimpleFieldValue(
+        field.name,
+        currentSimpleListValues().filter((_, currentIndex) => currentIndex !== index),
+      )
+      renderSimpleScenarioForm()
+    })
+    row.append(input, remove)
+    wrapper.append(row)
+  })
+
+  const add = document.createElement("button")
+  add.type = "button"
+  add.className = "ux-button ux-button-secondary simple-add-row"
+  add.disabled = values.length >= maxItems
+  add.append(createSpriteIcon("plus"), document.createTextNode("添加一条"))
+  add.addEventListener("click", () => {
+    const nextValues = [...currentSimpleListValues(), ""]
+    updateSimpleFieldValue(field.name, nextValues)
+    renderSimpleScenarioForm()
+    refs.simpleScenarioFields?.querySelectorAll(`[data-simple-field="${field.name}"]`)?.item(nextValues.length - 1)?.focus()
+  })
+  wrapper.append(add)
+  return wrapper
+}
+
+function renderSimpleChipsField(field, value) {
+  const wrapper = document.createElement("div")
+  wrapper.className = "simple-chip-grid"
+  const selected = new Set(Array.isArray(value) ? value : [])
+  ;(field.options || []).forEach((option) => {
+    const chip = document.createElement("label")
+    chip.className = "simple-chip"
+    const input = document.createElement("input")
+    input.type = "checkbox"
+    input.name = `simple-${field.name}`
+    input.value = option.value
+    input.checked = selected.has(option.value)
+    const text = document.createElement("span")
+    text.textContent = option.label
+    input.addEventListener("change", () => {
+      const currentSelected = new Set(
+        Array.isArray(state.simpleDraft.values[field.name]) ? state.simpleDraft.values[field.name] : [],
+      )
+      if (input.checked) {
+        currentSelected.add(option.value)
+      } else {
+        currentSelected.delete(option.value)
+      }
+      updateSimpleFieldValue(field.name, [...currentSelected])
+    })
+    chip.append(input, text)
+    wrapper.append(chip)
+  })
+  return wrapper
+}
+
+function renderSimpleSizeField(field, value, recipe) {
+  const wrapper = document.createElement("div")
+  wrapper.className = "simple-size-grid"
+  wrapper.setAttribute("role", "radiogroup")
+  wrapper.setAttribute("aria-label", field.label)
+  ;(field.options || []).forEach((option) => {
+    const label = document.createElement("label")
+    label.className = "simple-size-option"
+    const input = document.createElement("input")
+    input.type = "radio"
+    input.name = `simple-size-${recipe.id}`
+    input.value = option.value
+    input.checked = option.value === value
+    const content = document.createElement("span")
+    const title = document.createElement("strong")
+    title.textContent = option.label
+    content.append(title)
+    if (option.description) {
+      const description = document.createElement("small")
+      description.textContent = option.description
+      content.append(description)
+    }
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        updateSimpleFieldValue(field.name, option.value)
+      }
+    })
+    label.append(input, content)
+    wrapper.append(label)
+  })
+  return wrapper
+}
+
+function latestFileReadChannelIsBusy(channel) {
+  return state.latestFileReadBusyChannels.has(channel)
+}
+
+function latestFileReadInteractionBlocked(channel) {
+  return state.isBusy || latestFileReadChannelIsBusy(channel)
+}
+
+function syncLatestFileReadControls(channel = "") {
+  document.querySelectorAll("[data-latest-file-read-channel]").forEach((control) => {
+    const controlChannel = control.dataset.latestFileReadChannel || ""
+    if (channel && controlChannel !== channel) {
+      return
+    }
+    const busy = state.isBusy || latestFileReadChannelIsBusy(controlChannel)
+    if ("disabled" in control) {
+      control.disabled = busy
+    }
+    control.setAttribute("aria-disabled", String(busy))
+    if (busy) {
+      control.setAttribute("aria-busy", "true")
+    } else {
+      control.removeAttribute("aria-busy")
+    }
+  })
+}
+
+function bindLatestFileReadControls(primaryControl, input, channel) {
+  ;[primaryControl, input].filter(Boolean).forEach((control) => {
+    control.dataset.latestFileReadChannel = channel
+    const busy = state.isBusy || latestFileReadChannelIsBusy(channel)
+    if ("disabled" in control) {
+      control.disabled = busy
+    }
+    control.setAttribute("aria-disabled", String(busy))
+    if (busy) {
+      control.setAttribute("aria-busy", "true")
+    } else {
+      control.removeAttribute("aria-busy")
+    }
+  })
+  syncLatestFileReadControls(channel)
+}
+
+function beginLatestFileRead(channel, contextIsCurrent = null) {
+  const sequence = Number(state.latestFileReadSequences[channel] || 0) + 1
+  state.latestFileReadSequences = {
+    ...state.latestFileReadSequences,
+    [channel]: sequence,
+  }
+  state.latestFileReadBusyChannels = new Set([...state.latestFileReadBusyChannels, channel])
+  const request = {
+    channel,
+    sequence,
+    userContextEpoch: state.userContextEpoch,
+    latestFileReadEpoch: state.latestFileReadEpoch,
+    contextIsCurrent,
+  }
+  syncLatestFileReadControls(channel)
+  return request
+}
+
+function latestFileReadRequestOwnsBusyState(request) {
+  return request.latestFileReadEpoch === state.latestFileReadEpoch
+    && state.latestFileReadSequences[request.channel] === request.sequence
+}
+
+function latestFileReadRequestIsCurrent(request) {
+  return latestFileReadRequestOwnsBusyState(request)
+    && request.userContextEpoch === state.userContextEpoch
+    && request.contextIsCurrent?.() !== false
+}
+
+function staleLatestFileReadError() {
+  const error = new Error("图片选择已更新，已忽略较早的读取结果。")
+  error.cancelled = true
+  error.staleLatestFileRead = true
+  return error
+}
+
+function ensureLatestFileReadCurrent(request) {
+  if (!latestFileReadRequestIsCurrent(request)) {
+    throw staleLatestFileReadError()
+  }
+}
+
+function finishLatestFileRead(request) {
+  if (!latestFileReadRequestOwnsBusyState(request)) {
+    return
+  }
+  const nextBusyChannels = new Set(state.latestFileReadBusyChannels)
+  nextBusyChannels.delete(request.channel)
+  state.latestFileReadBusyChannels = nextBusyChannels
+  syncLatestFileReadControls(request.channel)
+}
+
+function invalidateLatestFileReadChannel(channel) {
+  state.latestFileReadSequences = {
+    ...state.latestFileReadSequences,
+    [channel]: Number(state.latestFileReadSequences[channel] || 0) + 1,
+  }
+  const nextBusyChannels = new Set(state.latestFileReadBusyChannels)
+  nextBusyChannels.delete(channel)
+  state.latestFileReadBusyChannels = nextBusyChannels
+  syncLatestFileReadControls(channel)
+}
+
+function invalidateLatestFileReadChannels(...channels) {
+  channels.forEach((channel) => invalidateLatestFileReadChannel(channel))
+}
+
+function invalidateLatestFileReads() {
+  state.latestFileReadEpoch += 1
+  state.latestFileReadSequences = {}
+  state.latestFileReadBusyChannels = new Set()
+  syncLatestFileReadControls()
+}
+
+async function runLatestFileRead(channel, file, reader, { contextIsCurrent = null, onApplied = null } = {}) {
+  const request = beginLatestFileRead(channel, contextIsCurrent)
+  try {
+    const result = await reader(file, {
+      commitGuard: () => ensureLatestFileReadCurrent(request),
+    })
+    ensureLatestFileReadCurrent(request)
+    onApplied?.(result)
+    return true
+  } catch (error) {
+    if (error?.staleLatestFileRead || !latestFileReadRequestIsCurrent(request)) {
+      return false
+    }
+    throw error
+  } finally {
+    finishLatestFileRead(request)
+  }
+}
+
+function latestFileReadChannelForSimpleRecipe(recipe) {
+  return recipe.scene_card?.submit?.kind === "edit"
+    ? FILE_READ_CHANNELS.editImage
+    : FILE_READ_CHANNELS.materialReference
+}
+
+function simpleImageAsset(recipe) {
+  return recipe.scene_card?.submit?.kind === "edit"
+    ? state.editImage
+    : state.materialReferenceImage || state.generateReferenceImage
+}
+
+async function useSimpleImageFieldFile(recipe, field, file) {
+  const channel = latestFileReadChannelForSimpleRecipe(recipe)
+  const contextIsCurrent = () => state.uiMode === "simple"
+    && state.simpleDraft.view === "form"
+    && state.simpleDraft.scenarioId === recipe.id
+  const reader = recipe.scene_card?.submit?.kind === "edit" ? useImageFile : useMaterialReferenceFile
+  try {
+    return await runLatestFileRead(channel, file, reader, {
+      contextIsCurrent: contextIsCurrent,
+      onApplied: () => {
+        updateSimpleFieldValue(field.name, file.name)
+        renderSimpleScenarioForm()
+        setError("")
+      },
+    })
+  } catch (error) {
+    if (!contextIsCurrent()) {
+      return false
+    }
+    setSimpleFormAlert(error.message || "无法读取这张图片。")
+    setError(error.message, error.details)
+    return false
+  }
+}
+
+function renderSimpleImageField(field, recipe) {
+  const wrapper = document.createElement("div")
+  const input = document.createElement("input")
+  input.type = "file"
+  input.accept = "image/*"
+  input.className = "hidden"
+  input.dataset.simpleImageField = field.name
+  const channel = latestFileReadChannelForSimpleRecipe(recipe)
+
+  const dropzone = document.createElement("button")
+  dropzone.type = "button"
+  dropzone.className = "simple-upload-zone"
+  bindLatestFileReadControls(dropzone, input, channel)
+  const copy = document.createElement("span")
+  copy.className = "simple-upload-copy"
+  const title = document.createElement("strong")
+  const asset = simpleImageAsset(recipe)
+  title.textContent = asset ? "已选择图片" : field.required ? "选择一张图片" : "添加参考图（可选）"
+  const description = document.createElement("span")
+  description.textContent = asset?.name || "点击、拖拽或粘贴图片"
+  copy.append(title, description)
+  const defaultIcon = createSpriteIcon(asset ? "check" : "upload", "ux-icon simple-upload-default-icon")
+  const loadingIcon = createSpriteIcon("loading", "ux-icon simple-upload-loading")
+  dropzone.append(defaultIcon, loadingIcon, copy)
+  dropzone.addEventListener("click", () => input.click())
+  input.addEventListener("change", () => {
+    const file = input.files?.[0]
+    input.value = ""
+    if (file) {
+      void useSimpleImageFieldFile(recipe, field, file)
+    }
+  })
+  ;["dragenter", "dragover"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      dropzone.classList.add("dragging")
+    })
+  })
+  ;["dragleave", "dragend", "drop"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      if (eventName !== "drop") {
+        dropzone.classList.remove("dragging")
+      }
+    })
+  })
+  dropzone.addEventListener("drop", (event) => {
+    dropzone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    if (file) {
+      void useSimpleImageFieldFile(recipe, field, file)
+    }
+  })
+  wrapper.append(dropzone, input)
+  return wrapper
+}
+
+function renderSimpleScenarioForm() {
+  const recipe = simpleSceneRecipe()
+  if (!recipe || !refs.simpleScenarioFields) {
+    showSimpleScenarioPicker()
+    return
+  }
+  const defaults = initialSimpleValues(recipe)
+  state.simpleDraft = {
+    ...state.simpleDraft,
+    values: {
+      ...defaults,
+      ...state.simpleDraft.values,
+    },
+  }
+  const scene = recipe.scene_card
+  refs.simpleScenarioTitle.textContent = scene.title
+  refs.simpleScenarioSubtitle.textContent = scene.subtitle
+  refs.simpleScenarioFields.replaceChildren()
+  ;(scene.fields || []).forEach((field) => {
+    const fieldWrap = document.createElement("div")
+    fieldWrap.className = "simple-field"
+    fieldWrap.dataset.simpleFieldWrap = field.name
+    const value = state.simpleDraft.values[field.name]
+    let control
+    if (field.kind === "list") {
+      control = renderSimpleListField(field, value)
+    } else if (field.kind === "chips") {
+      control = renderSimpleChipsField(field, value)
+    } else if (field.kind === "size") {
+      control = renderSimpleSizeField(field, value, recipe)
+    } else if (field.kind === "image") {
+      control = renderSimpleImageField(field, recipe)
+    } else {
+      control = renderSimpleTextField(field, value)
+    }
+    fieldWrap.append(simpleFieldLabel(field), control)
+    refs.simpleScenarioFields.append(fieldWrap)
+  })
+  renderSimpleGenerateButton()
+  syncSimpleBusyControls(state.isBusy)
+  clearSimpleFormAlert()
+}
+
+function setSimpleFormAlert(message) {
+  if (!refs.simpleFormAlert || !refs.simpleFormAlertText) {
+    return
+  }
+  refs.simpleFormAlertText.textContent = String(message || "")
+  refs.simpleFormAlert.classList.toggle("hidden", !message)
+}
+
+function clearSimpleFormAlert() {
+  setSimpleFormAlert("")
+  refs.simpleScenarioFields?.querySelectorAll(".invalid").forEach((element) => element.classList.remove("invalid"))
+}
+
+function simpleTemplateValue(field, value) {
+  if (field.kind === "list") {
+    return (Array.isArray(value) ? value : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .map((item) => `- ${item}`)
+      .join("\n")
+  }
+  if (field.kind === "chips") {
+    return (Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter(Boolean).join("、")
+  }
+  if (field.kind === "image" || field.kind === "size") {
+    return ""
+  }
+  return String(value || "").trim()
+}
+
+function assembleSimpleScenarioPrompt(recipe = simpleSceneRecipe()) {
+  if (!recipe?.scene_card) {
+    return ""
+  }
+  const fields = new Map((recipe.scene_card.fields || []).map((field) => [field.name, field]))
+  const renderedValues = new Map(
+    [...fields].map(([fieldName, field]) => [
+      fieldName,
+      simpleTemplateValue(field, state.simpleDraft.values[fieldName]),
+    ]),
+  )
+  const placeholderPattern = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g
+  const templateLines = String(recipe.scene_card.template || "")
+    .split("\n")
+    .filter((line) => {
+      const fieldNames = [...line.matchAll(placeholderPattern)].map((match) => match[1])
+      return !fieldNames.length || fieldNames.some((fieldName) => renderedValues.get(fieldName))
+    })
+  const assembled = templateLines
+    .join("\n")
+    .replace(placeholderPattern, (_, fieldName) => renderedValues.get(fieldName) || "")
+  return assembled
+    .replace(/([：:])(?=- )/g, "$1\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function simpleRequiredFieldMissing(field, recipe) {
+  if (!field.required) {
+    return false
+  }
+  if (field.kind === "image") {
+    return !simpleImageAsset(recipe)
+  }
+  const value = state.simpleDraft.values[field.name]
+  if (Array.isArray(value)) {
+    return !value.some((item) => String(item || "").trim())
+  }
+  return !String(value || "").trim()
+}
+
+function validateSimpleScenario(recipe) {
+  const missing = (recipe.scene_card?.fields || []).find((field) => simpleRequiredFieldMissing(field, recipe))
+  if (!missing) {
+    return true
+  }
+  const fieldWrap = refs.simpleScenarioFields?.querySelector(`[data-simple-field-wrap="${missing.name}"]`)
+  const input = fieldWrap?.querySelector("input, textarea, button")
+  input?.classList.add("invalid")
+  input?.focus()
+  setSimpleFormAlert(`请填写${missing.label}。`)
+  return false
+}
+
+function simpleEditSourceSize(asset = state.editImage) {
+  const width = Math.round(Number(asset?.width || asset?.saved_image_width || 0))
+  const height = Math.round(Number(asset?.height || asset?.saved_image_height || 0))
+  return width > 0 && height > 0 ? `${width}x${height}` : "auto"
+}
+
+function syncSimpleScenarioToProfessional(recipe, prompt, { preserveSceneRecipe = true } = {}) {
+  const scene = recipe.scene_card
+  const useRecipe = scene.submit?.kind === "generate"
+    && recipe.id !== "free-create"
+    && (preserveSceneRecipe || PROFESSIONAL_PROMPT_RECIPE_IDS.has(recipe.id))
+  state.selectedRecipeId = useRecipe ? recipe.id : ""
+  if (refs.promptRecipeSelect) {
+    refs.promptRecipeSelect.value = state.selectedRecipeId
+  }
+  state.promptMode = useRecipe ? "recipe" : "free"
+  refs.promptModeInputs.forEach((input) => {
+    input.checked = input.value === state.promptMode
+  })
+
+  if (scene.submit?.kind === "itinerary") {
+    setMode("itinerary", { autoLoadLatest: false })
+    refs.itineraryTitleInput.value = String(state.simpleDraft.values.title || "").trim()
+    refs.itinerarySubtitleInput.value = String(state.simpleDraft.values.subtitle || "").trim()
+    refs.itineraryDescriptionInput.value = prompt
+    refs.itinerarySizeSelect.value = scene.default_size || "auto"
+  } else if (scene.submit?.kind === "edit") {
+    setMode("edit", { autoLoadLatest: false })
+    refs.editPromptInput.value = prompt
+    setGenerateSize(simpleEditSourceSize())
+  } else {
+    setMode("generate", { autoLoadLatest: false })
+    setGenerateIntent("fresh")
+    refs.generatePromptInput.value = prompt
+    const sizeField = (scene.fields || []).find((field) => field.kind === "size")
+    const size = sizeField ? state.simpleDraft.values[sizeField.name] : scene.default_size
+    setGenerateSize(String(size || scene.default_size || "auto"))
+  }
+  updatePromptCounters()
+  updatePromptModeUI()
+  updateEffectivePromptPreview()
+  scheduleWorkspacePersist()
+}
+
+async function submitSimpleScenario(event) {
+  event?.preventDefault()
+  if (state.isBusy) {
+    return
+  }
+  const recipe = simpleSceneRecipe()
+  if (!recipe || !validateSimpleScenario(recipe)) {
+    return
+  }
+  const prompt = assembleSimpleScenarioPrompt(recipe)
+  if (!prompt) {
+    setSimpleFormAlert("请先填写要生成的内容。")
+    return
+  }
+
+  syncSimpleScenarioToProfessional(recipe, prompt)
+  setSimpleWorkflowStep(2)
+  if (recipe.scene_card.submit?.kind === "itinerary") {
+    await submitAIItineraryMap()
+  } else if (recipe.scene_card.submit?.kind === "edit") {
+    await submitEdit()
+  } else {
+    await submitGenerate()
+  }
+  updateSimpleResultSurface()
+}
+
+function setSimpleWorkflowStep(step) {
+  refs.simpleWorkflowSteps.forEach((item) => {
+    const itemStep = Number(item.dataset.simpleWorkflowStep || 0)
+    const wasDone = item.classList.contains("done")
+    item.classList.toggle("current", itemStep === step)
+    item.classList.toggle("done", itemStep < step)
+    if (itemStep === step) {
+      item.setAttribute("aria-current", "step")
+    } else {
+      item.removeAttribute("aria-current")
+    }
+    if (!wasDone && itemStep < step) {
+      item.classList.add("just-completed")
+      window.setTimeout(() => item.classList.remove("just-completed"), 300)
+    }
+    const marker = item.querySelector(".simple-step-marker")
+    if (marker && itemStep < step) {
+      marker.replaceChildren(createSpriteIcon("check"))
+    } else if (marker && itemStep === step && state.isBusy) {
+      marker.replaceChildren(createSpriteIcon("loading"))
+    } else if (marker) {
+      marker.textContent = String(itemStep)
+    }
+  })
+}
+
+function simpleChecklistEligible() {
+  return state.simpleFirstRunEligible === true
+}
+
+function loadSimpleChecklistState() {
+  const stored = loadJSON(simpleChecklistStorageKey(), {})
+  const serverCompleted = state.userPreferences?.simple_checklist_completed === true
+  const steps = Array.isArray(stored.steps)
+    ? [...new Set(stored.steps.map(Number).filter((step) => [1, 2, 3].includes(step)))]
+    : []
+  state.simpleChecklist = {
+    steps,
+    dismissed: Boolean(stored.dismissed),
+    completed: Boolean(stored.completed) || serverCompleted,
+  }
+}
+
+function saveSimpleChecklistState(storageKey = simpleChecklistStorageKey()) {
+  saveJSON(storageKey, {
+    steps: [...state.simpleChecklist.steps],
+    dismissed: state.simpleChecklist.dismissed,
+    completed: state.simpleChecklist.completed,
+  })
+}
+
+function renderSimpleChecklist() {
+  if (!refs.simpleFirstRunChecklist) {
+    return
+  }
+  const visible = state.uiMode === "simple"
+    && simpleChecklistEligible()
+    && !state.simpleChecklist.dismissed
+    && !state.simpleChecklist.completed
+  refs.simpleFirstRunChecklist.classList.toggle("hidden", !visible)
+  refs.simpleChecklistSteps.forEach((item) => {
+    const step = Number(item.dataset.simpleChecklistStep || 0)
+    const done = state.simpleChecklist.steps.includes(step)
+    item.classList.toggle("done", done)
+    const marker = item.querySelector(".simple-check-icon")
+    if (marker && done) {
+      marker.replaceChildren(createSpriteIcon("check"))
+    } else if (marker) {
+      marker.textContent = String(step)
+    }
+  })
+}
+
+function markSimpleChecklistStep(step) {
+  if (!simpleChecklistEligible() || state.simpleChecklist.steps.includes(step)) {
+    return
+  }
+  const steps = [...state.simpleChecklist.steps, step].sort((left, right) => left - right)
+  state.simpleChecklist = {
+    ...state.simpleChecklist,
+    steps,
+  }
+  saveSimpleChecklistState()
+  renderSimpleChecklist()
+  if (steps.length === 3 && refs.simpleFirstRunChecklist) {
+    refs.simpleFirstRunChecklist.classList.add("complete")
+    const completionUserContextEpoch = state.userContextEpoch
+    const completionStorageKey = simpleChecklistStorageKey()
+    window.clearTimeout(state.simpleChecklistCompletionTimer)
+    state.simpleChecklistCompletionTimer = window.setTimeout(() => {
+      state.simpleChecklistCompletionTimer = null
+      if (
+        !userContextIsCurrent(completionUserContextEpoch)
+        || completionStorageKey !== simpleChecklistStorageKey()
+      ) {
+        return
+      }
+      state.simpleChecklist = {
+        ...state.simpleChecklist,
+        completed: true,
+      }
+      saveSimpleChecklistState(completionStorageKey)
+      void syncUserPreferences({
+        quiet: false,
+        endpoint: "/api/preferences/simple-checklist",
+        method: "PATCH",
+        preferencesPayload: { completed: true },
+      })
+      refs.simpleFirstRunChecklist?.classList.remove("complete")
+      renderSimpleChecklist()
+    }, 600)
+  }
+}
+
+function dismissSimpleChecklist() {
+  state.simpleChecklist = {
+    ...state.simpleChecklist,
+    dismissed: true,
+  }
+  saveSimpleChecklistState()
+  renderSimpleChecklist()
+}
+
+function median(values) {
+  if (!values.length) {
+    return null
+  }
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
+function updateSimpleTimingEstimate() {
+  if (!refs.simpleTimingEstimate) {
+    return
+  }
+  const elapsedValues = state.generationJobs
+    .filter((job) => job.status === "succeeded" && Number(job.elapsed_ms) > 0)
+    .map((job) => Number(job.elapsed_ms))
+  const medianMs = median(elapsedValues)
+  refs.simpleTimingEstimate.textContent = medianMs
+    ? `最近平均约 ${Math.max(0.1, medianMs / 60000).toFixed(1)} 分钟`
+    : "通常需要 1–3 分钟"
+}
+
+function renderSimpleGenerateButton() {
+  const recipe = simpleSceneRecipe()
+  const label = state.isBusy ? "生成中" : recipe?.scene_card?.submit?.label || "开始创作"
+  replaceWithIconLabel(refs.simpleGenerateButton, state.isBusy ? "loading" : "send", label)
+  refs.simpleGenerateButton?.classList.toggle("is-loading", state.isBusy)
+  if (refs.simpleGenerateButton) {
+    refs.simpleGenerateButton.disabled = state.isBusy
+    refs.simpleGenerateButton.setAttribute("aria-busy", String(state.isBusy))
+  }
+}
+
+function syncSimpleBusyControls(isBusy) {
+  const controls = refs.simpleScenarioFields?.querySelectorAll("input, textarea, button") || []
+  controls.forEach((control) => {
+    if (control.matches(".simple-upload-zone, input[data-simple-image-field]")) {
+      const channel = control.dataset.latestFileReadChannel || ""
+      const uploadBusy = isBusy || latestFileReadChannelIsBusy(channel)
+      control.disabled = uploadBusy
+      if (control.matches(".simple-upload-zone")) {
+        if (uploadBusy) {
+          control.setAttribute("aria-busy", "true")
+        } else {
+          control.removeAttribute("aria-busy")
+        }
+      }
+      return
+    }
+    const textControl = control.matches('textarea, input:not([type]), input[type="text"]')
+    if (isBusy) {
+      control.dataset.simpleBusyDisabled = String(Boolean(control.disabled))
+      if (textControl) {
+        control.dataset.simpleBusyReadOnly = String(Boolean(control.readOnly))
+        control.readOnly = true
+        control.setAttribute("aria-busy", "true")
+      } else {
+        control.disabled = true
+        if (control.matches(".simple-upload-zone")) {
+          control.setAttribute("aria-busy", "true")
+        }
+      }
+      return
+    }
+    if (textControl) {
+      control.readOnly = control.dataset.simpleBusyReadOnly === "true"
+      control.removeAttribute("aria-busy")
+      delete control.dataset.simpleBusyReadOnly
+    }
+    if (control.matches(".simple-upload-zone")) {
+      control.removeAttribute("aria-busy")
+    }
+    if ("simpleBusyDisabled" in control.dataset) {
+      control.disabled = control.dataset.simpleBusyDisabled === "true"
+      delete control.dataset.simpleBusyDisabled
+    }
+  })
+}
+
+function closeSimpleMoreActions() {
+  refs.simpleMoreActionsMenu?.classList.add("hidden")
+  refs.simpleMoreActionsButton?.setAttribute("aria-expanded", "false")
+}
+
+function updateSimpleMoreActionStates() {
+  const actions = Object.fromEntries(
+    Array.from(refs.simpleMoreActionsMenu?.querySelectorAll("[data-simple-result-action]") || [])
+      .map((button) => [button.dataset.simpleResultAction, button]),
+  )
+  if (actions.original) actions.original.disabled = refs.downloadOriginalButton?.disabled !== false
+  if (actions.versions) actions.versions.disabled = refs.showVersionsButton?.disabled !== false
+  if (actions.group) actions.group.disabled = refs.saveGroupAssetButton?.disabled !== false
+  if (actions.copy) actions.copy.disabled = !state.lastResultPrompt
+  if (actions.organize) actions.organize.disabled = !selectedGeneratedImageId()
+}
+
+function updateResultActionLabelsForMode() {
+  if (state.uiMode === "simple") {
+    replaceWithIconLabel(refs.downloadButton, "download", "下载成品")
+    replaceWithIconLabel(refs.continueEditButton, "edit", "改这张图")
+    replaceWithIconLabel(refs.startVariantButton, "refresh", "再来一张同款")
+    const good = refs.feedbackRatingButtons.find((button) => button.dataset.rating === "good")
+    const bad = refs.feedbackRatingButtons.find((button) => button.dataset.rating === "bad")
+    replaceWithIconLabel(good, "check", "满意")
+    replaceWithIconLabel(bad, "refresh", "不满意，换一张")
+    if (refs.submitBadFeedbackButton) {
+      replaceWithIconLabel(refs.submitBadFeedbackButton, "refresh", "提交并换一张")
+    }
+  } else {
+    refs.downloadButton.textContent = refs.downloadButton.dataset.professionalLabel
+      || (refs.downloadButton.classList.contains("download-ready-logo") ? "下载带 6 人游 LOGO 成品" : "下载图像")
+    refs.continueEditButton.textContent = "继续编辑"
+    refs.startVariantButton.textContent = "基于结果再生成"
+    refs.feedbackRatingButtons.forEach((button) => {
+      button.textContent = button.dataset.rating === "good" ? "满意" : button.dataset.rating === "ok" ? "一般" : "不好"
+    })
+    if (refs.submitBadFeedbackButton) {
+      refs.submitBadFeedbackButton.textContent = "提交原因"
+    }
+  }
+}
+
+function updateSimpleResultSurface() {
+  const hasResult = Boolean(state.resultPreview?.src)
+  const hasFailure = refs.resultPreviewEmpty?.classList.contains("failure")
+  const showEmpty = state.uiMode === "simple" && !hasResult && !state.isBusy && !hasFailure
+  refs.simpleResultEmpty?.classList.toggle("hidden", !showEmpty)
+  if (refs.simpleShareResultButton) {
+    refs.simpleShareResultButton.disabled = !selectedGeneratedImageId() || state.isBusy
+  }
+  updateSimpleMoreActionStates()
+  updateResultActionLabelsForMode()
+  if (state.uiMode === "simple") {
+    setSimpleWorkflowStep(hasResult ? 3 : state.simpleDraft.view === "form" ? 2 : 1)
+  }
+}
+
+function normalizeUiMode(value) {
+  return UI_MODES.has(value) ? value : ""
+}
+
+function resolveInitialUiMode() {
+  const preferenceMode = normalizeUiMode(state.userPreferences?.ui_mode)
+  if (preferenceMode) {
+    return preferenceMode
+  }
+  if (state.serverConfig?.auth_enabled === false) {
+    const localMode = normalizeUiMode(loadJSON(uiModeStorageKey(), ""))
+    if (localMode) {
+      return localMode
+    }
+  }
+  const workspaceMode = normalizeUiMode(state.workspaceUiMode)
+  if (workspaceMode) {
+    return workspaceMode
+  }
+  return state.history.length > 0 || Number(state.userGeneratedImageCount || 0) > 0
+    ? "professional"
+    : "simple"
+}
+
+function applyUiMode(mode, { persist = false, sync = false } = {}) {
+  const normalized = normalizeUiMode(mode) || "professional"
+  if (normalized !== state.uiMode) {
+    invalidateLatestFileReads()
+  }
+  const leavingSimpleMode = state.uiMode === "simple" && normalized === "professional"
+  const simpleRecipe = simpleSceneRecipe()
+  const simplePrompt = leavingSimpleMode ? assembleSimpleScenarioPrompt(simpleRecipe) : ""
+  if (simpleRecipe && simplePrompt) {
+    syncSimpleScenarioToProfessional(simpleRecipe, simplePrompt, { preserveSceneRecipe: false })
+  }
+  state.uiMode = normalized
+  const simple = normalized === "simple"
+  document.body.classList.toggle("ui-simple-mode", simple)
+  document.body.classList.toggle("ui-professional-mode", !simple)
+  document.body.dataset.uiMode = normalized
+  refs.simpleModePanel?.classList.toggle("hidden", !simple)
+  if (refs.uiModeToggleLabel) {
+    refs.uiModeToggleLabel.textContent = simple ? "切到专业模式" : "简洁模式"
+  }
+  if (refs.uiModeToggleButton) {
+    refs.uiModeToggleButton.title = simple ? "切到专业模式" : "切到简洁模式"
+  }
+  refs.resultPanelTitle.textContent = simple ? "成品预览" : "结果对比"
+  refs.resultPanelSubtitle.textContent = simple ? "生成完成后可放大查看" : "并排查看源图与结果图"
+  const toggleUse = refs.uiModeToggleButton?.querySelector("use")
+  toggleUse?.setAttribute("href", simple ? "icons.svg#icon-settings" : "icons.svg#icon-list")
+
+  if (simple) {
+    renderSimpleScenarioCards()
+    if (simpleSceneRecipe() && state.simpleDraft.view === "form") {
+      refs.simpleScenarioPicker?.classList.add("hidden")
+      refs.simpleScenarioForm?.classList.remove("hidden")
+      renderSimpleScenarioForm()
+    } else {
+      refs.simpleScenarioPicker?.classList.remove("hidden")
+      refs.simpleScenarioForm?.classList.add("hidden")
+    }
+  } else {
+    closeSimpleMoreActions()
+  }
+  updateSimpleResultSurface()
+  renderReviewCopyForMode()
+  renderSimpleChecklist()
+
+  if (persist && state.serverConfig?.auth_enabled === false) {
+    saveJSON(uiModeStorageKey(), normalized)
+  }
+  if (sync) {
+    void syncUserPreferences({
+      quiet: false,
+      endpoint: "/api/preferences/ui-mode",
+      method: "PATCH",
+      preferencesPayload: uiModePreferencesPayload(),
+    })
+  }
+  scheduleWorkspacePersist()
+}
+
+function initializeUiMode() {
+  state.simpleFirstRunEligible = state.history.length === 0 && Number(state.userGeneratedImageCount || 0) === 0
+  loadSimpleChecklistState()
+  applyUiMode(resolveInitialUiMode(), {
+    persist: true,
+    sync: false,
+  })
+}
+
 function renderPromptRecipeCards() {
   if (!refs.promptRecipeCards) {
     return
   }
   refs.promptRecipeCards.replaceChildren()
-  const recipes = state.promptRecipes.filter((recipe) => recipe.mode === "generate")
+  const recipes = professionalPromptRecipes()
   if (!recipes.length) {
     const empty = document.createElement("p")
     empty.className = "helper-text"
@@ -2102,7 +3522,7 @@ function parseItineraryCoordinateStops(description) {
 }
 
 function isItineraryInstructionSection(row) {
-  return /^(地点与地理校验|地理校验|画面要求|程序坐标|行程基础信息|客户偏好|地图标题建议)[:：]?/.test(row)
+  return /^(标题|副标题(?:\/日期)?|地点与地理校验|地理校验|画面要求|程序坐标|行程基础信息|客户偏好|地图标题建议)[:：]?/.test(row)
 }
 
 function isItineraryInstructionRow(row) {
@@ -2192,6 +3612,50 @@ function parseItineraryTextStops(description) {
   return stops.slice(0, 80)
 }
 
+function mergeItineraryCoordinateStops(textStops, coordinateStops) {
+  // 逐日行程决定站点与顺序；@坐标 行只是给匹配到的站点钉精确经纬度
+  // （模板只要求"至少填写两个"）。一旦拿坐标行整体替换站点列表，
+  // 用户写满 6 天行程、只给 2 行坐标时地图就只剩 2 站。
+  if (!textStops.length) {
+    return coordinateStops
+  }
+  const normalize = (value) => String(value || "").trim().toLocaleLowerCase()
+  const merged = textStops.map((stop) => ({ ...stop }))
+  for (const coord of coordinateStops) {
+    const coordName = normalize(coord.name)
+    const coordDate = normalize(coord.date)
+    const exactNameMatches = coordName
+      ? merged.filter((stop) => normalize(stop.name) === coordName)
+      : []
+    let target = coordDate
+      ? exactNameMatches.find((stop) => normalize(stop.date) === coordDate)
+      : undefined
+    if (
+      !target
+      && exactNameMatches.length === 1
+      && (!coordDate || !normalize(exactNameMatches[0].date))
+    ) {
+      target = exactNameMatches[0]
+    }
+    // A date-only fallback is safe only when the coordinate row omits a name.
+    // Substring matching confuses distinct places such as Kyoto and Tokyo Metropolis.
+    if (!target && coordDate && !coordName) {
+      const sameDayMatches = merged.filter((stop) => normalize(stop.date) === coordDate)
+      if (sameDayMatches.length === 1) {
+        target = sameDayMatches[0]
+      }
+    }
+    if (target) {
+      target.lat = coord.lat
+      target.lng = coord.lng
+      if (coord.transport && !target.transport) {
+        target.transport = coord.transport
+      }
+    }
+  }
+  return merged
+}
+
 function itineraryCoordinateHelpText() {
   return [
     "系统没能确认部分地点的位置，请把地点写得更完整。",
@@ -2204,6 +3668,7 @@ async function submitAIItineraryMap() {
   if (state.isBusy) {
     return
   }
+  const userContextEpoch = state.userContextEpoch
   try {
     resetDebugLog("点击行程路线：程序生成")
     const startedAt = performance.now()
@@ -2238,6 +3703,7 @@ async function submitAIItineraryMap() {
       appendDebugLine("用户取消路线图提示词确认")
       return
     }
+    ensureUserContextCurrent(userContextEpoch)
     description = confirmedText
     if (refs.itineraryDescriptionInput) {
       refs.itineraryDescriptionInput.value = confirmedText
@@ -2246,7 +3712,7 @@ async function submitAIItineraryMap() {
     // 站点解析必须在 setBusy/previewPendingResult 之前：一旦占位面板把
     // 当前结果清掉，这里 return 会让面板永远停在"等待上游返回"。
     const coordinateStops = parseItineraryCoordinateStops(description)
-    const routeStops = coordinateStops.length ? coordinateStops : parseItineraryTextStops(description)
+    const routeStops = mergeItineraryCoordinateStops(parseItineraryTextStops(description), coordinateStops)
     if (!routeStops.length) {
       setError(itineraryCoordinateHelpText())
       refs.itineraryDescriptionInput?.focus()
@@ -2269,23 +3735,25 @@ async function submitAIItineraryMap() {
       size,
     })
     const settings = getSettings()
-    const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5"
+    const itineraryModel = settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+    const canOverrideExecution = canManageExecutionSettings()
     const result = await postJSON("api/itinerary-map/render", {
       title,
       subtitle,
       route_style: refs.itineraryThemeSelect?.value || "comic",
       stops: routeStops,
       size,
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: itineraryModel,
+      api_key: canOverrideExecution ? settings.apiKey || undefined : undefined,
+      model: canOverrideExecution ? itineraryModel : undefined,
       generate_background: true,
       logo_requested: logoRequested,
     }, {
       mode: "itinerary",
       progressLabel: coordinateStops.length ? "生成一体化路线图" : "查询坐标并生成路线图",
       waitingLabel: "生成准确路线图",
+      userContextEpoch,
     })
+    ensureUserContextCurrent(userContextEpoch)
     const finalSize = result.size || size
     await setResult({
       ...result,
@@ -2314,8 +3782,12 @@ async function submitAIItineraryMap() {
     })
     await refreshGallery()
     await refreshGenerationJobs()
+    ensureUserContextCurrent(userContextEpoch)
     document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
   } catch (error) {
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return
+    }
     appendDebugLine("行程路线生成失败", { error: error.message })
     if (error.code === "itinerary_coordinates_required") {
       setError(itineraryCoordinateHelpText(), error.details)
@@ -2327,8 +3799,10 @@ async function submitAIItineraryMap() {
     }
     }
   } finally {
-    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
-    state.activeRequestCancelled = false
+    if (userContextIsCurrent(userContextEpoch)) {
+      setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+      state.activeRequestCancelled = false
+    }
   }
 }
 
@@ -2509,7 +3983,10 @@ async function refreshShareRecipients() {
       renderShareRecipients(data.users)
       return
     }
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
     // fall through to local status
   }
   refs.shareRecipientsList.innerHTML = '<p class="admin-empty">用户列表暂时不可用。</p>'
@@ -2589,7 +4066,7 @@ function renderSharedResults(shares) {
         ${imageUrl ? `<img src="${escapeHTML(imageUrl)}" alt="">` : '<span class="shared-result-thumb"></span>'}
         <span class="shared-result-copy">
           <strong>${escapeHTML(sender)}</strong>
-          <span>${escapeHTML(share.mode || "生成")} · ${escapeHTML(share.model || "")}</span>
+          <span>${escapeHTML(share.mode || "生成")}</span>
           <p>${escapeHTML(prompt)}</p>
         </span>
       </button>
@@ -2607,11 +4084,29 @@ async function refreshSharedResults() {
       renderSharedResults(data.shares)
       return
     }
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
     // handled below
   }
   refs.sharedResultsList.innerHTML = '<p class="empty-history">收到分享暂时不可用。</p>'
   refs.sharedResultsEmpty?.classList.add("hidden")
+}
+
+function resetReviewStateForExternalResult() {
+  state.resultGenerationSeq += 1
+  state.copyrightRiskRequestSeq += 1
+  state.textFidelityRequestSeq += 1
+  state.generatedImageDetailRequestSeq += 1
+  state.checkedCandidateIndex = null
+  state.candidateReviewStates = {}
+  state.lastReviewPayload = null
+  state.lastFeedbackPayload = null
+  state.lastFeedbackRating = null
+  setError("")
+  setRiskPanel("未检查", "这张图片尚未在当前工作区进行版权风险检查。")
+  setTextFidelityPanel("未检查", "这张图片尚未在当前工作区进行文字一致性检查。")
 }
 
 function openSharedResult(shareId) {
@@ -2621,6 +4116,7 @@ function openSharedResult(shareId) {
     setError("这条分享没有可打开的图片。")
     return
   }
+  resetReviewStateForExternalResult()
   state.resultCandidates = [{
     saved_image_url: share.saved_image_url || "",
     saved_image_path: share.saved_image_path || "",
@@ -2632,6 +4128,13 @@ function openSharedResult(shareId) {
   state.lastResultPrompt = share.prompt || ""
   state.lastResultModel = share.model || ""
   state.lastResultMode = share.mode || "share"
+  state.lastReviewPayload = {
+    prompt: state.lastResultPrompt,
+    mode: state.lastResultMode,
+    model: state.lastResultModel,
+    size: "",
+    text_contract: {},
+  }
   state.lastResultImage = cloneImageAsset(asset)
   state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
   refs.resultPreviewLabel.textContent = "收到分享"
@@ -2705,8 +4208,61 @@ function setGalleryEditorMeta(item) {
   }
 }
 
+function renderSimpleGalleryItems(items = state.galleryItems) {
+  if (!refs.simpleGalleryList || !refs.simpleGalleryEmpty) {
+    return
+  }
+  const galleryItems = Array.isArray(items) ? items : []
+  refs.simpleGalleryList.replaceChildren()
+  refs.simpleGalleryEmpty.classList.toggle("hidden", galleryItems.length > 0)
+  galleryItems.slice(0, 4).forEach((item) => {
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "simple-gallery-item"
+    button.setAttribute("aria-label", item.prompt ? `打开作品：${item.prompt}` : "打开作品")
+    const image = document.createElement("img")
+    image.src = item.saved_image_url || ""
+    image.alt = ""
+    const label = document.createElement("span")
+    label.textContent = item.prompt || "未记录提示词"
+    button.append(image, label)
+    button.addEventListener("click", () => {
+      if (item.local_only) {
+        openGalleryLikeImage(item, "最近作品")
+      } else {
+        void openGalleryItem(item.id || item.generated_image_id)
+      }
+    })
+    refs.simpleGalleryList.append(button)
+  })
+}
+
+function rememberAnonymousGalleryResult(candidate, payload, imageSource) {
+  if (state.serverConfig?.auth_enabled !== false || !imageSource) {
+    return
+  }
+  const localItem = {
+    local_only: true,
+    saved_image_url: imageSource,
+    saved_image_name: candidate.saved_image_name || `picgen-${payload.mode || "result"}.png`,
+    saved_image_mime: candidate.saved_image_mime || "image/png",
+    saved_image_width: candidate.saved_image_width || payload.saved_image_width || null,
+    saved_image_height: candidate.saved_image_height || payload.saved_image_height || null,
+    prompt: payload.prompt || state.lastResultPrompt || "",
+    mode: payload.mode || "generate",
+    model: payload.model || "",
+    created_at: new Date().toISOString(),
+  }
+  state.galleryItems = [
+    localItem,
+    ...state.galleryItems.filter((item) => item.saved_image_url !== imageSource),
+  ].slice(0, 4)
+  renderSimpleGalleryItems(state.galleryItems)
+}
+
 function renderGalleryItems(items = state.galleryItems) {
   state.galleryItems = Array.isArray(items) ? items : []
+  renderSimpleGalleryItems(state.galleryItems)
   if (!refs.galleryList || !refs.galleryEmpty) {
     return
   }
@@ -2739,7 +4295,13 @@ function renderGalleryItems(items = state.galleryItems) {
 
     const meta = document.createElement("span")
     meta.className = "gallery-item-meta"
-    const metaParts = [item.mode || "生成", item.model || "", item.logo_overlay_applied ? "LOGO" : ""]
+    const metaParts = [item.mode || "生成"]
+    if (canViewExecutionDetails() && item.model) {
+      metaParts.push(item.model)
+    }
+    if (item.logo_overlay_applied) {
+      metaParts.push("LOGO")
+    }
     meta.textContent = metaParts.filter(Boolean).join(" · ")
 
     const tags = document.createElement("span")
@@ -2790,6 +4352,10 @@ function initializeRailDisclosure() {
 }
 
 async function refreshGallery() {
+  if (state.serverConfig?.auth_enabled === false) {
+    renderSimpleGalleryItems(state.galleryItems)
+    return
+  }
   if (!state.currentUser || !refs.galleryList) {
     return
   }
@@ -2809,14 +4375,23 @@ async function refreshGallery() {
     params.set("favorite", "1")
   }
   const url = params.toString() ? `/api/gallery?${params}` : "/api/gallery"
+  // 防抖搜索和生成后的自动刷新可能并发；慢的旧响应回来时不能覆盖新列表。
+  const requestSeq = (state.galleryRequestSeq || 0) + 1
+  state.galleryRequestSeq = requestSeq
   try {
     const { response, data } = await fetchJSON(url, { cache: "no-store" })
+    if (requestSeq !== state.galleryRequestSeq) {
+      return
+    }
     if (response.ok) {
       renderGalleryItems(data.items)
       return
     }
   } catch {
     // handled below
+  }
+  if (requestSeq !== state.galleryRequestSeq) {
+    return
   }
   refs.galleryList.innerHTML = '<p class="empty-history">作品库暂时不可用。</p>'
   refs.galleryEmpty?.classList.add("hidden")
@@ -2831,6 +4406,7 @@ function jobStatusLabel(status) {
 
 function renderGenerationJobs(jobs = state.generationJobs) {
   state.generationJobs = Array.isArray(jobs) ? jobs : []
+  updateSimpleTimingEstimate()
   if (!refs.jobCenterList || !refs.jobCenterEmpty) {
     return
   }
@@ -2870,12 +4446,17 @@ function renderGenerationJobs(jobs = state.generationJobs) {
     prompt.textContent = job.original_prompt || job.prompt || "未记录提示词"
     const meta = document.createElement("span")
     const modeLabel = job.prompt_mode === "recipe" ? "配方辅助" : "精确提示词"
+    const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
+    const executionMeta = isAdmin
+      ? [job.transport, job.model, job.reasoning_effort ? `reasoning=${job.reasoning_effort}` : ""]
+      : []
     meta.textContent = [
       job.mode || "生成",
       modeLabel,
       job.recipe_id || "",
       job.size || "",
       `${Number(job.image_count || 0)} 张`,
+      ...executionMeta,
     ].filter(Boolean).join(" · ")
     copy.append(top, prompt, meta)
     if (job.error_message) {
@@ -2898,7 +4479,10 @@ async function refreshGenerationJobs() {
       renderGenerationJobs(data.jobs)
       return
     }
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
     // handled below
   }
   refs.jobCenterList.innerHTML = '<p class="empty-history">任务中心暂时不可用。</p>'
@@ -2909,17 +4493,23 @@ async function openGeneratedImageDetail(generatedImageId) {
   if (!generatedImageId) {
     return
   }
+  const requestSeq = state.generatedImageDetailRequestSeq += 1
   try {
     const { response, data } = await fetchJSON(`/api/generated-images/${encodeURIComponent(generatedImageId)}`, {
       cache: "no-store",
     })
+    if (requestSeq !== state.generatedImageDetailRequestSeq) {
+      return
+    }
     if (!response.ok || !data.image) {
       setError(data.error || "无法打开这张任务结果。")
       return
     }
     openGalleryLikeImage(data.image, "任务结果")
   } catch {
-    setError("打开任务结果时网络连接错误。")
+    if (requestSeq === state.generatedImageDetailRequestSeq) {
+      setError("打开任务结果时网络连接错误。")
+    }
   }
 }
 
@@ -2929,6 +4519,7 @@ function openGalleryLikeImage(item, label = "作品库") {
     setError("这条记录没有可打开的图片。")
     return
   }
+  resetReviewStateForExternalResult()
   state.resultCandidates = [{
     saved_image_url: item.saved_image_url || "",
     saved_image_path: item.saved_image_path || "",
@@ -2944,6 +4535,13 @@ function openGalleryLikeImage(item, label = "作品库") {
   state.lastResultPrompt = lineage.original_prompt || item.prompt || ""
   state.lastResultModel = item.model || lineage.model || ""
   state.lastResultMode = item.mode || "gallery"
+  state.lastReviewPayload = {
+    prompt: state.lastResultPrompt,
+    mode: state.lastResultMode,
+    model: state.lastResultModel,
+    size: item.size || lineage.size || "",
+    text_contract: {},
+  }
   state.lastResultImage = cloneImageAsset(asset)
   state.resultPreview = { src: getAssetDisplaySrc(asset), mode: state.lastResultMode }
   refs.resultPreviewLabel.textContent = label
@@ -2952,7 +4550,12 @@ function openGalleryLikeImage(item, label = "作品库") {
   refs.resultPreviewEmpty.classList.add("hidden")
   refs.resultPrompt.textContent = state.lastResultPrompt || "未记录提示词"
   const promptMode = lineage.prompt_mode === "recipe" ? "配方辅助" : ""
-  refs.resultMeta.textContent = [item.mode || "生成", item.model || "", promptMode, item.username || ""].filter(Boolean).join(" · ")
+  refs.resultMeta.textContent = [
+    item.mode || "生成",
+    canViewExecutionDetails() ? item.model || "" : "",
+    promptMode,
+    item.username || "",
+  ].filter(Boolean).join(" · ")
   refs.resultTiming.textContent = lineage.elapsed_ms ? `${(Number(lineage.elapsed_ms) / 1000).toFixed(1)}s` : ""
   refs.resultStorage.textContent = item.saved_image_path ? `已落盘到 ${item.saved_image_path}` : ""
   setDownloadAvailable(state.resultPreview.src, asset.name)
@@ -3150,9 +4753,27 @@ function closeChangePasswordModal() {
   document.body.classList.remove("modal-open")
 }
 
+function renderProfileOrgAssignment(user) {
+  const assignments = [
+    [refs.profileCompanyInput, user.company || "", user.company || "未分配"],
+    [refs.profileDepartmentInput, user.department || "", user.department || "未分配"],
+  ]
+  assignments.forEach(([select, value, label]) => {
+    if (!select) {
+      return
+    }
+    const option = document.createElement("option")
+    option.value = value
+    option.textContent = label
+    select.replaceChildren(option)
+    select.value = value
+    select.disabled = true
+    select.setAttribute("aria-readonly", "true")
+  })
+}
+
 function fillProfileForm() {
   const user = state.currentUser || {}
-  renderOrgUnitControls()
   if (refs.profileUsernameInput) {
     refs.profileUsernameInput.value = user.username || ""
   }
@@ -3171,13 +4792,7 @@ function fillProfileForm() {
   if (refs.profilePhoneInput) {
     refs.profilePhoneInput.value = user.phone || ""
   }
-  if (refs.profileCompanyInput) {
-    refs.profileCompanyInput.value = user.company || "6renyou"
-  }
-  renderDepartmentSelect(refs.profileDepartmentInput, state.orgUnits, refs.profileCompanyInput?.value || "6renyou")
-  if (refs.profileDepartmentInput) {
-    refs.profileDepartmentInput.value = user.department || "PD & OPS"
-  }
+  renderProfileOrgAssignment(user)
   if (refs.profileTeamInput) {
     refs.profileTeamInput.value = user.team || ""
   }
@@ -3255,8 +4870,8 @@ async function submitProfile(event) {
         email: refs.profileEmailInput?.value.trim() || "",
         phone_country_code: refs.profilePhoneCountryCodeInput?.value || "+86",
         phone: refs.profilePhoneInput?.value.trim() || "",
-        company: refs.profileCompanyInput?.value || "6renyou",
-        department: refs.profileDepartmentInput?.value || "PD & OPS",
+        company: state.currentUser?.company || "",
+        department: state.currentUser?.department || "",
         team: refs.profileTeamInput?.value.trim() || "",
         job_title: refs.profileJobTitleInput?.value.trim() || "",
         note: refs.profileNoteInput?.value.trim() || "",
@@ -3679,6 +5294,11 @@ function useGroupAssetAsReference(asset) {
     refs.generatePromptInput.value = asset.prompt
   }
   if (asset.saved_image_url) {
+    invalidateLatestFileReadChannels(
+      FILE_READ_CHANNELS.styleReference,
+      FILE_READ_CHANNELS.materialReference,
+      FILE_READ_CHANNELS.generateReference,
+    )
     const description = `部门群优秀资产 · 仅作可选参考 · ${asset.title || "满意作品"}`
     state.generateReferenceImage = null
     state.materialReferenceImage = null
@@ -4449,6 +6069,16 @@ async function submitResultFeedback(rating, { reason = "", showReason = true } =
     setError("当前没有可评价的结果图。")
     return false
   }
+  if (state.feedbackSubmitting) {
+    // Keep the visible selection bound to the request already in flight.
+    return false
+  }
+  const feedbackResultGenerationSeq = state.resultGenerationSeq
+  const feedbackCandidateIndex = state.selectedCandidateIndex
+  const feedbackTargetIsCurrent = () => (
+    feedbackResultGenerationSeq === state.resultGenerationSeq
+    && feedbackCandidateIndex === state.selectedCandidateIndex
+  )
   updateFeedbackSelection(rating)
   if (rating === "bad" && showReason) {
     refs.feedbackReasonPanel?.classList.remove("hidden")
@@ -4456,6 +6086,7 @@ async function submitResultFeedback(rating, { reason = "", showReason = true } =
     setFeedbackStatus("可补充原因")
     return false
   }
+  state.feedbackSubmitting = true
   const payload = buildFeedbackPayload(rating, reason)
   state.lastFeedbackPayload = payload
   setFeedbackStatus("提交中")
@@ -4464,6 +6095,9 @@ async function submitResultFeedback(rating, { reason = "", showReason = true } =
       method: "POST",
       body: JSON.stringify(payload),
     })
+    if (!feedbackTargetIsCurrent()) {
+      return false
+    }
     if (!response.ok) {
       setFeedbackStatus("提交失败")
       setError(data.error || "反馈提交失败")
@@ -4476,22 +6110,35 @@ async function submitResultFeedback(rating, { reason = "", showReason = true } =
       refs.shareResultPanel?.classList.add("hidden")
     }
     await refreshFeedbackSummary()
-    return true
+    return feedbackTargetIsCurrent()
   } catch {
-    setFeedbackStatus("提交失败")
-    setError("反馈提交时网络连接错误")
+    if (feedbackTargetIsCurrent()) {
+      setFeedbackStatus("提交失败")
+      setError("反馈提交时网络连接错误")
+    }
     return false
+  } finally {
+    state.feedbackSubmitting = false
   }
 }
 
 async function submitBadFeedbackReason() {
   const reason = refs.feedbackReasonInput?.value.trim() || ""
-  await submitResultFeedback("bad", { reason, showReason: false })
+  const submitted = await submitResultFeedback("bad", { reason, showReason: false })
+  if (submitted && state.uiMode === "simple") {
+    await rerunLastGeneration()
+  }
 }
 
 async function regenerateFromBadFeedback() {
+  if (state.feedbackSubmitting || state.rerunInProgress || state.isBusy) {
+    return
+  }
   const reason = refs.feedbackReasonInput?.value.trim() || ""
-  await submitResultFeedback("bad", { reason, showReason: false })
+  const submitted = await submitResultFeedback("bad", { reason, showReason: false })
+  if (!submitted) {
+    return
+  }
   await rerunLastGeneration()
 }
 
@@ -4527,10 +6174,6 @@ async function submitAuthForm(event) {
   const password = refs.authPasswordInput.value
   const endpoint = state.authMode === "register" ? "/api/auth/register" : "/api/auth/login"
   const authPayload = { username, password }
-  if (state.authMode === "register") {
-    authPayload.company = refs.authCompanyInput?.value || "6renyou"
-    authPayload.department = refs.authDepartmentInput?.value || "PD & OPS"
-  }
   refs.authError.textContent = ""
   refs.loginAuthButton.disabled = true
   if (refs.registerAuthButton) {
@@ -4547,8 +6190,8 @@ async function submitAuthForm(event) {
     }
     setCurrentUser(data.user)
     refs.authPasswordInput.value = ""
-    enterAppShell()
     await startAuthenticatedApp()
+    enterAppShell()
   } catch {
     refs.authError.textContent = "网络连接错误"
   } finally {
@@ -4683,7 +6326,18 @@ async function logout() {
     state.history = []
     state.shareRecipients = []
     state.sharedResults = []
+    state.galleryItems = []
+    state.generationJobs = []
+    state.userPreferences = null
+    state.lastRegenerationRequest = null
+    state.workspaceUiMode = ""
+    state.simpleDraft = { scenarioId: "", view: "picker", values: {} }
+    state.simpleFirstRunEligible = null
     state.savedApiKey = ""
+    renderSimpleGalleryItems([])
+    renderGalleryItems([])
+    renderSharedResults([])
+    renderGenerationJobs([])
     clearResult()
     clearGenerateForm()
     clearEditForm()
@@ -4695,6 +6349,54 @@ async function logout() {
     refs.userImageStats?.classList.add("hidden")
     updateAdminPanelVisibility()
   }
+}
+
+function resetWorkspaceForUserScope() {
+  window.clearTimeout(state.persistTimer)
+  state.persistTimer = null
+  state.persistenceReady = false
+  state.suppressSettingsPersist = false
+  cancelPendingPromptConfirmation()
+
+  state.uiMode = "professional"
+  state.workspaceUiMode = ""
+  state.userPreferences = null
+  state.userGeneratedImageCount = null
+  state.simpleFirstRunEligible = null
+  state.simpleChecklist = { steps: [], dismissed: false, completed: false }
+  state.lastRegenerationRequest = null
+  state.rerunInProgress = false
+  state.rerunExecutionSnapshot = null
+  state.galleryRequestSeq = (state.galleryRequestSeq || 0) + 1
+  state.generatedImageDetailRequestSeq += 1
+  state.galleryItems = []
+  state.sharedResults = []
+  renderGalleryItems([])
+  renderSharedResults([])
+  restoreSimpleDraft(null)
+
+  setBusy(false, "空闲", { cancelled: true })
+  state.activeRequestCancelled = false
+  clearResult()
+  clearGenerateForm()
+  clearEditForm()
+  resetItineraryMapExample()
+  clearSourcePreview("原图")
+  if (refs.itinerarySizeSelect) {
+    refs.itinerarySizeSelect.value = "auto"
+  }
+  if (refs.itineraryThemeSelect) {
+    refs.itineraryThemeSelect.value = "comic"
+  }
+  if (refs.itineraryLogoEnabled) {
+    refs.itineraryLogoEnabled.checked = true
+  }
+  state.promptMode = "free"
+  state.selectedRecipeId = ""
+  refs.promptModeInputs.forEach((input) => {
+    input.checked = input.value === "free"
+  })
+  setError("")
 }
 
 function openWorkspaceDb() {
@@ -4714,12 +6416,13 @@ function openWorkspaceDb() {
 }
 
 async function loadWorkspaceSnapshot() {
+  const storageKey = workspaceStorageKey()
   const db = await openWorkspaceDb()
 
   return await new Promise((resolve, reject) => {
     const tx = db.transaction(WORKSPACE_STORE_NAME, "readonly")
     const store = tx.objectStore(WORKSPACE_STORE_NAME)
-    const request = store.get(workspaceStorageKey())
+    const request = store.get(storageKey)
 
     request.onsuccess = () => resolve(request.result || null)
     request.onerror = () => reject(request.error || new Error("读取工作台快照失败"))
@@ -4728,13 +6431,13 @@ async function loadWorkspaceSnapshot() {
   })
 }
 
-async function saveWorkspaceSnapshot(snapshot) {
+async function saveWorkspaceSnapshot(snapshot, storageKey = workspaceStorageKey()) {
   const db = await openWorkspaceDb()
 
   return await new Promise((resolve, reject) => {
     const tx = db.transaction(WORKSPACE_STORE_NAME, "readwrite")
     const store = tx.objectStore(WORKSPACE_STORE_NAME)
-    store.put(snapshot, workspaceStorageKey())
+    store.put(snapshot, storageKey)
 
     tx.oncomplete = () => {
       db.close()
@@ -4825,9 +6528,12 @@ window.addEventListener("unhandledrejection", (event) => {
 function createWorkspaceSnapshot() {
   return {
     version: WORKSPACE_VERSION,
+    ownerUserId: state.currentUser?.id ?? null,
     savedAt: new Date().toISOString(),
     activeMode: state.activeMode,
     generateIntent: state.generateIntent,
+    uiMode: state.uiMode,
+    simpleDraft: simpleDraftSnapshot(),
     forms: {
       generatePrompt: refs.generatePromptInput.value,
       generateModel: refs.generateModelInput.value,
@@ -4850,6 +6556,9 @@ function createWorkspaceSnapshot() {
       editPrompt: refs.editPromptInput.value,
       editModel: refs.editModelInput.value,
       responsesModel: refs.responsesModelInput.value,
+      responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
+      responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
+      responsesReasoningStorageVersion: RESPONSES_REASONING_STORAGE_VERSION,
       imageTransport: getImageTransport(),
       logoOverlayEnabled: refs.logoOverlayEnabled.checked,
       itineraryIdEnabled: refs.itineraryIdEnabled?.checked || false,
@@ -4872,6 +6581,7 @@ function createWorkspaceSnapshot() {
       textFidelity: state.textFidelity,
       resultCandidates: state.resultCandidates,
       selectedCandidateIndex: state.selectedCandidateIndex,
+      checkedCandidateIndex: state.checkedCandidateIndex,
     },
     source: {
       labelText: refs.sourcePreviewLabel.textContent,
@@ -4886,12 +6596,15 @@ function createWorkspaceSnapshot() {
 }
 
 function scheduleWorkspacePersist() {
-  if (!state.persistenceReady) {
+  if (!state.persistenceReady || state.suppressSettingsPersist) {
     return
   }
 
   window.clearTimeout(state.persistTimer)
   state.persistTimer = window.setTimeout(() => {
+    if (state.suppressSettingsPersist) {
+      return
+    }
     saveWorkspaceSnapshot(createWorkspaceSnapshot()).catch((error) => {
       console.error("Persist workspace failed", error)
     })
@@ -4899,6 +6612,8 @@ function scheduleWorkspacePersist() {
 }
 
 async function restoreWorkspaceState() {
+  const userContextEpoch = state.userContextEpoch
+  const ownerUserId = state.currentUser?.id ?? null
   let snapshot
 
   try {
@@ -4908,12 +6623,21 @@ async function restoreWorkspaceState() {
     return false
   }
 
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
+
   if (!snapshot || typeof snapshot !== "object") {
+    return false
+  }
+  if (Object.hasOwn(snapshot, "ownerUserId") && snapshot.ownerUserId !== ownerUserId) {
     return false
   }
 
   const forms = snapshot.forms || {}
   sanitizeLegacyWorkspacePrompt(forms)
+  state.workspaceUiMode = normalizeUiMode(snapshot.uiMode)
+  restoreSimpleDraft(snapshot.simpleDraft)
   state.generateIntent = snapshot.generateIntent === "variant" ? "variant" : "fresh"
   refs.generatePromptInput.value = forms.generatePrompt || ""
   refs.generateModelInput.value = forms.generateModel || state.serverConfig.default_model || "gpt-image-2"
@@ -4959,7 +6683,22 @@ async function restoreWorkspaceState() {
 
   refs.editPromptInput.value = forms.editPrompt || ""
   refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
-  refs.responsesModelInput.value = normalizeResponsesModel(forms.responsesModel || refs.responsesModelInput.value)
+  const currentResponsesModel = normalizeResponsesModel(refs.responsesModelInput.value)
+  const workspaceResponsesSettings = migrateStoredResponsesReasoningSettings(
+    migrateStoredResponsesSettings(
+      {
+        responsesModel: forms.responsesModel,
+        responsesModelStorageVersion: forms.responsesModelStorageVersion,
+        responsesReasoningEffort: forms.responsesReasoningEffort,
+        responsesReasoningStorageVersion: forms.responsesReasoningStorageVersion,
+      },
+      currentResponsesModel,
+    ),
+  )
+  refs.responsesModelInput.value = normalizeResponsesModel(
+    workspaceResponsesSettings.responsesModel || refs.responsesModelInput.value,
+  )
+  refs.responsesReasoningEffortSelect.value = workspaceResponsesSettings.responsesReasoningEffort || ""
   refs.logoOverlayEnabled.checked = forms.logoOverlayEnabled !== false
   if (refs.itineraryIdEnabled) {
     refs.itineraryIdEnabled.checked = Boolean(forms.itineraryIdEnabled)
@@ -4970,7 +6709,7 @@ async function restoreWorkspaceState() {
   updateLogoControlUI()
   updateItineraryIdControlUI()
   if (forms.imageTransport) {
-    setImageTransport(forms.imageTransport === "responses" ? "responses" : "images")
+    setImageTransport(forms.imageTransport)
   }
   updatePromptCounters()
 
@@ -4982,6 +6721,15 @@ async function restoreWorkspaceState() {
   state.currentComparisonSource = cloneImageAsset(result.currentComparisonSource)
   state.resultCandidates = Array.isArray(result.resultCandidates) ? result.resultCandidates : []
   state.selectedCandidateIndex = Number.isInteger(result.selectedCandidateIndex) ? result.selectedCandidateIndex : 0
+  const persistedCheckOwner = Number.isInteger(result.checkedCandidateIndex)
+    && result.checkedCandidateIndex >= 0
+    && result.checkedCandidateIndex < state.resultCandidates.length
+  const legacyMultiCandidateCheck = state.resultCandidates.length > 1 && !persistedCheckOwner
+  state.checkedCandidateIndex = persistedCheckOwner
+    ? result.checkedCandidateIndex
+    : state.resultCandidates.length === 1 && (result.copyrightRisk || result.textFidelity)
+      ? 0
+      : null
   state.resultPreview = result.imageSrc
     ? {
         src: result.imageSrc,
@@ -4989,12 +6737,43 @@ async function restoreWorkspaceState() {
       }
     : null
   state.rawResponsePreview = result.rawResponsePreview || null
-  if (result.copyrightRisk && typeof result.copyrightRisk === "object") {
-    state.copyrightRisk = result.copyrightRisk
+  if (legacyMultiCandidateCheck) {
+    state.copyrightRisk = {
+      status: "未检查",
+      text: "旧工作区没有记录检查对应的候选，下载前请重新核对。",
+      hidden: false,
+    }
+    state.textFidelity = {
+      status: "未检查",
+      text: "旧工作区没有记录检查对应的候选，下载前请重新核对文字。",
+      hidden: false,
+    }
+  } else {
+    const restoredRisk = normalizeRestoredReviewState(result.copyrightRisk, "copyright")
+    const restoredFidelity = normalizeRestoredReviewState(result.textFidelity, "text")
+    if (restoredRisk) {
+      state.copyrightRisk = restoredRisk
+    }
+    if (restoredFidelity) {
+      state.textFidelity = restoredFidelity
+    }
   }
-  if (result.textFidelity && typeof result.textFidelity === "object") {
-    state.textFidelity = result.textFidelity
-  }
+  state.candidateReviewStates = state.checkedCandidateIndex === null
+    ? {}
+    : {
+        [state.checkedCandidateIndex]: {
+          copyrightRisk: { ...state.copyrightRisk },
+          textFidelity: { ...state.textFidelity },
+        },
+      }
+  state.lastReviewPayload = state.resultCandidates.length
+    ? {
+        prompt: state.lastResultPrompt,
+        mode: state.lastResultMode,
+        model: state.lastResultModel,
+        text_contract: {},
+      }
+    : null
 
   if (state.resultPreview?.src) {
     refs.resultPreviewLabel.textContent = result.labelText || "输出"
@@ -5203,22 +6982,43 @@ function updateGenerateIntentUI() {
     !(hasResultAnchor && state.generateIntent === "fresh" && isLikelyVariationPrompt(refs.generatePromptInput.value)),
   )
 
-  refs.generateButton.textContent = state.generateIntent === "variant"
+  const generateLabel = state.generateIntent === "variant"
     ? "基于当前结果延展"
     : hasReference
       ? "参考图生成"
       : "开始海报生成"
+  // textContent 会连 HTML 里的 ▶ 和 <kbd>Ctrl ↵</kbd> 快捷键提示一起抹掉，
+  // 重建为子节点保留提示。
+  refs.generateButton.replaceChildren(`▶ ${generateLabel} `)
+  const shortcutHint = document.createElement("kbd")
+  shortcutHint.textContent = "Ctrl ↵"
+  refs.generateButton.append(shortcutHint)
   updateGenerateSampleCountUI()
 }
 
 function generateReferenceImages() {
+  if (state.uiMode === "simple") {
+    if (!simpleScenarioAcceptsReferenceImage()) {
+      return []
+    }
+    const simpleReference = simpleImageAsset(simpleSceneRecipe())
+    return simpleReference ? [simpleReference] : []
+  }
   if (state.styleReferenceImage || state.materialReferenceImage) {
     return [state.styleReferenceImage, state.materialReferenceImage].filter(Boolean)
   }
   return state.generateReferenceImage ? [state.generateReferenceImage] : []
 }
 
+function simpleScenarioAcceptsReferenceImage(recipe = simpleSceneRecipe()) {
+  return recipe?.scene_card?.submit?.kind === "generate"
+    && (recipe.scene_card.fields || []).some((field) => field.kind === "image")
+}
+
 function hasStyleTransferReferences() {
+  if (state.uiMode === "simple") {
+    return false
+  }
   return Boolean(state.styleReferenceImage && state.materialReferenceImage)
 }
 
@@ -5268,28 +7068,50 @@ function isTypingElement(element) {
 }
 
 function saveSettings() {
+  // 重放历史参数时表单上是历史快照，不能把它当成用户的新默认设置存起来。
+  if (state.suppressSettingsPersist) {
+    return
+  }
   const local = loadJSON(settingsStorageKey(), {})
   const legacy = loadJSON(legacySettingsStorageKey(), {})
   const newApiKey = refs.apiKeyInput.value.trim()
   const nextApiKey = newApiKey || local.apiKey || legacy.apiKey || ""
-  state.savedApiKey = nextApiKey
   const payload = {
     apiKey: nextApiKey,
     generateUrl: refs.generateUrlInput.value.trim(),
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
+    generateModel: refs.generateModelInput.value.trim(),
+    editModel: refs.editModelInput.value.trim(),
     responsesModel: refs.responsesModelInput.value.trim(),
+    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
+    responsesModelStorageVersion: RESPONSES_MODEL_STORAGE_VERSION,
+    responsesReasoningStorageVersion: RESPONSES_REASONING_STORAGE_VERSION,
     imageTransport: getImageTransport(),
   }
-  saveJSON(settingsStorageKey(), payload)
+  if (!saveJSON(settingsStorageKey(), payload)) {
+    flashHint("浏览器本地存储空间不足，设置未保存；API Key 输入已保留。")
+    updateWorkflowStatus()
+    return false
+  }
+  state.savedApiKey = nextApiKey
   refs.apiKeyInput.value = ""
   flashHint(newApiKey ? "新 API Key 已保存在当前浏览器本地；输入框已清空，不会回显 key。" : "设置已保存；API Key 未变更。")
   void syncUserPreferences()
   updateWorkflowStatus()
+  return true
 }
 
 function loadSettings() {
-  const local = loadJSON(settingsStorageKey(), {})
+  const storedLocal = loadJSON(settingsStorageKey(), {})
+  const migratedModelSettings = migrateStoredResponsesSettings(
+    storedLocal,
+    state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL,
+  )
+  const local = migrateStoredResponsesReasoningSettings(migratedModelSettings)
+  if (local !== storedLocal) {
+    saveJSON(settingsStorageKey(), local)
+  }
   const legacy = loadJSON(legacySettingsStorageKey(), {})
   const prefs = state.userPreferences || {}
   const localResponsesUrl = local.responsesUrl || ""
@@ -5305,8 +7127,10 @@ function loadSettings() {
     local.responsesModel || prefs.default_responses_model || state.serverConfig.default_responses_model,
   )
 
-  refs.generateModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
-  refs.editModelInput.value = prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.generateModelInput.value = local.generateModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.editModelInput.value = local.editModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  updateResponsesReasoningDefaultOption()
+  refs.responsesReasoningEffortSelect.value = local.responsesReasoningEffort || ""
   setGenerateSize(prefs.default_size || state.serverConfig.default_size || "auto")
   if (prefs.default_quality) {
     refs.qualitySelect.value = prefs.default_quality
@@ -5317,7 +7141,7 @@ function loadSettings() {
   if (typeof prefs.logo_overlay_enabled === "boolean") {
     refs.logoOverlayEnabled.checked = prefs.logo_overlay_enabled
   }
-  setImageTransport(local.imageTransport || prefs.default_image_transport || "images")
+  setImageTransport(local.imageTransport || prefs.default_image_transport || "auto")
 
   if (state.savedApiKey) {
     refs.settingsHint.textContent = "浏览器本地已保存 API Key。输入框只用于填入新 key，不会回显现有 key。"
@@ -5343,12 +7167,21 @@ function currentUserPreferencesPayload() {
   return {
     default_model: refs.generateModelInput.value.trim(),
     default_responses_model: normalizeResponsesModel(refs.responsesModelInput.value),
+    responses_model_storage_version: RESPONSES_MODEL_STORAGE_VERSION,
     default_size: size,
     default_quality: refs.qualitySelect.value || "",
     default_output_format: refs.outputFormatSelect.value || "",
     default_image_transport: getImageTransport(),
     logo_overlay_enabled: refs.logoOverlayEnabled.checked,
     auto_copyright_check_enabled: true,
+    simple_checklist_completed: state.simpleChecklist.completed,
+    ui_mode: state.uiMode,
+  }
+}
+
+function uiModePreferencesPayload() {
+  return {
+    ui_mode: state.uiMode,
   }
 }
 
@@ -5360,41 +7193,76 @@ async function loadUserPreferences() {
   try {
     const { response, data } = await fetchJSON("/api/preferences", { cache: "no-store" })
     state.userPreferences = response.ok ? data.preferences || null : null
-  } catch {
+  } catch (error) {
+    if (error?.staleUserContext) {
+      return
+    }
     state.userPreferences = null
   }
 }
 
-async function syncUserPreferences({ quiet = true } = {}) {
+async function syncUserPreferences({
+  quiet = true,
+  preferencesPayload = null,
+  endpoint = "/api/preferences",
+  method = "PUT",
+} = {}) {
+  if (state.suppressSettingsPersist) {
+    return
+  }
   if (state.serverConfig?.auth_enabled === false || !state.currentUser) {
     return
   }
-  try {
-    const { response, data } = await fetchJSON("/api/preferences", {
-      method: "PUT",
-      body: JSON.stringify(currentUserPreferencesPayload()),
-    })
-    if (response.ok) {
-      state.userPreferences = data.preferences || null
+  const userId = state.currentUser.id
+  const userContextEpoch = state.userContextEpoch
+  const payload = preferencesPayload || currentUserPreferencesPayload()
+  const syncCurrentPreferences = async () => {
+    if (!userContextIsCurrent(userContextEpoch) || state.currentUser?.id !== userId) {
       return
     }
-    if (!quiet) {
-      flashHint(data.error || "偏好保存失败，本地配置仍已保存。")
-    }
-  } catch {
-    if (!quiet) {
-      flashHint("偏好保存暂时不可用，本地配置仍已保存。")
+    const controller = new AbortController()
+    state.preferenceSyncController = controller
+    try {
+      const { response, data } = await fetchJSON(endpoint, {
+        method,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      })
+      if (!userContextIsCurrent(userContextEpoch) || state.currentUser?.id !== userId) {
+        return
+      }
+      if (response.ok) {
+        state.userPreferences = data.preferences || null
+        return
+      }
+      if (!quiet) {
+        flashHint(data.error || "偏好保存失败，本地配置仍已保存。")
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        return
+      }
+      if (!quiet && userContextIsCurrent(userContextEpoch) && state.currentUser?.id === userId) {
+        flashHint("偏好保存暂时不可用，本地配置仍已保存。")
+      }
+    } finally {
+      if (state.preferenceSyncController === controller) {
+        state.preferenceSyncController = null
+      }
     }
   }
+  const pending = state.preferenceSyncTail.catch(() => {}).then(syncCurrentPreferences)
+  state.preferenceSyncTail = pending
+  return pending
 }
 
 function getImageTransport() {
   const checked = refs.imageTransportInputs.find((input) => input.checked)
-  return checked?.value === "responses" ? "responses" : "images"
+  return ["auto", "images", "responses"].includes(checked?.value) ? checked.value : "auto"
 }
 
 function setImageTransport(value) {
-  const normalized = value === "responses" ? "responses" : "images"
+  const normalized = ["auto", "images", "responses"].includes(value) ? value : "auto"
   refs.imageTransportInputs.forEach((input) => {
     input.checked = input.value === normalized
   })
@@ -5405,15 +7273,18 @@ function updateImageTransportUI() {
   const transport = getImageTransport()
   const isResponses = transport === "responses"
   if (refs.imageTransportHint) {
-    refs.imageTransportHint.textContent = isResponses
-      ? "编辑、参考图、延展会走 Responses + image_generation 工具（默认 gpt-5.5），用于对接不支持 Images Edit 的兼容代理。"
-      : "编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。"
+    refs.imageTransportHint.textContent = transport === "auto"
+      ? "自动模式由服务端根据尺寸、模式和输入图选择实际通道。"
+      : isResponses
+        ? `所有任务优先走 Responses + image_generation（默认 ${DEFAULT_RESPONSES_MODEL}）。`
+        : "原生尺寸优先走 Images API；非原生精确尺寸仍由服务端切换到 Responses。"
   }
   const editFieldset = refs.responsesUrlInput?.closest("label")
   const modelFieldset = refs.responsesModelInput?.closest("label")
-  ;[editFieldset, modelFieldset].forEach((node) => {
+  const reasoningFieldset = refs.responsesReasoningEffortSelect?.closest("label")
+  ;[editFieldset, modelFieldset, reasoningFieldset].forEach((node) => {
     if (!node) return
-    node.classList.toggle("is-dimmed", !isResponses)
+    node.classList.toggle("is-dimmed", transport === "images")
   })
 }
 
@@ -5433,6 +7304,22 @@ function flashHint(text) {
   }, 2200)
 }
 
+function serverDefaultResponsesReasoningEffort() {
+  const configured = String(
+    state.serverConfig?.default_responses_reasoning_effort || "",
+  ).trim().toLowerCase()
+  return RESPONSES_REASONING_EFFORTS.has(configured)
+    ? configured
+    : DEFAULT_RESPONSES_REASONING_EFFORT
+}
+
+function updateResponsesReasoningDefaultOption() {
+  const option = refs.responsesReasoningEffortSelect?.querySelector('option[value=""]')
+  if (option) {
+    option.textContent = `服务端默认 (${serverDefaultResponsesReasoningEffort()})`
+  }
+}
+
 function getSettings() {
   return {
     apiKey: refs.apiKeyInput.value.trim() || state.savedApiKey || "",
@@ -5440,7 +7327,27 @@ function getSettings() {
     editUrl: refs.editUrlInput.value.trim(),
     responsesUrl: refs.responsesUrlInput.value.trim(),
     responsesModel: normalizeResponsesModel(refs.responsesModelInput.value),
+    responsesReasoningEffort: refs.responsesReasoningEffortSelect.value,
     imageTransport: getImageTransport(),
+  }
+}
+
+function imageJobAdvancedOptions(settings, mode = "generate") {
+  if (!canManageExecutionSettings()) {
+    return undefined
+  }
+  const imagesModel = mode === "edit"
+    ? refs.editModelInput.value.trim()
+    : refs.generateModelInput.value.trim()
+  return {
+    api_key: settings.apiKey || undefined,
+    generate_url: settings.generateUrl || undefined,
+    edit_url: settings.editUrl || undefined,
+    responses_url: settings.responsesUrl || undefined,
+    images_model: imagesModel || undefined,
+    responses_model: settings.responsesModel || undefined,
+    preferred_transport: settings.imageTransport || "auto",
+    reasoning_effort: settings.responsesReasoningEffort || undefined,
   }
 }
 
@@ -5505,9 +7412,22 @@ function closePromptConfirmModal() {
   updatePromptConfirmButtonState()
 }
 
+function cancelPendingPromptConfirmation() {
+  if (typeof state.promptConfirmCancel === "function") {
+    state.promptConfirmCancel()
+    return
+  }
+  closePromptConfirmModal()
+}
+
 function openPromptConfirmModal({ title, description, text }) {
   if (!refs.promptConfirmModal || !refs.promptConfirmTextInput) {
     return Promise.resolve(String(text || "").trim())
+  }
+  if (state.promptConfirmCancel || !refs.promptConfirmModal.classList.contains("hidden")) {
+    // 弹窗已打开说明上一个提交流程还挂着自己的监听器；再叠一套会
+    // 让旧流程的闭包在下一次确认时带着过期参数复活。
+    return Promise.resolve(null)
   }
   refs.promptConfirmTitle.textContent = title || "提交前确认提示词"
   refs.promptConfirmDescription.textContent = description || "请检查标题、地名、日期、正文和标点。"
@@ -5528,6 +7448,9 @@ function openPromptConfirmModal({ title, description, text }) {
       refs.cancelPromptConfirmButton?.removeEventListener("click", handleCancel)
       refs.closePromptConfirmButton?.removeEventListener("click", handleCancel)
       refs.promptConfirmBackdrop?.removeEventListener("click", handleCancel)
+      if (state.promptConfirmCancel === handleCancel) {
+        state.promptConfirmCancel = null
+      }
     }
     const handleSubmit = () => {
       const confirmedText = refs.promptConfirmTextInput.value.trim()
@@ -5548,6 +7471,7 @@ function openPromptConfirmModal({ title, description, text }) {
     refs.cancelPromptConfirmButton?.addEventListener("click", handleCancel)
     refs.closePromptConfirmButton?.addEventListener("click", handleCancel)
     refs.promptConfirmBackdrop?.addEventListener("click", handleCancel)
+    state.promptConfirmCancel = handleCancel
   })
 }
 
@@ -5587,38 +7511,12 @@ function updateGenerateSampleCountUI() {
   }
 }
 
-function requireEditSettings(settings, contextLabel) {
-  if (!settings.editUrl) {
-    appendDebugLine("参数校验失败：编辑接口 URL 为空")
-    setError(`${contextLabel}需要填写编辑接口 URL（/v1/images/edits）。`)
-    refs.editUrlInput.focus()
-    return false
-  }
-  return true
-}
-
 function normalizeResponsesModel(value) {
   const model = String(value || "").trim()
   if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
-    return state.serverConfig?.default_responses_model || "gpt-5.5"
+    return state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
   }
   return model
-}
-
-function requireResponsesSettings(settings, contextLabel) {
-  if (!settings.responsesUrl) {
-    appendDebugLine("参数校验失败：Responses 图像接口 URL 为空")
-    setError(`${contextLabel}需要填写 Responses 图像接口 URL。`)
-    refs.responsesUrlInput.focus()
-    return false
-  }
-  if (!settings.responsesModel) {
-    appendDebugLine("参数校验失败：Responses 主模型为空")
-    setError(`${contextLabel}需要填写 Responses 主模型。`)
-    refs.responsesModelInput.focus()
-    return false
-  }
-  return true
 }
 
 function formatTimestamp(isoLike) {
@@ -5695,7 +7593,8 @@ function syncSizePresetFromInputs() {
   }
   const value = formatSizeValue(width, height)
   refs.generateSizePreset.value = SIZE_PRESETS.includes(value) ? value : "custom"
-  updateVisualSizePicker(refs.generateSizePreset.value === "custom" ? value : refs.generateSizePreset.value)
+  // 自定义尺寸时要点亮"自定义"卡片；传原始 "WxH" 匹配不到任何选项。
+  updateVisualSizePicker(refs.generateSizePreset.value)
 }
 
 function getGenerateSize() {
@@ -5723,11 +7622,13 @@ function getGenerateSize() {
     throw new Error("宽高比例不能超过 3:1。")
   }
 
-  return formatSizeValue(width, height)
-}
+  // 与服务端 MAX_EXACT_IMAGE_PIXELS 一致；不在这里拦，用户要等到
+  // 确认弹窗提交后才收到一条裸像素数的 400。
+  if (width * height > 8294400) {
+    throw new Error("宽 × 高的总像素不能超过 3840x2160（约 829 万），请调小尺寸。")
+  }
 
-function shouldUseResponsesForSelectedSize(size) {
-  return !IMAGES_API_EXACT_SIZES.has(String(size || "").trim() || "auto")
+  return formatSizeValue(width, height)
 }
 
 function updateVisualSizePicker(value) {
@@ -5771,6 +7672,9 @@ function currentFormSnapshot() {
     generatePrompt: refs.generatePromptInput.value,
     generateModel: refs.generateModelInput.value,
     generateSize: getSizeSnapshotValue(),
+    generateSizePreset: refs.generateSizePreset.value,
+    generateWidth: refs.generateWidthInput.value,
+    generateHeight: refs.generateHeightInput.value,
     quality: refs.qualitySelect.value,
     background: refs.backgroundSelect.value,
     outputFormat: refs.outputFormatSelect.value,
@@ -5817,7 +7721,14 @@ function applyFormSnapshot(snapshot) {
   }
   refs.generatePromptInput.value = snapshot.generatePrompt || ""
   refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
-  setGenerateSize(snapshot.generateSize || "auto")
+  if (Object.hasOwn(snapshot, "generateWidth") || Object.hasOwn(snapshot, "generateHeight")) {
+    refs.generateWidthInput.value = snapshot.generateWidth || ""
+    refs.generateHeightInput.value = snapshot.generateHeight || ""
+    refs.generateSizePreset.value = snapshot.generateSizePreset || snapshot.generateSize || "custom"
+    updateVisualSizePicker(refs.generateSizePreset.value)
+  } else {
+    setGenerateSize(snapshot.generateSize || "auto")
+  }
   refs.qualitySelect.value = snapshot.quality || "high"
   refs.backgroundSelect.value = snapshot.background || "auto"
   refs.outputFormatSelect.value = snapshot.outputFormat || "png"
@@ -5867,16 +7778,49 @@ function rememberRegenerationRequest(kind, snapshot) {
   }
 }
 
+function isPlainSnapshotObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+function mergeRerunDraftSnapshots(original, executionBaseline, latest) {
+  if (!executionBaseline) {
+    return { ...original }
+  }
+  const keys = new Set([
+    ...Object.keys(original || {}),
+    ...Object.keys(executionBaseline || {}),
+    ...Object.keys(latest || {}),
+  ])
+  return Object.fromEntries([...keys].map((key) => {
+    const originalValue = original?.[key]
+    const baselineValue = executionBaseline?.[key]
+    const latestValue = latest?.[key]
+    if (isPlainSnapshotObject(baselineValue) && isPlainSnapshotObject(latestValue)) {
+      return [key, mergeRerunDraftSnapshots(
+        isPlainSnapshotObject(originalValue) ? originalValue : {},
+        baselineValue,
+        latestValue,
+      )]
+    }
+    return [key, Object.is(latestValue, baselineValue) ? originalValue : latestValue]
+  }))
+}
+
 async function rerunLastGeneration() {
-  if (state.isBusy) {
+  if (state.isBusy || state.rerunInProgress) {
     return
   }
   if (!state.lastRegenerationRequest) {
     setError("当前没有可复用的生成参数。")
     return
   }
+  const userContextEpoch = state.userContextEpoch
   const currentSnapshot = currentFormSnapshot()
   const { kind, snapshot } = state.lastRegenerationRequest
+  state.rerunInProgress = true
+  state.rerunExecutionSnapshot = null
+  state.suppressSettingsPersist = true
+  window.clearTimeout(state.persistTimer)
   try {
     applyFormSnapshot(snapshot)
     if (kind === "edit") {
@@ -5887,7 +7831,22 @@ async function rerunLastGeneration() {
       await submitGenerate()
     }
   } finally {
-    applyFormSnapshot(currentSnapshot)
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return
+    }
+    const latestSnapshot = currentFormSnapshot()
+    const restoredSnapshot = mergeRerunDraftSnapshots(
+      currentSnapshot,
+      state.rerunExecutionSnapshot,
+      latestSnapshot,
+    )
+    state.suppressSettingsPersist = false
+    try {
+      applyFormSnapshot(restoredSnapshot)
+    } finally {
+      state.rerunExecutionSnapshot = null
+      state.rerunInProgress = false
+    }
   }
 }
 
@@ -5945,6 +7904,24 @@ function estimateProgress(elapsedMs, phase) {
 }
 
 function progressHintForPhase(phase, label) {
+  if (state.uiMode === "simple") {
+    const elapsedMs = state.progressStartedAt ? performance.now() - state.progressStartedAt : 0
+    if (phase === "preparing") {
+      return "正在整理你填写的内容。"
+    }
+    if (phase === "uploading") {
+      return "图片和内容已提交，正在开始生成。"
+    }
+    if (phase === "waiting" && elapsedMs >= 5 * 60 * 1000) {
+      return "等待时间较长，上游偶尔排队，可点中断后重试。"
+    }
+    if (phase === "waiting") {
+      return refs.simpleTimingEstimate?.textContent || "通常需要 1–3 分钟"
+    }
+    if (phase === "receiving") {
+      return "图片已返回，正在保存成品。"
+    }
+  }
   const expectedCount = Math.max(1, Number(state.progressExpectedCount) || 1)
   if (phase === "waiting" && expectedCount > 1 && state.progressStartedAt) {
     const elapsedSeconds = Math.max(0, (performance.now() - state.progressStartedAt) / 1000)
@@ -6094,7 +8071,13 @@ function stopProgress({ cancelled = false } = {}) {
 }
 
 function setBusy(isBusy, label, options = {}) {
+  if (isBusy && state.rerunInProgress && !state.rerunExecutionSnapshot) {
+    state.rerunExecutionSnapshot = currentFormSnapshot()
+  }
   state.isBusy = isBusy
+  if (isBusy && state.uiMode === "simple") {
+    markSimpleChecklistStep(2)
+  }
   if (!isBusy) {
     state.activeRequestController = null
     refs.cancelRequestButton.textContent = "中断生成"
@@ -6109,6 +8092,12 @@ function setBusy(isBusy, label, options = {}) {
   if (refs.renderItineraryMapButton) {
     refs.renderItineraryMapButton.disabled = isBusy
   }
+  refs.simpleModePanel?.setAttribute("aria-busy", String(isBusy))
+  refs.simpleScenarioForm?.setAttribute("aria-busy", String(isBusy))
+  refs.simpleWorkflowSteps[0]?.parentElement?.setAttribute("aria-busy", String(isBusy))
+  refs.resultPanel?.setAttribute("aria-busy", String(isBusy))
+  syncSimpleBusyControls(isBusy)
+  syncLatestFileReadControls()
   refs.cancelRequestButton?.classList.toggle("hidden", !isBusy)
   refs.cancelRequestButton.disabled = !isBusy
   refs.requestStatus.textContent = label
@@ -6120,6 +8109,8 @@ function setBusy(isBusy, label, options = {}) {
   } else {
     stopProgress({ cancelled: options.cancelled === true })
   }
+  renderSimpleGenerateButton()
+  updateSimpleResultSurface()
 }
 
 function cancelActiveRequest() {
@@ -6179,34 +8170,136 @@ function setStatusMessage(message = "") {
   if (!refs.toastMessage || !message) {
     return
   }
-  refs.toastMessage.textContent = message
+  if (refs.toastMessageText) {
+    refs.toastMessageText.textContent = message
+  } else {
+    refs.toastMessage.textContent = message
+  }
+  window.clearTimeout(state.toastHideTimer)
   refs.toastMessage.classList.remove("hidden")
+  window.requestAnimationFrame(() => refs.toastMessage?.classList.add("is-visible"))
   window.clearTimeout(state.toastTimer)
   state.toastTimer = window.setTimeout(() => {
-    refs.toastMessage?.classList.add("hidden")
+    refs.toastMessage?.classList.remove("is-visible")
+    state.toastHideTimer = window.setTimeout(() => {
+      refs.toastMessage?.classList.add("hidden")
+    }, 200)
   }, 2600)
 }
 
-function setRiskPanel(status, text, { hidden = false } = {}) {
+function normalizeRestoredReviewState(review, kind) {
+  if (!review || typeof review !== "object") {
+    return null
+  }
+  if (["检查中", "等待检查"].includes(review.status)) {
+    return {
+      status: "未检查",
+      text: kind === "text"
+        ? "页面刷新已终止上一次文字检查，下载前请重新核对文字。"
+        : "页面刷新已终止上一次版权检查，下载前请重新核对。",
+      hidden: false,
+    }
+  }
+  return { ...review }
+}
+
+function normalizePendingReviewSnapshot(snapshot) {
+  const candidateReviewStates = Object.fromEntries(
+    Object.entries(snapshot.candidateReviewStates || {}).map(([index, review]) => [
+      index,
+      {
+        copyrightRisk: normalizeRestoredReviewState(review?.copyrightRisk, "copyright"),
+        textFidelity: normalizeRestoredReviewState(review?.textFidelity, "text"),
+      },
+    ])
+  )
+  return {
+    ...snapshot,
+    copyrightRisk: normalizeRestoredReviewState(snapshot.copyrightRisk, "copyright"),
+    textFidelity: normalizeRestoredReviewState(snapshot.textFidelity, "text"),
+    candidateReviewStates,
+  }
+}
+
+function reviewStatusNeedsRetry(review) {
+  return !review || ["等待检查", "检查中", "未检查", "检查失败"].includes(review.status)
+}
+
+function rememberCandidateReview(candidateIndex, key, review) {
+  if (!Number.isInteger(candidateIndex) || candidateIndex < 0) {
+    return
+  }
+  const previous = state.candidateReviewStates[candidateIndex] || {}
+  state.candidateReviewStates = {
+    ...state.candidateReviewStates,
+    [candidateIndex]: {
+      ...previous,
+      [key]: { ...review },
+    },
+  }
+}
+
+function reviewPayloadForCandidate() {
+  return state.lastReviewPayload ? structuredClone(state.lastReviewPayload) : null
+}
+
+function simpleReviewText(kind, status, text) {
+  if (state.uiMode !== "simple") {
+    return text
+  }
+  const count = String(text || "").match(/(\d+)\s*处/)
+  const positive = /通过|正常|低风险|未发现|无需/.test(`${status} ${text}`)
+  const lead = kind === "text"
+    ? count
+      ? `检查了图里的字，有 ${count[1]} 处要注意。`
+      : positive
+        ? "检查了图里的字，暂未发现明显问题。"
+        : "检查了图里的字，结论见下方。"
+    : positive
+      ? "检查了图片版权，暂未发现明显风险。"
+      : "检查了图片版权，结论见下方。"
+  return `${lead}${text ? ` ${text}` : ""}`
+}
+
+function renderReviewCopyForMode() {
+  if (refs.copyrightRiskText) {
+    refs.copyrightRiskText.textContent = simpleReviewText(
+      "copyright",
+      state.copyrightRisk?.status || "",
+      state.copyrightRisk?.text || "",
+    )
+  }
+  if (refs.textFidelityText) {
+    refs.textFidelityText.textContent = simpleReviewText(
+      "text",
+      state.textFidelity?.status || "",
+      state.textFidelity?.text || "",
+    )
+  }
+}
+
+function setRiskPanel(status, text, { hidden = false, candidateIndex = null } = {}) {
   state.copyrightRisk = { status, text, hidden }
+  rememberCandidateReview(candidateIndex, "copyrightRisk", state.copyrightRisk)
   refs.copyrightRiskPanel?.classList.toggle("hidden", hidden)
   if (refs.copyrightRiskStatus) {
     refs.copyrightRiskStatus.textContent = status
   }
   if (refs.copyrightRiskText) {
-    refs.copyrightRiskText.textContent = text
+    refs.copyrightRiskText.textContent = simpleReviewText("copyright", status, text)
   }
   scheduleWorkspacePersist()
 }
 
-function setTextFidelityPanel(status, text, { hidden = false } = {}) {
+function setTextFidelityPanel(status, text, { hidden = false, candidateIndex = null } = {}) {
   state.textFidelity = { status, text, hidden }
+  rememberCandidateReview(candidateIndex, "textFidelity", state.textFidelity)
   refs.textFidelityPanel?.classList.toggle("hidden", hidden)
   if (refs.textFidelityStatus) {
     refs.textFidelityStatus.textContent = status
   }
   if (refs.textFidelityText) {
-    refs.textFidelityText.textContent = text
+    refs.textFidelityText.textContent = simpleReviewText("text", status, text)
   }
   scheduleWorkspacePersist()
 }
@@ -6265,7 +8358,13 @@ function updateGenerateReferenceUI() {
   updateGenerateSampleCountUI()
 }
 
-function setGenerateReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+function setGenerateReferenceImage(
+  asset,
+  { showPreview = state.activeMode === "generate", preserveLatestFileRead = false } = {},
+) {
+  if (!preserveLatestFileRead) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.generateReference)
+  }
   state.generateReferenceImage = cloneImageAsset(asset)
   updateGenerateReferenceUI()
   if (showPreview && getAssetDisplaySrc(state.generateReferenceImage)) {
@@ -6274,7 +8373,13 @@ function setGenerateReferenceImage(asset, { showPreview = state.activeMode === "
   scheduleWorkspacePersist()
 }
 
-function setStyleReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+function setStyleReferenceImage(
+  asset,
+  { showPreview = state.activeMode === "generate", preserveLatestFileRead = false } = {},
+) {
+  if (!preserveLatestFileRead) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.styleReference)
+  }
   state.styleReferenceImage = cloneImageAsset(asset, { role: "style_template" })
   state.generateReferenceImage = state.materialReferenceImage || state.styleReferenceImage
   updateGenerateReferenceUI()
@@ -6284,7 +8389,13 @@ function setStyleReferenceImage(asset, { showPreview = state.activeMode === "gen
   scheduleWorkspacePersist()
 }
 
-function setMaterialReferenceImage(asset, { showPreview = state.activeMode === "generate" } = {}) {
+function setMaterialReferenceImage(
+  asset,
+  { showPreview = state.activeMode === "generate", preserveLatestFileRead = false } = {},
+) {
+  if (!preserveLatestFileRead) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.materialReference)
+  }
   state.materialReferenceImage = cloneImageAsset(asset, { role: "material" })
   state.generateReferenceImage = state.materialReferenceImage
   updateGenerateReferenceUI()
@@ -6295,6 +8406,11 @@ function setMaterialReferenceImage(asset, { showPreview = state.activeMode === "
 }
 
 function clearGenerateReferenceImage({ clearInput = true } = {}) {
+  invalidateLatestFileReadChannels(
+    FILE_READ_CHANNELS.styleReference,
+    FILE_READ_CHANNELS.materialReference,
+    FILE_READ_CHANNELS.generateReference,
+  )
   state.generateReferenceImage = null
   state.styleReferenceImage = null
   state.materialReferenceImage = null
@@ -6382,7 +8498,17 @@ function updateEditMaskUI() {
   refs.editMaskMeta.textContent = ""
 }
 
-function setEditImage(asset, { showPreview = state.activeMode === "edit", previewLabel = "输入图" } = {}) {
+function setEditImage(
+  asset,
+  {
+    showPreview = state.activeMode === "edit",
+    previewLabel = "输入图",
+    preserveLatestFileRead = false,
+  } = {},
+) {
+  if (!preserveLatestFileRead) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editImage)
+  }
   state.editImage = cloneImageAsset(asset)
   updateEditSourceUI()
 
@@ -6393,13 +8519,17 @@ function setEditImage(asset, { showPreview = state.activeMode === "edit", previe
   scheduleWorkspacePersist()
 }
 
-function setEditMaskImage(asset) {
+function setEditMaskImage(asset, { preserveLatestFileRead = false } = {}) {
+  if (!preserveLatestFileRead) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editMask)
+  }
   state.editMaskImage = cloneImageAsset(asset)
   updateEditMaskUI()
   scheduleWorkspacePersist()
 }
 
 function clearEditMaskImage({ clearInput = true } = {}) {
+  invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editMask)
   state.editMaskImage = null
   if (clearInput) {
     refs.editMaskInput.value = ""
@@ -6409,6 +8539,7 @@ function clearEditMaskImage({ clearInput = true } = {}) {
 }
 
 function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
+  invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editImage)
   if (!state.lastResultImage) {
     return false
   }
@@ -6451,6 +8582,9 @@ function useLastResultAsEditSource({ showPreview = true, focus = false } = {}) {
 
 function setMode(mode, options = {}) {
   const previousMode = state.activeMode
+  if (previousMode !== mode) {
+    invalidateLatestFileReads()
+  }
   state.activeMode = mode
 
   refs.generateTab.classList.toggle("active", mode === "generate")
@@ -6681,6 +8815,7 @@ function clearResult() {
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
   setRiskPanel("等待检查", "生成完成后自动检查。", { hidden: true })
+  setTextFidelityPanel("等待检查", "生成完成后自动检查用户文案。", { hidden: true })
   setDownloadDisabled()
   refs.feedbackReasonPanel?.classList.add("hidden")
   if (refs.feedbackReasonInput) {
@@ -6702,6 +8837,9 @@ function clearResult() {
   state.resultGenerationSeq += 1
   state.resultCandidates = []
   state.selectedCandidateIndex = 0
+  state.checkedCandidateIndex = null
+  state.candidateReviewStates = {}
+  state.lastReviewPayload = null
   state.rawResponsePreview = null
   state.lastFeedbackPayload = null
   state.lastFeedbackRating = null
@@ -6746,6 +8884,9 @@ function snapshotCurrentResultState() {
       asset: cloneImageAsset(candidate.asset),
     })),
     selectedCandidateIndex: state.selectedCandidateIndex,
+    checkedCandidateIndex: state.checkedCandidateIndex,
+    candidateReviewStates: structuredClone(state.candidateReviewStates),
+    lastReviewPayload: state.lastReviewPayload ? structuredClone(state.lastReviewPayload) : null,
     rawResponsePreview: state.rawResponsePreview,
     lastFeedbackPayload: state.lastFeedbackPayload ? { ...state.lastFeedbackPayload } : null,
     lastFeedbackRating: state.lastFeedbackRating,
@@ -6797,12 +8938,21 @@ function restoreResultStateSnapshot(snapshot) {
       }))
     : []
   state.selectedCandidateIndex = Number(snapshot.selectedCandidateIndex || 0)
+  state.checkedCandidateIndex = Number.isInteger(snapshot.checkedCandidateIndex)
+    ? snapshot.checkedCandidateIndex
+    : null
+  state.candidateReviewStates = snapshot.candidateReviewStates
+    ? structuredClone(normalizePendingReviewSnapshot(snapshot).candidateReviewStates)
+    : {}
+  state.lastReviewPayload = snapshot.lastReviewPayload
+    ? structuredClone(snapshot.lastReviewPayload)
+    : null
   state.rawResponsePreview = snapshot.rawResponsePreview || snapshot.rawResponse || null
   state.lastFeedbackPayload = snapshot.lastFeedbackPayload ? { ...snapshot.lastFeedbackPayload } : null
   state.lastFeedbackRating = snapshot.lastFeedbackRating || null
   state.debugLines = Array.isArray(snapshot.debugLines) ? [...snapshot.debugLines] : []
-  state.copyrightRisk = snapshot.copyrightRisk || state.copyrightRisk
-  state.textFidelity = snapshot.textFidelity || state.textFidelity
+  state.copyrightRisk = normalizeRestoredReviewState(snapshot.copyrightRisk, "copyright") || state.copyrightRisk
+  state.textFidelity = normalizeRestoredReviewState(snapshot.textFidelity, "text") || state.textFidelity
   setGalleryEditorMeta(snapshot.galleryMeta || null)
 
   renderRawResponsePreview()
@@ -6855,7 +9005,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
         : mode === "itinerary"
           ? "行程路线"
           : "生成"
-  const metaParts = [metaLabel, model]
+  const metaParts = [metaLabel, canViewExecutionDetails() ? model : ""]
 
   if (size) {
     metaParts.push(size)
@@ -6864,7 +9014,11 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
     metaParts.push(`参考图 ${sourceName}`)
   }
 
-  state.pendingResultSnapshot = snapshotCurrentResultState()
+  state.pendingResultSnapshot = normalizePendingReviewSnapshot(snapshotCurrentResultState())
+  state.resultGenerationSeq += 1
+  state.copyrightRiskRequestSeq += 1
+  state.textFidelityRequestSeq += 1
+  state.generatedImageDetailRequestSeq += 1
   refs.resultPreviewLabel.textContent = label
   refs.resultImage.removeAttribute("src")
   refs.resultImage.classList.remove("visible")
@@ -6876,8 +9030,14 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultTiming.textContent = "请求进行中 0.0s"
   refs.resultStorage.textContent = ""
   setDownloadDisabled()
+  refs.shareResultPanel?.classList.add("hidden")
   state.resultCandidates = []
   state.selectedCandidateIndex = 0
+  state.checkedCandidateIndex = null
+  state.candidateReviewStates = {}
+  state.lastReviewPayload = null
+  setRiskPanel("等待检查", "新结果返回后自动检查。", { hidden: true })
+  setTextFidelityPanel("等待检查", "新结果返回后自动检查用户文案。", { hidden: true })
   renderResultCandidates()
 }
 
@@ -6908,7 +9068,9 @@ function candidateAsset(candidate, payload, index) {
     originalFileUrl: originalSavedUrl,
     originalSavedPath,
     origin: "result",
-    description: `候选 ${index + 1} · ${payload.model || ""}`,
+    description: canViewExecutionDetails() && payload.model
+      ? `候选 ${index + 1} · ${payload.model}`
+      : `候选 ${index + 1}`,
     src: imageSource,
     logoOverlayApplied: Boolean(candidate.logo_overlay_applied),
   }
@@ -6944,11 +9106,14 @@ function setDownloadAvailable(href, filename, options = {}) {
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
   refs.downloadButton.classList.toggle("download-ready-logo", Boolean(options.logoReady))
-  refs.downloadButton.textContent = options.logoReady
+  const professionalLabel = options.logoReady
     ? "下载带 6 人游 LOGO 成品"
     : "下载图像"
+  refs.downloadButton.dataset.professionalLabel = professionalLabel
+  refs.downloadButton.textContent = professionalLabel
   refs.downloadButton.download = filename
   updateOriginalDownloadButton(options.candidate)
+  updateResultActionLabelsForMode()
 }
 
 function setDownloadDisabled(label = "下载图像") {
@@ -6960,7 +9125,9 @@ function setDownloadDisabled(label = "下载图像") {
   refs.downloadButton.removeAttribute("href")
   refs.downloadButton.removeAttribute("download")
   refs.downloadButton.classList.remove("download-ready-logo")
+  refs.downloadButton.dataset.professionalLabel = label
   refs.downloadButton.textContent = label
+  updateResultActionLabelsForMode()
 }
 
 function setDownloadPendingLogo() {
@@ -7003,6 +9170,7 @@ function updateResultActionSurface() {
     refs.versionHistoryPanel?.classList.add("hidden")
   }
   updateOriginalDownloadButton()
+  updateSimpleResultSurface()
 }
 
 function selectResultCandidate(index, { persist = true } = {}) {
@@ -7012,6 +9180,11 @@ function selectResultCandidate(index, { persist = true } = {}) {
     return
   }
 
+  const previousIndex = state.selectedCandidateIndex
+  if (previousIndex !== index) {
+    state.copyrightRiskRequestSeq += 1
+    state.textFidelityRequestSeq += 1
+  }
   state.selectedCandidateIndex = index
   refs.resultImage.src = imageSource
   refs.resultImage.classList.add("visible")
@@ -7035,15 +9208,65 @@ function selectResultCandidate(index, { persist = true } = {}) {
   }
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
+  setError("")
+  const cachedReview = state.candidateReviewStates[index] || null
+  const cachedRisk = normalizeRestoredReviewState(cachedReview?.copyrightRisk, "copyright")
+  const cachedFidelity = normalizeRestoredReviewState(cachedReview?.textFidelity, "text")
+  const needsReview = reviewStatusNeedsRetry(cachedReview?.copyrightRisk)
+    || reviewStatusNeedsRetry(cachedReview?.textFidelity)
+  state.checkedCandidateIndex = cachedRisk || cachedFidelity ? index : null
+  if (cachedRisk) {
+    setRiskPanel(cachedRisk.status, cachedRisk.text, { hidden: cachedRisk.hidden, candidateIndex: index })
+  } else {
+    setRiskPanel("未检查", `候选 ${index + 1} 尚未进行版权风险检查。`)
+  }
+  if (cachedFidelity) {
+    setTextFidelityPanel(cachedFidelity.status, cachedFidelity.text, {
+      hidden: cachedFidelity.hidden,
+      candidateIndex: index,
+    })
+  } else {
+    setTextFidelityPanel("未检查", `候选 ${index + 1} 尚未进行文字一致性检查。`)
+  }
   setGalleryEditorMeta(candidate)
   updateSelectedCandidateStorageText(candidate)
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   updatePreviewAvailability()
   updateResultActionSurface()
+  const reviewPayload = needsReview ? reviewPayloadForCandidate() : null
+  if (reviewPayload) {
+    void Promise.allSettled([
+      checkCopyrightRisk(reviewPayload),
+      checkTextFidelity(reviewPayload),
+    ])
+  }
   if (persist) {
     scheduleWorkspacePersist()
   }
+}
+
+function retrySelectedCandidateReview() {
+  if (state.isBusy || !state.resultPreview?.src) {
+    return
+  }
+  const reviewPayload = reviewPayloadForCandidate()
+  if (!reviewPayload) {
+    setStatusMessage("当前结果缺少可复用的检查上下文。")
+    return
+  }
+  const candidateIndex = state.selectedCandidateIndex ?? 0
+  state.candidateReviewStates = Object.fromEntries(
+    Object.entries(state.candidateReviewStates).filter(([index]) => Number(index) !== candidateIndex)
+  )
+  state.checkedCandidateIndex = candidateIndex
+  setError("")
+  setRiskPanel("等待检查", "正在重新准备版权风险检查。", { candidateIndex })
+  setTextFidelityPanel("等待检查", "正在重新准备文字一致性检查。", { candidateIndex })
+  void Promise.allSettled([
+    checkCopyrightRisk(reviewPayload),
+    checkTextFidelity(reviewPayload),
+  ])
 }
 
 function renderResultCandidates() {
@@ -7163,6 +9386,11 @@ async function setResult(payload, durationMs, requestSource = null) {
   state.resultGenerationSeq = resultGenerationSeq
   state.resultCandidates = enrichedCandidates
   state.selectedCandidateIndex = 0
+  state.checkedCandidateIndex = 0
+  state.candidateReviewStates = {}
+  setRiskPanel("等待检查", "正在准备当前结果的版权风险检查。", { candidateIndex: 0 })
+  setTextFidelityPanel("等待检查", "正在准备当前结果的文字一致性检查。", { candidateIndex: 0 })
+  setError("")
   const isTransformMode = ["edit", "variant", "reference"].includes(payload.mode)
   refs.resultPreviewLabel.textContent = payload.mode === "variant"
     ? "延展后"
@@ -7178,8 +9406,19 @@ async function setResult(payload, durationMs, requestSource = null) {
   refs.resultPrompt.textContent = displayedPrompt
   state.lastResultModel = payload.model || ""
   state.lastResultMode = payload.mode || null
+  state.lastReviewPayload = {
+    prompt: displayedPrompt,
+    mode: state.lastResultMode,
+    model: state.lastResultModel,
+    size: payload.size || "",
+    text_contract: structuredClone(payload.text_contract || payload.textContract || {}),
+  }
   applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durationMs)
+  rememberAnonymousGalleryResult(firstCandidate, payload, imageSource)
 
+  if (state.lastResultImage && (isTransformMode || payload.mode === "generate")) {
+    invalidateLatestFileReadChannel(FILE_READ_CHANNELS.editImage)
+  }
   if (isTransformMode && getAssetDisplaySrc(requestSource)) {
     state.currentComparisonSource = cloneImageAsset(requestSource)
     applySourcePreview(requestSource, payload.mode === "variant" ? "延展前" : "编辑前")
@@ -7219,13 +9458,19 @@ async function setResult(payload, durationMs, requestSource = null) {
         : payload.mode === "itinerary"
           ? "行程路线"
           : "生成"
-  const metaParts = [metaLabel, payload.model]
-  if (payload.transport === "responses-image") {
-    metaParts.push("Responses")
-  } else if (payload.transport === "images-edit") {
-    metaParts.push("Images Edit")
-  } else if (payload.transport === "images-generate") {
-    metaParts.push("Images Gen")
+  const metaParts = [metaLabel]
+  if (canViewExecutionDetails()) {
+    metaParts.push(payload.model)
+    if (payload.transport === "responses-image") {
+      metaParts.push("Responses")
+    } else if (payload.transport === "images-edit") {
+      metaParts.push("Images Edit")
+    } else if (payload.transport === "images-generate") {
+      metaParts.push("Images Gen")
+    }
+    if (payload.reasoning_effort) {
+      metaParts.push(`reasoning=${payload.reasoning_effort}`)
+    }
   }
   if (payload.logo_requested) {
     metaParts.push("6 人游 LOGO")
@@ -7246,6 +9491,11 @@ async function setResult(payload, durationMs, requestSource = null) {
   if (actualSize) {
     metaParts.push(`实际 ${actualSize}`)
   }
+  if (payload.image_size_normalized && payload.upstream_actual_size) {
+    // 上游没按目标尺寸返回、但比例接近时服务端会等比放大到目标画布；
+    // 放大补不回细节，用户需要知道这张图的"原生"分辨率。
+    metaParts.push(`上游原始 ${payload.upstream_actual_size} 已放大`)
+  }
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   const compositionMessage = payload.composition?.message || ""
   if (payload.mode === "itinerary" && compositionMessage) {
@@ -7265,6 +9515,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   }
   updateFeedbackSelection(null)
   setFeedbackStatus("等待评价")
+  refs.shareResultPanel?.classList.add("hidden")
   renderResultCandidates()
   updateFeedbackPanelVisibility()
   refs.logoComposeStatus.textContent = payload.logo_requested ? "原图已显示，正在贴 LOGO" : "未启用"
@@ -7290,9 +9541,17 @@ async function setResult(payload, durationMs, requestSource = null) {
 }
 
 function historySummary(item) {
-  const parts = [item.model]
-  if (item.transport === "responses-image") {
-    parts.push("Responses")
+  const parts = []
+  if (canViewExecutionDetails()) {
+    if (item.model) {
+      parts.push(item.model)
+    }
+    if (item.transport === "responses-image") {
+      parts.push("Responses")
+    }
+    if (item.reasoningEffort) {
+      parts.push(`reasoning=${item.reasoningEffort}`)
+    }
   }
   if (item.logoRequested) {
     parts.push("6 人游 LOGO")
@@ -7357,28 +9616,17 @@ function renderHistory() {
         refs.itineraryThemeSelect.value = item.itineraryTheme || refs.itineraryThemeSelect.value
         refs.itineraryDescriptionInput.value = item.itineraryDescription || item.prompt
         refs.itineraryLogoEnabled.checked = item.logoRequested !== false
-        refs.generateModelInput.value = item.model || refs.generateModelInput.value
         refs.itineraryDescriptionInput.focus()
       } else if (item.mode === "generate" || item.mode === "variant" || item.mode === "reference") {
         setMode("generate")
         setGenerateIntent(item.mode === "variant" ? "variant" : "fresh")
         refs.generatePromptInput.value = item.prompt
-        if (item.transport === "responses-image") {
-          refs.responsesModelInput.value = item.model
-        } else {
-          refs.generateModelInput.value = item.model
-        }
         setGenerateSize(item.size || state.serverConfig.default_size || "1024x1024")
         updatePromptCounters()
         refs.generatePromptInput.focus()
       } else {
         setMode("edit")
         refs.editPromptInput.value = item.prompt
-        if (item.transport === "responses-image") {
-          refs.responsesModelInput.value = item.model
-        } else {
-          refs.editModelInput.value = item.model
-        }
         updatePromptCounters()
         refs.editPromptInput.focus()
       }
@@ -7388,12 +9636,21 @@ function renderHistory() {
 }
 
 function pushHistory(item) {
-  state.history = [item, ...state.history].slice(0, MAX_HISTORY_ITEMS)
-  saveJSON(historyStorageKey(), state.history)
+  const nextHistory = [item, ...state.history].slice(0, MAX_HISTORY_ITEMS)
+  if (!saveJSON(historyStorageKey(), nextHistory)) {
+    setStatusMessage("图片已生成，但浏览器本地存储空间不足，参数历史未保存。")
+    return false
+  }
+  state.history = nextHistory
   renderHistory()
+  return true
 }
 
 async function postJSON(url, payload, options = {}) {
+  const requestUserContextEpoch = Number.isInteger(options.userContextEpoch)
+    ? options.userContextEpoch
+    : state.userContextEpoch
+  ensureUserContextCurrent(requestUserContextEpoch)
   const requestId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`
   const startedAt = performance.now()
   const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS
@@ -7459,6 +9716,7 @@ async function postJSON(url, payload, options = {}) {
         signal: options.signal || controller.signal,
       })
     } catch (error) {
+      ensureUserContextCurrent(requestUserContextEpoch)
       appendDebugLine("fetch 失败", {
         requestId,
         elapsedMs: Math.round(performance.now() - startedAt),
@@ -7469,6 +9727,7 @@ async function postJSON(url, payload, options = {}) {
       throw markFailureUnlessCancelled(translateAbort(error))
     }
 
+    ensureUserContextCurrent(requestUserContextEpoch)
     appendDebugLine("本地服务已返回响应头", {
       requestId,
       status: response.status,
@@ -7480,12 +9739,14 @@ async function postJSON(url, payload, options = {}) {
     try {
       data = await response.json()
     } catch (error) {
+      ensureUserContextCurrent(requestUserContextEpoch)
       if (error.name === "AbortError") {
         throw markFailureUnlessCancelled(translateAbort(error))
       }
       appendDebugLine("响应体不是有效 JSON", { requestId })
       throw markFailureUnlessCancelled(new Error("本地服务返回了无法解析的响应。"))
     }
+    ensureUserContextCurrent(requestUserContextEpoch)
   } finally {
     window.clearTimeout(timeoutId)
     window.clearTimeout(waitingNoticeId)
@@ -7494,6 +9755,7 @@ async function postJSON(url, payload, options = {}) {
     }
   }
 
+  ensureUserContextCurrent(requestUserContextEpoch)
   appendDebugLine("响应 JSON 解析完成", {
     requestId,
     keys: Object.keys(data || {}).join(","),
@@ -7508,7 +9770,8 @@ async function postJSON(url, payload, options = {}) {
       details: data.details || "",
     })
     if (isLocalAuthUnauthorized(response, data)) {
-      enterAuthGate("login", "登录已过期，请重新登录。")
+      handleSessionExpired()
+      ensureUserContextCurrent(requestUserContextEpoch)
     }
     const requestError = new Error(data.error || "请求失败")
     requestError.code = data.code || ""
@@ -7526,6 +9789,7 @@ async function postJSON(url, payload, options = {}) {
 }
 
 async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
+  const requestUserContextEpoch = state.userContextEpoch
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -7539,6 +9803,7 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     })
+    ensureUserContextCurrent(requestUserContextEpoch)
     // 代理/重启期间可能返回 HTML 错误页；裸 response.json() 会把
     // SyntaxError 原文透传到面板上，也会绕过 401 的会话过期处理。
     let data = {}
@@ -7547,15 +9812,24 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
     } catch {
       data = {}
     }
+    ensureUserContextCurrent(requestUserContextEpoch)
     if (!response.ok) {
       if (isLocalAuthUnauthorized(response, data)) {
-        enterAuthGate("login", "登录已过期，请重新登录。")
+        handleSessionExpired()
+        ensureUserContextCurrent(requestUserContextEpoch)
       }
       const requestError = new Error(data.error || "请求失败")
       requestError.details = errorDetailsWithRequestId(data)
       throw requestError
     }
     return data
+  } catch (error) {
+    ensureUserContextCurrent(requestUserContextEpoch)
+    if (error?.name === "AbortError") {
+      // 面板会原样展示 error.message；英文的 abort 原文对使用者没有意义。
+      throw new Error("检查超时，网络或上游响应过慢，可稍后重试。")
+    }
+    throw error
   } finally {
     window.clearTimeout(timeoutId)
   }
@@ -7564,14 +9838,16 @@ async function postJSONSilent(url, payload, timeoutMs = 3 * 60 * 1000) {
 async function checkCopyrightRisk(payload) {
   const riskRequestSeq = state.copyrightRiskRequestSeq += 1
   const resultGenerationSeq = state.resultGenerationSeq
+  const candidateIndex = state.selectedCandidateIndex ?? 0
+  state.checkedCandidateIndex = candidateIndex
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setRiskPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做版权风险提醒。")
+    setRiskPanel("未检查", `未填写 API Key，无法调用${executionReviewServiceLabel()}做版权风险提醒。`, { candidateIndex })
     return
   }
 
-  const selectedCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
-  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, state.selectedCandidateIndex || 0)
+  const selectedCandidate = state.resultCandidates[candidateIndex] || state.resultCandidates[0]
+  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, candidateIndex)
   let sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
   // Results are now served from the saved file URL instead of an inline data
   // URL, so fetch the pixels on demand when we only have a URL.
@@ -7582,6 +9858,9 @@ async function checkCopyrightRisk(payload) {
         return
       }
     } catch (error) {
+      if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
       appendDebugLine("版权检查取图失败", { error: error.message })
     }
   }
@@ -7589,10 +9868,13 @@ async function checkCopyrightRisk(payload) {
   try {
     reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl)
   } catch (error) {
+    if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
     // 图片解码失败时必须复位面板：否则上一张图的“已检查”结论会一直
     // 挂在新图上，看起来像新图已通过检查。
     appendDebugLine("版权检查图片预处理失败", { error: error.message })
-    setRiskPanel("未检查", "当前图片无法解码用于版权检查。")
+    setRiskPanel("未检查", "当前图片无法解码用于版权检查。", { candidateIndex })
     return
   }
   if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
@@ -7607,16 +9889,18 @@ async function checkCopyrightRisk(payload) {
     : []
 
   if (!images.length) {
-    setRiskPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    setRiskPanel("未检查", `当前结果没有可直接发送给${executionReviewServiceLabel()}的图片数据。`, { candidateIndex })
     return
   }
 
-  setRiskPanel("检查中", "正在调用 gpt-5.5 查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。")
+  setRiskPanel("检查中", `正在调用${executionReviewServiceLabel()}查看当前选中结果里的商标、活动标识、Logo、IP 和版权元素风险。`, { candidateIndex })
   try {
     const result = await postJSONSilent("api/copyright-risk", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      api_key: canManageExecutionSettings() ? settings.apiKey || undefined : undefined,
+      endpoint_url: canManageExecutionSettings() ? settings.responsesUrl || undefined : undefined,
+      model: canManageExecutionSettings()
+        ? settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+        : undefined,
       prompt: payload.prompt || state.lastResultPrompt || "",
       context: [
         `模式：${payload.mode || ""}`,
@@ -7629,17 +9913,19 @@ async function checkCopyrightRisk(payload) {
     if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
       return
     }
-    setRiskPanel("已检查", result.risk_text || "未见明显风险，但商用前仍建议确认素材授权链。")
+    setRiskPanel("已检查", result.risk_text || "未见明显风险，但商用前仍建议确认素材授权链。", { candidateIndex })
   } catch (error) {
     if (riskRequestSeq !== state.copyrightRiskRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
       return
     }
     appendDebugLine("版权风险检查失败", { error: error.message })
-    setRiskPanel("检查失败", error.message || "版权风险检查失败，不影响图片生成结果。")
+    setRiskPanel("检查失败", error.message || "版权风险检查失败，不影响图片生成结果。", { candidateIndex })
   }
 }
 
 async function checkTextFidelity(payload) {
+  const candidateIndex = state.selectedCandidateIndex ?? 0
+  state.checkedCandidateIndex = candidateIndex
   const contract = payload.text_contract || payload.textContract || {}
   const required = Array.isArray(contract.required) ? contract.required.filter(Boolean) : []
   const forbidden = Array.isArray(contract.forbidden) ? contract.forbidden.filter(Boolean) : []
@@ -7650,7 +9936,7 @@ async function checkTextFidelity(payload) {
   const editCompare = payload.mode === "edit" && Boolean(state.currentComparisonSource)
   const fidelityPrompt = payload.prompt || state.lastResultPrompt || ""
   if (!required.length && !forbidden.length && !editCompare && !fidelityPrompt.trim()) {
-    setTextFidelityPanel("未检查", "当前提示词没有可核对的上屏文案。", { hidden: true })
+    setTextFidelityPanel("未检查", "当前提示词没有可核对的上屏文案。", { hidden: true, candidateIndex })
     return
   }
 
@@ -7658,12 +9944,12 @@ async function checkTextFidelity(payload) {
   const resultGenerationSeq = state.resultGenerationSeq
   const settings = getSettings()
   if (!settings.apiKey && !state.serverConfig?.has_default_api_key) {
-    setTextFidelityPanel("未检查", "未填写 API Key，无法调用 gpt-5.5 做文字一致性检查。")
+    setTextFidelityPanel("未检查", `未填写 API Key，无法调用${executionReviewServiceLabel()}做文字一致性检查。`, { candidateIndex })
     return
   }
 
-  const selectedCandidate = state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0]
-  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, state.selectedCandidateIndex || 0)
+  const selectedCandidate = state.resultCandidates[candidateIndex] || state.resultCandidates[0]
+  const selectedAsset = selectedCandidate?.asset || candidateAsset(selectedCandidate || {}, payload, candidateIndex)
   let sourceDataUrl = selectedAsset?.dataUrl || selectedCandidate?.image_data_url || ""
   if (!sourceDataUrl && selectedAsset) {
     try {
@@ -7672,6 +9958,9 @@ async function checkTextFidelity(payload) {
         return
       }
     } catch (error) {
+      if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
       appendDebugLine("文字一致性检查取图失败", { error: error.message })
     }
   }
@@ -7681,8 +9970,11 @@ async function checkTextFidelity(payload) {
   try {
     reviewDataUrl = await downscaleDataUrlForRisk(sourceDataUrl, fidelityMaxEdge, 0.95)
   } catch (error) {
+    if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+      return
+    }
     appendDebugLine("文字一致性检查缩略图失败", { error: error.message })
-    setTextFidelityPanel("检查失败", error.message || "文字一致性检查无法读取结果图。")
+    setTextFidelityPanel("检查失败", error.message || "文字一致性检查无法读取结果图。", { candidateIndex })
     return
   }
   if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
@@ -7697,7 +9989,7 @@ async function checkTextFidelity(payload) {
     : []
 
   if (!images.length) {
-    setTextFidelityPanel("未检查", "当前结果没有可直接发送给 gpt-5.5 的图片数据。")
+    setTextFidelityPanel("未检查", `当前结果没有可直接发送给${executionReviewServiceLabel()}的图片数据。`, { candidateIndex })
     return
   }
 
@@ -7718,18 +10010,23 @@ async function checkTextFidelity(payload) {
         })
       }
     } catch (error) {
+      if (fidelityRequestSeq !== state.textFidelityRequestSeq || resultGenerationSeq !== state.resultGenerationSeq) {
+        return
+      }
       appendDebugLine("文字一致性检查读取编辑前图失败，退回单图检查", { error: error.message })
     }
   }
 
   setTextFidelityPanel("检查中", images.length >= 2
     ? "正在对比编辑前后的画面文字，未要求修改的部分必须逐字保留。"
-    : "正在核对成图中文字是否逐字匹配用户输入。")
+    : "正在核对成图中文字是否逐字匹配用户输入。", { candidateIndex })
   try {
     const result = await postJSONSilent("api/text-fidelity", {
-      api_key: settings.apiKey,
-      endpoint_url: settings.responsesUrl,
-      model: settings.responsesModel || state.serverConfig?.default_responses_model || "gpt-5.5",
+      api_key: canManageExecutionSettings() ? settings.apiKey || undefined : undefined,
+      endpoint_url: canManageExecutionSettings() ? settings.responsesUrl || undefined : undefined,
+      model: canManageExecutionSettings()
+        ? settings.responsesModel || state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
+        : undefined,
       prompt: fidelityPrompt,
       context: [
         `模式：${payload.mode || ""}`,
@@ -7743,9 +10040,9 @@ async function checkTextFidelity(payload) {
       return
     }
     if (result.passed) {
-      setTextFidelityPanel("文字通过", result.fidelity_text || "文字一致性检查通过。")
+      setTextFidelityPanel("文字通过", result.fidelity_text || "文字一致性检查通过。", { candidateIndex })
     } else {
-      setTextFidelityPanel("文字需复核", result.fidelity_text || "文字一致性检查未通过。")
+      setTextFidelityPanel("文字需复核", result.fidelity_text || "文字一致性检查未通过。", { candidateIndex })
       setError("文字一致性检查未通过：请复核成图文字，必要时再次编辑或重生成。")
     }
   } catch (error) {
@@ -7753,7 +10050,7 @@ async function checkTextFidelity(payload) {
       return
     }
     appendDebugLine("文字一致性检查失败", { error: error.message })
-    setTextFidelityPanel("检查失败", error.message || "文字一致性检查失败，不影响图片生成结果。")
+    setTextFidelityPanel("检查失败", error.message || "文字一致性检查失败，不影响图片生成结果。", { candidateIndex })
   }
 }
 
@@ -7869,35 +10166,6 @@ function createOfficialLogoCanvas(image) {
   return logoCanvas
 }
 
-function calculateRegionComplexity(ctx, region) {
-  const x = Math.max(0, Math.floor(region.x))
-  const y = Math.max(0, Math.floor(region.y))
-  const width = Math.max(1, Math.min(ctx.canvas.width - x, Math.floor(region.width)))
-  const height = Math.max(1, Math.min(ctx.canvas.height - y, Math.floor(region.height)))
-  const sampleWidth = Math.max(1, Math.min(24, width))
-  const sampleHeight = Math.max(1, Math.min(12, height))
-  const imageData = ctx.getImageData(x, y, width, height)
-  let total = 0
-  let count = 0
-  let previous = null
-  for (let sy = 0; sy < sampleHeight; sy += 1) {
-    const py = Math.min(height - 1, Math.floor((sy / sampleHeight) * height))
-    for (let sx = 0; sx < sampleWidth; sx += 1) {
-      const px = Math.min(width - 1, Math.floor((sx / sampleWidth) * width))
-      const index = (py * width + px) * 4
-      const luminance = 0.2126 * imageData.data[index]
-        + 0.7152 * imageData.data[index + 1]
-        + 0.0722 * imageData.data[index + 2]
-      if (previous !== null) {
-        total += Math.abs(luminance - previous)
-        count += 1
-      }
-      previous = luminance
-    }
-  }
-  return count ? total / count : 0
-}
-
 async function loadCompanyLogoCanvas() {
   if (state.companyLogoCanvas) {
     return state.companyLogoCanvas
@@ -7931,17 +10199,11 @@ function calculateLogoPlacement(canvas, logoCanvas) {
   if (!ctx) {
     return candidates[0]
   }
-  return candidates
-    .map((placement) => ({
-      placement,
-      complexity: calculateRegionComplexity(ctx, {
-        x: placement.x,
-        y: placement.y,
-        width: placement.width,
-        height: placement.height,
-      }),
-    }))
-    .sort((left, right) => left.complexity - right.complexity)[0]?.placement || candidates[0]
+  const scoredCandidates = candidates.map((placement) => ({
+    placement,
+    score: calculateLogoPlacementScore(ctx, canvas, placement),
+  }))
+  return chooseLogoPlacement(scoredCandidates) || candidates[0]
 }
 
 function drawCanvasWithHighQuality(ctx, canvas, width, height) {
@@ -8172,39 +10434,48 @@ function validateClientImageFile(file) {
   }
 }
 
-async function useImageFile(file) {
+async function useImageFile(file, { commitGuard = null } = {}) {
   validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
+  const image = await loadImageElement(dataUrl, "无法读取待编辑图片。")
+  commitGuard?.()
   setEditImage(
     {
       name: file.name,
       type: file.type,
       dataUrl,
+      width: image.naturalWidth || image.width,
+      height: image.naturalHeight || image.height,
       origin: "upload",
       description: `${file.name} · ${formatFileSize(file.size)}`,
     },
-    { showPreview: true, previewLabel: "输入图" },
+    { showPreview: true, previewLabel: "输入图", preserveLatestFileRead: true },
   )
 }
 
-async function useMaskFile(file) {
+async function useMaskFile(file, { commitGuard = null } = {}) {
   validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
-  setEditMaskImage({
-    name: file.name,
-    type: file.type,
-    dataUrl,
-    origin: "mask",
-    description: `${file.name} · ${formatFileSize(file.size)}`,
-  })
+  commitGuard?.()
+  setEditMaskImage(
+    {
+      name: file.name,
+      type: file.type,
+      dataUrl,
+      origin: "mask",
+      description: `${file.name} · ${formatFileSize(file.size)}`,
+    },
+    { preserveLatestFileRead: true },
+  )
 }
 
-async function useGenerateReferenceFile(file) {
+async function useGenerateReferenceFile(file, { commitGuard = null } = {}) {
   validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
+  commitGuard?.()
   setGenerateReferenceImage(
     {
       name: file.name,
@@ -8213,14 +10484,15 @@ async function useGenerateReferenceFile(file) {
       origin: "reference",
       description: `${file.name} · ${formatFileSize(file.size)}`,
     },
-    { showPreview: true },
+    { showPreview: true, preserveLatestFileRead: true },
   )
 }
 
-async function useStyleReferenceFile(file) {
+async function useStyleReferenceFile(file, { commitGuard = null } = {}) {
   validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
+  commitGuard?.()
   setStyleReferenceImage(
     {
       name: file.name,
@@ -8230,14 +10502,15 @@ async function useStyleReferenceFile(file) {
       role: "style_template",
       description: `${file.name} · ${formatFileSize(file.size)}`,
     },
-    { showPreview: true },
+    { showPreview: true, preserveLatestFileRead: true },
   )
 }
 
-async function useMaterialReferenceFile(file) {
+async function useMaterialReferenceFile(file, { commitGuard = null } = {}) {
   validateClientImageFile(file)
 
   const dataUrl = await fileToDataURL(file)
+  commitGuard?.()
   setMaterialReferenceImage(
     {
       name: file.name,
@@ -8247,11 +10520,12 @@ async function useMaterialReferenceFile(file) {
       role: "material",
       description: `${file.name} · ${formatFileSize(file.size)}`,
     },
-    { showPreview: true },
+    { showPreview: true, preserveLatestFileRead: true },
   )
 }
 
 async function submitVariantGenerate({ resetLog = true } = {}) {
+  const userContextEpoch = state.userContextEpoch
   if (resetLog) {
     resetDebugLog("点击生成按钮：基于当前结果延展")
   }
@@ -8259,16 +10533,11 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   let prompt = promptPlan.originalPrompt
   let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
   let confirmedPrompt = ""
   let imageOptions
   let size
-  let forceResponsesForSize = false
-  let model = imageModel
-  let transport = "images-edit"
 
   if (!state.lastResultImage) {
     appendDebugLine("参数校验失败：没有可延展的结果图")
@@ -8286,26 +10555,18 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   try {
     imageOptions = getOpenAIImageOptions()
     size = getGenerateSize()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
-    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
     return
   }
 
-  if (useResponses || forceResponsesForSize) {
-    if (!requireResponsesSettings(settings, forceResponsesForSize ? "基于当前结果延展的精确海报尺寸" : "基于当前结果延展")) {
-      return
-    }
-  } else if (!requireEditSettings(settings, "基于当前结果延展")) {
-    return
-  }
-
   const confirmedText = await confirmPromptBeforeRun("generate", effectivePrompt)
   if (confirmedText === null) {
     appendDebugLine("用户取消延展提示词确认")
+    return
+  }
+  if (!userContextIsCurrent(userContextEpoch)) {
     return
   }
   prompt = confirmedText
@@ -8328,7 +10589,6 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
   previewPendingResult({
     mode: "variant",
     prompt,
-    model,
     size,
     sourceName: requestSource.name || "最新结果",
   })
@@ -8339,6 +10599,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
     setProgressPhase("preparing", "读取参考图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
     ensureRequestNotCancelled()
+    ensureUserContextCurrent(userContextEpoch)
     const sourceGeneratedImageId = requestSource.generatedImageId || state.lastResultImage?.generatedImageId || null
     const imagePart = {
       name: requestSource.name,
@@ -8346,62 +10607,39 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       data_url: requestSourceDataUrl,
       role: "source_image",
     }
-    let result
-    if (useResponses || forceResponsesForSize) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      result = await postJSON("api/responses-image", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        model,
-        mode: "variant",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        ...sourceImageIdentityFields(requestSource),
-        size,
-        ...imageOptions,
-        image: imagePart,
-        images: [imagePart],
-      }, {
-        mode: "variant",
-        progressLabel: "提交延展请求",
-        waitingLabel: "等待上游延展",
-      })
-    } else {
-      result = await postJSON("api/edit", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt: confirmedPrompt,
-        model,
-        mode: "variant",
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        ...sourceImageIdentityFields(requestSource),
-        size,
-        ...imageOptions,
-        image: imagePart,
-        images: [imagePart],
-      }, {
-        mode: "variant",
-        progressLabel: "提交延展请求",
-        waitingLabel: "等待上游延展",
-      })
-    }
-    await setResult({ ...result, mode: "variant", prompt, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSource)
+    const result = await postJSON("api/image-jobs", {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
+      mode: "variant",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      source_generated_image_id: sourceGeneratedImageId,
+      text_contract: textContract,
+      ...sourceImageIdentityFields(requestSource),
+      size,
+      ...imageOptions,
+      image: imagePart,
+      images: [imagePart],
+      advanced: imageJobAdvancedOptions(settings, "variant"),
+    }, {
+      mode: "variant",
+      progressLabel: "提交延展请求",
+      waitingLabel: "等待上游延展",
+      userContextEpoch,
+    })
+    ensureUserContextCurrent(userContextEpoch)
+    await setResult({ ...result, mode: "variant", prompt, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "variant",
       prompt,
-      model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -8410,6 +10648,9 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return
+    }
     appendDebugLine("延展请求失败", { error: error.message })
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
@@ -8417,8 +10658,10 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
     }
   } finally {
-    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
-    state.activeRequestCancelled = false
+    if (userContextIsCurrent(userContextEpoch)) {
+      setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+      state.activeRequestCancelled = false
+    }
   }
 }
 
@@ -8432,6 +10675,7 @@ async function submitGenerate() {
     await submitVariantGenerate({ resetLog: false })
     return
   }
+  const userContextEpoch = state.userContextEpoch
 
   resetDebugLog("点击生成按钮：生成图片")
 
@@ -8439,8 +10683,6 @@ async function submitGenerate() {
   let prompt = promptPlan.originalPrompt
   let effectivePrompt = promptPlan.effectivePrompt
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2"
   const referenceImages = generateReferenceImages()
   const dualReference = hasStyleTransferReferences()
   const logoRequested = shouldUseCompanyLogo()
@@ -8448,10 +10690,6 @@ async function submitGenerate() {
   let baseRequestPrompt = dualReference ? styleTransferPrompt(effectivePrompt) : effectivePrompt
   let confirmedPrompt = ""
   const requiresReferenceTransport = referenceImages.length > 0
-  let forceResponsesForSize = false
-  let referenceViaResponses = useResponses
-  let textGenerateViaResponses = useResponses
-  let model = imageModel
 
   if (!prompt.trim()) {
     appendDebugLine("参数校验失败：生成提示词为空")
@@ -8476,38 +10714,18 @@ async function submitGenerate() {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
     sampleCount = referenceImages.length ? 1 : getGenerateSampleCount()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    referenceViaResponses = useResponses || forceResponsesForSize
-    textGenerateViaResponses = useResponses || forceResponsesForSize
-    model = referenceImages.length && referenceViaResponses ? settings.responsesModel : imageModel
   } catch (error) {
     appendDebugLine("参数校验失败：OpenAI 图片参数无效", { error: error.message })
     setError(error.message, error.details)
     return
   }
 
-  if (requiresReferenceTransport) {
-    if (referenceViaResponses) {
-      if (!requireResponsesSettings(settings, "带参考图生成")) {
-        return
-      }
-    } else if (!requireEditSettings(settings, "带参考图生成")) {
-      return
-    }
-  } else if (textGenerateViaResponses) {
-    if (!requireResponsesSettings(settings, "精确海报尺寸生成")) {
-      return
-    }
-  } else if (!settings.generateUrl) {
-    appendDebugLine("参数校验失败：生成接口 URL 为空")
-    setError("请先填写生成接口 URL。")
-    refs.generateUrlInput.focus()
-    return
-  }
-
   const confirmedText = await confirmPromptBeforeRun("generate", effectivePrompt)
   if (confirmedText === null) {
     appendDebugLine("用户取消生成提示词确认")
+    return
+  }
+  if (!userContextIsCurrent(userContextEpoch)) {
     return
   }
   prompt = confirmedText
@@ -8533,7 +10751,6 @@ async function submitGenerate() {
   previewPendingResult({
     mode: requiresReferenceTransport ? "reference" : "generate",
     prompt,
-    model,
     size,
     sourceName: dualReference ? "风格模板 + 素材图" : referenceImages[0]?.name || "",
   })
@@ -8549,6 +10766,7 @@ async function submitGenerate() {
       for (const referenceSource of requestSources) {
         const referenceDataUrl = await ensureAssetDataUrl(referenceSource)
         ensureRequestNotCancelled()
+        ensureUserContextCurrent(userContextEpoch)
         referenceParts.push({
           name: referenceSource.name,
           type: referenceSource.type || inferMimeFromDataUrl(referenceDataUrl),
@@ -8560,74 +10778,41 @@ async function submitGenerate() {
       const referencePart = requestParts.at(-1)
       const referenceLineageSource = requestSources.at(-1)
       const sourceGeneratedImageId = referenceLineageSource?.generatedImageId || null
-      const transport = referenceViaResponses ? "responses-image" : "images-edit"
       const referenceSampleCount = dualReference ? STYLE_TRANSFER_SAMPLE_COUNT : sampleCount
-      let result
-      if (referenceViaResponses) {
-        if (forceResponsesForSize && !useResponses) {
-          appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-        }
-        result = await postJSON("api/responses-image", {
-          api_key: settings.apiKey,
-          endpoint_url: settings.responsesUrl,
-          prompt: confirmedPrompt,
-          original_prompt: prompt,
-          prompt_mode: promptPlan.promptMode,
-          recipe_id: promptPlan.recipe?.id || "",
-          recipe_version: promptPlan.recipe?.version || "",
-          model: settings.responsesModel,
-          mode: "reference",
-          transport: "responses-image",
-          allow_inline_fallback: true,
-          logo_requested: logoRequested,
-          itinerary_id: itineraryId,
-          source_generated_image_id: sourceGeneratedImageId,
-          text_contract: textContract,
-          ...sourceImageIdentityFields(referenceLineageSource),
-          sample_count: referenceSampleCount,
-          size,
-          ...imageOptions,
-          image: referencePart,
-          images: requestParts,
-        }, {
-          mode: "reference",
-          progressLabel: "提交参考图生成",
-          waitingLabel: "等待上游参考生成",
-        })
-      } else {
-        result = await postJSON("api/edit", {
-          api_key: settings.apiKey,
-          endpoint_url: settings.editUrl,
-          prompt: confirmedPrompt,
-          original_prompt: prompt,
-          prompt_mode: promptPlan.promptMode,
-          recipe_id: promptPlan.recipe?.id || "",
-          recipe_version: promptPlan.recipe?.version || "",
-          model: imageModel,
-          mode: "reference",
-          logo_requested: logoRequested,
-          itinerary_id: itineraryId,
-          source_generated_image_id: sourceGeneratedImageId,
-          text_contract: textContract,
-          ...sourceImageIdentityFields(referenceLineageSource),
-          sample_count: referenceSampleCount,
-          size,
-          ...imageOptions,
-          image: referencePart,
-          images: requestParts,
-        }, {
-          mode: "reference",
-          progressLabel: "提交参考图生成",
-          waitingLabel: "等待上游参考生成",
-        })
-      }
-      await setResult({ ...result, mode: "reference", prompt, size, transport, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
+      const result = await postJSON("api/image-jobs", {
+        prompt: confirmedPrompt,
+        original_prompt: prompt,
+        prompt_mode: promptPlan.promptMode,
+        recipe_id: promptPlan.recipe?.id || "",
+        recipe_version: promptPlan.recipe?.version || "",
+        mode: "reference",
+        allow_inline_fallback: true,
+        logo_requested: logoRequested,
+        itinerary_id: itineraryId,
+        source_generated_image_id: sourceGeneratedImageId,
+        text_contract: textContract,
+        ...sourceImageIdentityFields(referenceLineageSource),
+        sample_count: referenceSampleCount,
+        size,
+        ...imageOptions,
+        image: referencePart,
+        images: requestParts,
+        advanced: imageJobAdvancedOptions(settings, "reference"),
+      }, {
+        mode: "reference",
+        progressLabel: "提交参考图生成",
+        waitingLabel: "等待上游参考生成",
+        userContextEpoch,
+      })
+      ensureUserContextCurrent(userContextEpoch)
+      await setResult({ ...result, mode: "reference", prompt, size, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
       rememberRegenerationRequest("generate", requestSnapshot)
       pushHistory({
         mode: "reference",
         prompt,
-        model: referenceViaResponses ? settings.responsesModel : imageModel,
-        transport,
+        model: result.model,
+        transport: result.transport,
+        reasoningEffort: result.reasoning_effort,
         logoRequested,
         itineraryId,
         sourceGeneratedImageId,
@@ -8640,65 +10825,36 @@ async function submitGenerate() {
       return
     }
 
-    let result
-    let transport = "images-generate"
-    if (textGenerateViaResponses) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      transport = "responses-image"
-      result = await postJSON("api/responses-image", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        original_prompt: prompt,
-        prompt_mode: promptPlan.promptMode,
-        recipe_id: promptPlan.recipe?.id || "",
-        recipe_version: promptPlan.recipe?.version || "",
-        model: settings.responsesModel,
-        mode: "generate",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        text_contract: textContract,
-        sample_count: sampleCount,
-        size,
-        ...imageOptions,
-      }, {
-        mode: "generate",
-        progressLabel: "提交 Responses 生成请求",
-        waitingLabel: "等待 Responses 图像流",
-      })
-    } else {
-      result = await postJSON("api/generate", {
-        api_key: settings.apiKey,
-        endpoint_url: settings.generateUrl,
-        prompt: confirmedPrompt,
-        original_prompt: prompt,
-        prompt_mode: promptPlan.promptMode,
-        recipe_id: promptPlan.recipe?.id || "",
-        recipe_version: promptPlan.recipe?.version || "",
-        model,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        text_contract: textContract,
-        sample_count: sampleCount,
-        size,
-        ...imageOptions,
-      }, {
-        mode: "generate",
-        progressLabel: "提交生成请求",
-        waitingLabel: "等待上游生成",
-      })
-    }
+    const result = await postJSON("api/image-jobs", {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      prompt_mode: promptPlan.promptMode,
+      recipe_id: promptPlan.recipe?.id || "",
+      recipe_version: promptPlan.recipe?.version || "",
+      mode: "generate",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      text_contract: textContract,
+      sample_count: sampleCount,
+      size,
+      ...imageOptions,
+      advanced: imageJobAdvancedOptions(settings, "generate"),
+    }, {
+      mode: "generate",
+      progressLabel: "提交生成请求",
+      waitingLabel: "等待图像生成",
+      userContextEpoch,
+    })
+    ensureUserContextCurrent(userContextEpoch)
     await setResult({ ...result, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
       prompt,
-      model: textGenerateViaResponses ? settings.responsesModel : model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -8708,6 +10864,9 @@ async function submitGenerate() {
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return
+    }
     appendDebugLine("生成请求失败", { error: error.message })
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
@@ -8715,8 +10874,10 @@ async function submitGenerate() {
       setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
     }
   } finally {
-    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
-    state.activeRequestCancelled = false
+    if (userContextIsCurrent(userContextEpoch)) {
+      setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+      state.activeRequestCancelled = false
+    }
   }
 }
 
@@ -8724,19 +10885,15 @@ async function submitEdit() {
   if (state.isBusy) {
     return
   }
+  const userContextEpoch = state.userContextEpoch
   resetDebugLog("点击编辑按钮：编辑图片")
   let prompt = refs.editPromptInput.value
   const settings = getSettings()
-  const useResponses = settings.imageTransport === "responses"
-  const imageModel = (refs.editModelInput.value.trim() || refs.generateModelInput.value.trim() || state.serverConfig?.default_model || "gpt-image-2")
   const logoRequested = shouldUseCompanyLogo()
   const itineraryId = getExplicitItineraryId()
   let confirmedPrompt = ""
   let size
   let imageOptions
-  let forceResponsesForSize = false
-  let model = imageModel
-  let transport = "images-edit"
 
   if (!state.editImage) {
     appendDebugLine("参数校验失败：没有可编辑图片")
@@ -8754,26 +10911,18 @@ async function submitEdit() {
   try {
     size = getGenerateSize()
     imageOptions = getOpenAIImageOptions()
-    forceResponsesForSize = shouldUseResponsesForSelectedSize(size)
-    model = useResponses || forceResponsesForSize ? settings.responsesModel : imageModel
-    transport = useResponses || forceResponsesForSize ? "responses-image" : "images-edit"
   } catch (error) {
     appendDebugLine("参数校验失败：编辑图片参数无效", { error: error.message })
     setError(error.message, error.details)
     return
   }
 
-  if (useResponses || forceResponsesForSize) {
-    if (!requireResponsesSettings(settings, forceResponsesForSize ? "精确海报尺寸编辑" : "编辑图像")) {
-      return
-    }
-  } else if (!requireEditSettings(settings, "编辑图像")) {
-    return
-  }
-
   const confirmedText = await confirmPromptBeforeRun("edit", prompt)
   if (confirmedText === null) {
     appendDebugLine("用户取消编辑提示词确认")
+    return
+  }
+  if (!userContextIsCurrent(userContextEpoch)) {
     return
   }
   prompt = confirmedText
@@ -8792,7 +10941,6 @@ async function submitEdit() {
   previewPendingResult({
     mode: "edit",
     prompt,
-    model,
     size,
     sourceName: requestSource.name || "输入图",
   })
@@ -8803,6 +10951,7 @@ async function submitEdit() {
     setProgressPhase("preparing", "读取输入图")
     const requestSourceDataUrl = await ensureAssetDataUrl(requestSource)
     ensureRequestNotCancelled()
+    ensureUserContextCurrent(userContextEpoch)
     const sourceGeneratedImageId = requestSource.generatedImageId || state.editImage?.generatedImageId || null
     const imagePart = {
       name: requestSource.name,
@@ -8816,6 +10965,7 @@ async function submitEdit() {
       appendDebugLine("读取编辑 mask")
       const maskDataUrl = await ensureAssetDataUrl(state.editMaskImage)
       ensureRequestNotCancelled()
+      ensureUserContextCurrent(userContextEpoch)
       maskPart = {
         name: state.editMaskImage.name,
         type: state.editMaskImage.type || inferMimeFromDataUrl(maskDataUrl),
@@ -8823,70 +10973,40 @@ async function submitEdit() {
       }
     }
 
-    let result
-    if (useResponses || forceResponsesForSize) {
-      if (forceResponsesForSize && !useResponses) {
-        appendDebugLine("非标准海报尺寸编辑改走 Responses 图像工具，避免 Images API 静默降级尺寸", { size })
-      }
-      const requestPayload = {
-        api_key: settings.apiKey,
-        endpoint_url: settings.responsesUrl,
-        prompt: confirmedPrompt,
-        model,
-        mode: "edit",
-        transport: "responses-image",
-        allow_inline_fallback: true,
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        size,
-        ...imageOptions,
-        ...sourceImageIdentityFields(requestSource),
-        image: imagePart,
-        images: [imagePart],
-      }
-      if (maskPart) {
-        requestPayload.mask = maskPart
-      }
-      result = await postJSON("api/responses-image", requestPayload, {
-        mode: "edit",
-        progressLabel: "提交 Responses 编辑请求",
-        waitingLabel: "等待 Responses 图像流",
-      })
-    } else {
-      const requestPayload = {
-        api_key: settings.apiKey,
-        endpoint_url: settings.editUrl,
-        prompt: confirmedPrompt,
-        model: imageModel,
-        mode: "edit",
-        logo_requested: logoRequested,
-        itinerary_id: itineraryId,
-        source_generated_image_id: sourceGeneratedImageId,
-        text_contract: textContract,
-        size,
-        ...imageOptions,
-        ...sourceImageIdentityFields(requestSource),
-        image: imagePart,
-        images: [imagePart],
-      }
-      if (maskPart) {
-        requestPayload.mask = maskPart
-      }
-      result = await postJSON("api/edit", requestPayload, {
-        mode: "edit",
-        progressLabel: "提交编辑请求",
-        waitingLabel: "等待上游编辑",
-      })
+    const requestPayload = {
+      prompt: confirmedPrompt,
+      original_prompt: prompt,
+      mode: "edit",
+      allow_inline_fallback: true,
+      logo_requested: logoRequested,
+      itinerary_id: itineraryId,
+      source_generated_image_id: sourceGeneratedImageId,
+      text_contract: textContract,
+      size,
+      ...imageOptions,
+      ...sourceImageIdentityFields(requestSource),
+      image: imagePart,
+      images: [imagePart],
+      advanced: imageJobAdvancedOptions(settings, "edit"),
     }
-    await setResult({ ...result, mode: "edit", prompt, transport, logo_requested: logoRequested, size, text_contract: textContract }, performance.now() - startedAt, requestSource)
+    if (maskPart) {
+      requestPayload.mask = maskPart
+    }
+    const result = await postJSON("api/image-jobs", requestPayload, {
+      mode: "edit",
+      progressLabel: "提交编辑请求",
+      waitingLabel: "等待图像编辑",
+      userContextEpoch,
+    })
+    ensureUserContextCurrent(userContextEpoch)
+    await setResult({ ...result, mode: "edit", prompt, logo_requested: logoRequested, size, text_contract: textContract }, performance.now() - startedAt, requestSource)
     rememberRegenerationRequest("edit", requestSnapshot)
     pushHistory({
       mode: "edit",
       prompt,
-      model,
-      transport,
+      model: result.model,
+      transport: result.transport,
+      reasoningEffort: result.reasoning_effort,
       logoRequested,
       itineraryId,
       textContract,
@@ -8895,6 +11015,9 @@ async function submitEdit() {
       createdAt: new Date().toISOString(),
     })
   } catch (error) {
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return
+    }
     appendDebugLine("编辑请求失败", { error: error.message })
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
@@ -8902,9 +11025,60 @@ async function submitEdit() {
       setError(error.cancelled ? "已中断生成，可以修改提示词后重新提交。" : error.message, error.details)
     }
   } finally {
-    setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
-    state.activeRequestCancelled = false
+    if (userContextIsCurrent(userContextEpoch)) {
+      setBusy(false, "空闲", { cancelled: state.activeRequestCancelled })
+      state.activeRequestCancelled = false
+    }
   }
+}
+
+function workspaceHasDraftContent() {
+  const itineraryTitle = refs.itineraryTitleInput?.value.trim() || ""
+  const itinerarySubtitle = refs.itinerarySubtitleInput?.value.trim() || ""
+  return Boolean(
+    refs.generatePromptInput?.value.trim()
+    || refs.editPromptInput?.value.trim()
+    || simpleDraftHasContent()
+    || Object.values(creativeBriefSnapshot()).some(Boolean)
+    || state.lastResultImage
+    || state.resultPreview?.src
+    || state.editImage
+    || state.editMaskImage
+    || state.generateReferenceImage
+    || state.styleReferenceImage
+    || state.materialReferenceImage
+    || (itineraryTitle
+      && ![DEFAULT_ITINERARY_TITLE, SANITIZED_ITINERARY_EXAMPLE_TITLE].includes(itineraryTitle))
+    || (itinerarySubtitle
+      && ![DEFAULT_ITINERARY_SUBTITLE, SANITIZED_ITINERARY_EXAMPLE_SUBTITLE].includes(itinerarySubtitle))
+    || (refs.itineraryDescriptionInput
+      && refs.itineraryDescriptionInput.value.trim()
+      && refs.itineraryDescriptionInput.value.trim() !== AI_ITINERARY_EXAMPLE.trim()),
+  )
+}
+
+function confirmClearGenerateForm() {
+  if (
+    (refs.generatePromptInput?.value.trim()
+      || Object.values(creativeBriefSnapshot()).some(Boolean)
+      || state.generateReferenceImage
+      || state.styleReferenceImage
+      || state.materialReferenceImage)
+    && !window.confirm("确定清空提示词和参考图吗？")
+  ) {
+    return
+  }
+  clearGenerateForm()
+}
+
+function confirmClearEditForm() {
+  if (
+    (refs.editPromptInput?.value.trim() || state.editImage || state.editMaskImage)
+    && !window.confirm("确定清空编辑提示词和输入图吗？")
+  ) {
+    return
+  }
+  clearEditForm()
 }
 
 function clearGenerateForm() {
@@ -8958,6 +11132,21 @@ function continueEditingFromResult() {
     return
   }
 
+  if (state.uiMode === "simple") {
+    const editRecipe = simpleSceneRecipes().find((recipe) => recipe.scene_card?.submit?.kind === "edit")
+    setMode("edit", { autoLoadLatest: false })
+    if (!useLastResultAsEditSource({ showPreview: true })) {
+      return
+    }
+    if (editRecipe) {
+      openSimpleScenario(editRecipe.id)
+      updateSimpleFieldValue("image", state.editImage?.name || "当前成品")
+      renderSimpleScenarioForm()
+      refs.simpleScenarioForm?.scrollIntoView({ block: "start" })
+    }
+    return
+  }
+
   setMode("edit")
   useLastResultAsEditSource({ showPreview: true, focus: true })
 }
@@ -8968,6 +11157,11 @@ function startVariantFromResult() {
     return
   }
 
+  if (state.uiMode === "simple") {
+    void rerunLastGeneration()
+    return
+  }
+
   setMode("generate")
   setGenerateIntent("variant")
   refs.generatePromptInput.focus()
@@ -8975,7 +11169,16 @@ function startVariantFromResult() {
 }
 
 async function handleClipboardPaste(event) {
-  if (state.activeMode !== "edit") {
+  const simplePaste = state.uiMode === "simple"
+  if (!simplePaste && state.activeMode !== "edit") {
+    return
+  }
+  // 聊天/反馈等弹窗打开时，用户是想往弹窗里贴图，不能被这里
+  // 截走去替换编辑源图。
+  if (document.body.classList.contains("modal-open") || document.body.classList.contains("auth-gate")) {
+    return
+  }
+  if (state.isBusy) {
     return
   }
 
@@ -8991,9 +11194,21 @@ async function handleClipboardPaste(event) {
   }
 
   event.preventDefault()
+  if (simplePaste) {
+    const recipe = simpleSceneRecipe()
+    const imageField = recipe?.scene_card?.fields?.find((field) => field.kind === "image")
+    if (recipe && imageField && state.simpleDraft.view === "form") {
+      await useSimpleImageFieldFile(recipe, imageField, file)
+    } else {
+      await handleSimpleEditImageFile(file)
+    }
+    return
+  }
   try {
-    await useImageFile(file)
-    setError("")
+    const applied = await runLatestFileRead(FILE_READ_CHANNELS.editImage, file, useImageFile)
+    if (applied) {
+      setError("")
+    }
   } catch (error) {
     setError(error.message, error.details)
   }
@@ -9009,11 +11224,20 @@ function bindPreviewTrigger(element, target) {
   })
 }
 
-function bindReferenceDropzone(dropzone, input, handler) {
-  dropzone.addEventListener("click", () => input.click())
+function bindReferenceDropzone(dropzone, input, handler, channel) {
+  bindLatestFileReadControls(dropzone, input, channel)
+  dropzone.addEventListener("click", () => {
+    if (latestFileReadInteractionBlocked(channel)) {
+      return
+    }
+    input.click()
+  })
   dropzone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault()
+      if (latestFileReadInteractionBlocked(channel)) {
+        return
+      }
       input.click()
     }
   })
@@ -9026,8 +11250,10 @@ function bindReferenceDropzone(dropzone, input, handler) {
       return
     }
     try {
-      await handler(file)
-      setError("")
+      const applied = await runLatestFileRead(channel, file, handler)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9051,13 +11277,18 @@ function bindReferenceDropzone(dropzone, input, handler) {
 
   dropzone.addEventListener("drop", async (event) => {
     dropzone.classList.remove("dragging")
+    if (latestFileReadInteractionBlocked(channel)) {
+      return
+    }
     const file = event.dataTransfer?.files?.[0]
     if (!file) {
       return
     }
     try {
-      await handler(file)
-      setError("")
+      const applied = await runLatestFileRead(channel, file, handler)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9093,6 +11324,11 @@ function bindEvents() {
     if (!button) {
       return
     }
+    const username = button.dataset.username || "该用户"
+    // 硬删除会级联清掉该用户的生成记录，误点一次就无法恢复。
+    if (!window.confirm(`确定删除用户"${username}"吗？删除后该用户的账号和生成记录无法恢复。`)) {
+      return
+    }
     void deleteAdminUser(button.dataset.userId)
   })
   refs.passwordResetRequestsList?.addEventListener("submit", (event) => {
@@ -9105,12 +11341,29 @@ function bindEvents() {
   })
 
   refs.newTaskButton.addEventListener("click", () => {
+    if (state.isBusy) {
+      // 生成中清空工作台会和迟到的结果互相覆盖，直接忽略。
+      return
+    }
+    if (
+      workspaceHasDraftContent()
+      && !window.confirm("新建任务会清空当前提示词、参考图和结果。确定继续吗？")
+    ) {
+      return
+    }
+    cancelPendingPromptConfirmation()
     clearResult()
     clearGenerateForm()
     clearEditForm()
     resetItineraryMapExample()
     setMode("generate", { autoLoadLatest: false })
-    refs.generatePromptInput.focus()
+    if (state.uiMode === "simple") {
+      state.simpleDraft = { scenarioId: "", view: "picker", values: {} }
+      showSimpleScenarioPicker()
+      renderSimpleScenarioCards()
+    } else {
+      refs.generatePromptInput.focus()
+    }
     setError("")
   })
   refs.saveSettingsButton.addEventListener("click", saveSettings)
@@ -9120,15 +11373,40 @@ function bindEvents() {
       scheduleWorkspacePersist()
     })
   })
+  refs.responsesReasoningEffortSelect?.addEventListener("change", scheduleWorkspacePersist)
   refs.clearHistoryButton.addEventListener("click", () => {
-    state.history = []
-    saveJSON(historyStorageKey(), state.history)
+    if (!state.history.length) {
+      return
+    }
+    if (!window.confirm(`确定清空全部 ${state.history.length} 条参数历史吗？清空后无法恢复。`)) {
+      return
+    }
+    const nextHistory = []
+    if (!saveJSON(historyStorageKey(), nextHistory)) {
+      setError("浏览器本地存储写入失败，参数历史未清空。")
+      return
+    }
+    state.history = nextHistory
     renderHistory()
   })
 
   refs.generateTab.addEventListener("click", () => setMode("generate"))
   refs.editTab.addEventListener("click", () => setMode("edit"))
   refs.itineraryTab?.addEventListener("click", () => setMode("itinerary"))
+  refs.uiModeToggleButton?.addEventListener("click", () => {
+    applyUiMode(state.uiMode === "simple" ? "professional" : "simple", { persist: true, sync: true })
+  })
+  refs.simpleBackButton?.addEventListener("click", showSimpleScenarioPicker)
+  refs.simpleScenarioForm?.addEventListener("submit", submitSimpleScenario)
+  refs.simpleEditImageInput?.addEventListener("change", () => {
+    const file = refs.simpleEditImageInput.files?.[0]
+    refs.simpleEditImageInput.value = ""
+    if (file) {
+      void handleSimpleEditImageFile(file)
+    }
+  })
+  refs.simpleChecklistCloseButton?.addEventListener("click", dismissSimpleChecklist)
+  refs.simpleGalleryRefreshButton?.addEventListener("click", refreshGallery)
   refs.navModeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setMode(button.dataset.mode || "generate")
@@ -9151,8 +11429,8 @@ function bindEvents() {
   refs.generateButton.addEventListener("click", submitGenerate)
   refs.editButton.addEventListener("click", submitEdit)
   refs.cancelRequestButton?.addEventListener("click", cancelActiveRequest)
-  refs.clearGenerateButton.addEventListener("click", clearGenerateForm)
-  refs.clearEditButton.addEventListener("click", clearEditForm)
+  refs.clearGenerateButton.addEventListener("click", confirmClearGenerateForm)
+  refs.clearEditButton.addEventListener("click", confirmClearEditForm)
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
   refs.startVariantButton.addEventListener("click", startVariantFromResult)
   refs.previewCompareButton.addEventListener("click", () => openPreview("result", "compare"))
@@ -9165,6 +11443,52 @@ function bindEvents() {
     if (selectedGeneratedImageId()) {
       showSharePanel()
       refs.shareRecipientSearchInput?.focus()
+    }
+  })
+  refs.simpleShareResultButton?.addEventListener("click", () => {
+    if (!selectedGeneratedImageId()) {
+      return
+    }
+    showSharePanel()
+    refs.shareRecipientSearchInput?.focus()
+    markSimpleChecklistStep(3)
+  })
+  refs.simpleMoreActionsButton?.addEventListener("click", () => {
+    const open = refs.simpleMoreActionsMenu?.classList.contains("hidden") !== false
+    refs.simpleMoreActionsMenu?.classList.toggle("hidden", !open)
+    refs.simpleMoreActionsButton?.setAttribute("aria-expanded", String(open))
+    if (open) {
+      updateSimpleMoreActionStates()
+      refs.simpleMoreActionsMenu?.querySelector("button:not(:disabled)")?.focus()
+    }
+  })
+  refs.simpleMoreActionsMenu?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-simple-result-action]") : null
+    if (!target || target.disabled) {
+      return
+    }
+    const commands = {
+      original: refs.downloadOriginalButton,
+      versions: refs.showVersionsButton,
+      group: refs.saveGroupAssetButton,
+      copy: refs.copyPromptButton,
+    }
+    if (target.dataset.simpleResultAction === "organize") {
+      refs.galleryEditorPanel?.classList.remove("hidden")
+      refs.galleryEditorPanel?.scrollIntoView({ block: "nearest" })
+    } else {
+      commands[target.dataset.simpleResultAction]?.click()
+    }
+    closeSimpleMoreActions()
+  })
+  refs.downloadButton?.addEventListener("click", () => {
+    if (state.uiMode === "simple" && !refs.downloadButton.classList.contains("disabled-link")) {
+      markSimpleChecklistStep(3)
+    }
+  })
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest?.(".simple-more-actions")) {
+      closeSimpleMoreActions()
     }
   })
   refs.downloadOriginalButton?.addEventListener("click", () => {
@@ -9191,6 +11515,7 @@ function bindEvents() {
       void submitResultFeedback(button.dataset.rating)
     })
   })
+  refs.retryResultReviewButton?.addEventListener("click", retrySelectedCandidateReview)
   refs.submitBadFeedbackButton?.addEventListener("click", submitBadFeedbackReason)
   refs.regenerateFromBadFeedbackButton?.addEventListener("click", regenerateFromBadFeedback)
   refs.submitShareResultButton?.addEventListener("click", submitShareResult)
@@ -9433,8 +11758,18 @@ function bindEvents() {
     }
   })
 
-  bindReferenceDropzone(refs.styleReferenceDropzone, refs.styleReferenceInput, useStyleReferenceFile)
-  bindReferenceDropzone(refs.materialReferenceDropzone, refs.materialReferenceInput, useMaterialReferenceFile)
+  bindReferenceDropzone(
+    refs.styleReferenceDropzone,
+    refs.styleReferenceInput,
+    useStyleReferenceFile,
+    FILE_READ_CHANNELS.styleReference,
+  )
+  bindReferenceDropzone(
+    refs.materialReferenceDropzone,
+    refs.materialReferenceInput,
+    useMaterialReferenceFile,
+    FILE_READ_CHANNELS.materialReference,
+  )
   refs.clearGenerateReferenceButton.addEventListener("click", (event) => {
     event.stopPropagation()
     clearGenerateReferenceImage()
@@ -9448,13 +11783,22 @@ function bindEvents() {
     }
   })
 
-  refs.imageDropzone.addEventListener("click", () => refs.editImageInput.click())
+  refs.imageDropzone.addEventListener("click", () => {
+    if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editImage)) {
+      return
+    }
+    refs.editImageInput.click()
+  })
   refs.imageDropzone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault()
+      if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editImage)) {
+        return
+      }
       refs.editImageInput.click()
     }
   })
+  bindLatestFileReadControls(refs.imageDropzone, refs.editImageInput, FILE_READ_CHANNELS.editImage)
   refs.editImageInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0]
     event.target.value = ""
@@ -9462,8 +11806,10 @@ function bindEvents() {
       return
     }
     try {
-      await useImageFile(file)
-      setError("")
+      const applied = await runLatestFileRead(FILE_READ_CHANNELS.editImage, file, useImageFile)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9473,14 +11819,21 @@ function bindEvents() {
     if (event.target === refs.clearEditMaskButton) {
       return
     }
+    if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editMask)) {
+      return
+    }
     refs.editMaskInput.click()
   })
   refs.maskDropzone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault()
+      if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editMask)) {
+        return
+      }
       refs.editMaskInput.click()
     }
   })
+  bindLatestFileReadControls(refs.maskDropzone, refs.editMaskInput, FILE_READ_CHANNELS.editMask)
   refs.editMaskInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0]
     event.target.value = ""
@@ -9488,8 +11841,10 @@ function bindEvents() {
       return
     }
     try {
-      await useMaskFile(file)
-      setError("")
+      const applied = await runLatestFileRead(FILE_READ_CHANNELS.editMask, file, useMaskFile)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9518,13 +11873,18 @@ function bindEvents() {
 
   refs.maskDropzone.addEventListener("drop", async (event) => {
     refs.maskDropzone.classList.remove("dragging")
+    if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editMask)) {
+      return
+    }
     const file = event.dataTransfer?.files?.[0]
     if (!file) {
       return
     }
     try {
-      await useMaskFile(file)
-      setError("")
+      const applied = await runLatestFileRead(FILE_READ_CHANNELS.editMask, file, useMaskFile)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9548,13 +11908,18 @@ function bindEvents() {
 
   refs.imageDropzone.addEventListener("drop", async (event) => {
     refs.imageDropzone.classList.remove("dragging")
+    if (latestFileReadInteractionBlocked(FILE_READ_CHANNELS.editImage)) {
+      return
+    }
     const file = event.dataTransfer?.files?.[0]
     if (!file) {
       return
     }
     try {
-      await useImageFile(file)
-      setError("")
+      const applied = await runLatestFileRead(FILE_READ_CHANNELS.editImage, file, useImageFile)
+      if (applied) {
+        setError("")
+      }
     } catch (error) {
       setError(error.message, error.details)
     }
@@ -9622,7 +11987,7 @@ function bindEvents() {
       return
     }
     if (event.key === "Escape" && refs.promptConfirmModal && !refs.promptConfirmModal.classList.contains("hidden")) {
-      refs.cancelPromptConfirmButton?.click()
+      cancelPendingPromptConfirmation()
       return
     }
 
@@ -9631,28 +11996,35 @@ function bindEvents() {
       return
     }
 
-    if (event.altKey && event.key === "1") {
+    // macOS 上 Option+数字输出 "¡/™/£"，event.key 永远不等于数字，
+    // 用物理键位 event.code 判断两个平台才都能命中。
+    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit1") {
       event.preventDefault()
       setMode("generate")
       refs.generatePromptInput.focus()
       return
     }
 
-    if (event.altKey && event.key === "2") {
+    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit2") {
       event.preventDefault()
       setMode("edit")
       refs.editPromptInput.focus()
       return
     }
 
-    if (event.altKey && event.key === "3") {
+    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit3") {
       event.preventDefault()
       setMode("itinerary")
       refs.itineraryDescriptionInput?.focus()
       return
     }
 
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    if (
+      (event.metaKey || event.ctrlKey)
+      && event.key.toLowerCase() === "k"
+      && !isTypingElement(document.activeElement)
+      && refs.promptConfirmModal?.classList.contains("hidden")
+    ) {
       event.preventDefault()
       refs.newTaskButton.click()
       return
@@ -9670,7 +12042,7 @@ function bindEvents() {
 
   window.addEventListener("paste", handleClipboardPaste)
   window.addEventListener("pagehide", () => {
-    if (!state.persistenceReady) {
+    if (!state.persistenceReady || state.suppressSettingsPersist) {
       return
     }
     saveWorkspaceSnapshot(createWorkspaceSnapshot()).catch((error) => {
@@ -9685,12 +12057,17 @@ async function init() {
 
   try {
     const response = await fetch("api/config", { cache: "no-store", headers: proxyTokenHeaders() })
+    if (!response.ok) {
+      // 500 的 JSON 错误体不能被当成配置存下来。
+      throw new Error(`config ${response.status}`)
+    }
     state.serverConfig = await response.json()
   } catch {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
     state.serverConfig = {
       default_model: "gpt-image-2",
-      default_responses_model: "gpt-5.5",
+      default_responses_model: DEFAULT_RESPONSES_MODEL,
+      default_responses_reasoning_effort: DEFAULT_RESPONSES_REASONING_EFFORT,
       default_size: "1088x2240",
       generate_url: "",
       edit_url: "",
@@ -9701,7 +12078,6 @@ async function init() {
 
   bindEvents()
   initializeRailDisclosure()
-  await refreshOrgUnits()
   const resetToken = getPasswordResetTokenFromUrl()
   if (resetToken) {
     enterPasswordResetConfirm(resetToken)
@@ -9713,6 +12089,7 @@ async function init() {
   }
 
   await startAuthenticatedApp()
+  enterAppShell()
 }
 
 async function startAuthenticatedApp() {
@@ -9729,12 +12106,19 @@ async function startAuthenticatedApp() {
     return
   }
 
+  resetWorkspaceForUserScope()
+  state.galleryItems = []
+  state.generationJobs = []
+  state.lastRegenerationRequest = null
+  renderSimpleGalleryItems([])
   state.history = loadJSON(historyStorageKey(), [])
   loadTeamChatRecentDms()
   renderHistory()
   await loadUserPreferences()
+  await refreshOrgUnits()
   loadSettings()
   await loadPromptRecipes()
+  await refreshImageStats()
   updateLogoControlUI()
   updatePromptCounters()
   updatePromptModeUI()
@@ -9750,6 +12134,8 @@ async function startAuthenticatedApp() {
     setMode("generate", { autoLoadLatest: false })
   }
 
+  initializeUiMode()
+
   state.persistenceReady = true
   state.appReady = true
   state.lastReadyUserId = state.currentUser?.id ?? null
@@ -9757,7 +12143,6 @@ async function startAuthenticatedApp() {
   startTeamChatPolling()
   await refreshTeamChatUnread()
   await refreshUsageSummary()
-  await refreshImageStats()
   await refreshGenerationJobs()
   scheduleWorkspacePersist()
 }

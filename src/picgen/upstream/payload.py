@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
+import re
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -10,7 +12,16 @@ from typing import Any
 from urllib import parse
 
 from ..errors import APIError
-from ..storage import detect_image_mime, save_output_image
+from ..logging_config import get_logger, log_event
+from ..storage import (
+    detect_image_dimensions,
+    detect_image_mime,
+    is_decodable_image,
+    resize_image_to_exact_size,
+    save_output_image,
+)
+
+logger = get_logger("picgen.upstream.payload")
 
 _IMAGE_OPTION_KEYS = ("quality", "background", "output_format", "output_compression", "moderation")
 _RAW_IMAGE_KEYS = frozenset({"b64_json", "result", "partial_image_b64", "image_b64"})
@@ -125,6 +136,58 @@ def request_metadata(payload: dict[str, Any], *, size: str | None) -> dict[str, 
     return metadata
 
 
+def _parse_exact_size(size: Any) -> tuple[int, int] | None:
+    if not isinstance(size, str):
+        return None
+    match = re.fullmatch(r"\s*(\d{2,5})x(\d{2,5})\s*", size)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+# cover-fit 归一化只允许"接近等比"的偏差：超过这个比例说明上游换了画幅，
+# 裁剪会切掉海报边缘的文字/装饰（实测出现过 1088x2240 请求返回 1024x1536，
+# cover 裁剪要砍掉 27% 宽度），这种情况必须保留原图走尺寸不一致提示。
+_NORMALIZE_MAX_ASPECT_DELTA = 0.03
+
+
+def _normalize_strict_size_image(
+    image_bytes: bytes,
+    image_mime: str,
+    save_context: dict[str, Any],
+) -> tuple[bytes, str, dict[str, object]]:
+    if not save_context.get("strict_size"):
+        return image_bytes, image_mime, {}
+    target_size = _parse_exact_size(save_context.get("requested_size") or save_context.get("size"))
+    if target_size is None:
+        return image_bytes, image_mime, {}
+    source_size = detect_image_dimensions(image_bytes)
+    if source_size is not None and source_size[1] > 0:
+        source_ratio = source_size[0] / source_size[1]
+        target_ratio = target_size[0] / target_size[1]
+        if abs(source_ratio - target_ratio) / target_ratio > _NORMALIZE_MAX_ASPECT_DELTA:
+            log_event(
+                logger,
+                logging.WARNING,
+                "image_size_normalize_skipped_aspect",
+                target_size=f"{target_size[0]}x{target_size[1]}",
+                source_size=f"{source_size[0]}x{source_size[1]}",
+            )
+            return image_bytes, image_mime, {}
+    try:
+        return resize_image_to_exact_size(image_bytes, image_mime, target_size)
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "image_size_normalize_failed",
+            target_size=f"{target_size[0]}x{target_size[1]}",
+            image_mime=image_mime,
+            error=type(exc).__name__,
+        )
+        return image_bytes, image_mime, {}
+
+
 def compact_raw_response(payload: Any) -> Any:
     """Return a preview-safe copy of an upstream payload.
 
@@ -233,13 +296,35 @@ def _image_item_payload(
             image_bytes = base64.b64decode(base64_image, validate=True)
             image_mime = detect_image_mime(image_bytes)
         except (ValueError, binascii.Error):
-            image_mime = "application/octet-stream"
-        image_data_url = f"data:{image_mime};base64,{base64_image}"
-    elif isinstance(image_url, str) and image_url and fetch_remote is not None:
+            image_bytes = None
+            image_mime = None
+        if image_mime == "application/octet-stream" or (
+            image_bytes is not None and not is_decodable_image(image_bytes)
+        ):
+            image_bytes = None
+            image_mime = None
+        if image_bytes is not None and image_mime is not None:
+            image_data_url = f"data:{image_mime};base64,{base64_image}"
+        else:
+            log_event(logger, logging.WARNING, "invalid_upstream_image_candidate", candidate_index=index)
+    if image_bytes is None and isinstance(image_url, str) and image_url and fetch_remote is not None:
         image_bytes, image_mime = fetch_remote(image_url, user_agent)
+        detected_mime = detect_image_mime(image_bytes)
+        if detected_mime == "application/octet-stream" or not is_decodable_image(image_bytes):
+            log_event(logger, logging.WARNING, "invalid_upstream_image_candidate", candidate_index=index)
+            image_bytes = None
+            image_mime = None
+            image_url = None
+        else:
+            image_mime = detected_mime
 
     saved_payload: dict[str, Any] = {}
     if image_bytes and image_mime:
+        image_bytes, image_mime, normalization_metadata = _normalize_strict_size_image(
+            image_bytes,
+            image_mime,
+            save_context,
+        )
         saved_payload = save_output_image(
             data_dir=data_dir,
             outputs_dir=outputs_dir,
@@ -254,8 +339,10 @@ def _image_item_payload(
                 "upstream_created": upstream.get("created"),
                 "upstream_image_url": image_url,
                 "saved_image_mime": image_mime,
+                **normalization_metadata,
             },
         )
+        saved_payload.update(normalization_metadata)
 
     # When the image is persisted, the browser loads it from the saved file URL
     # (same-origin), so we drop the multi-megabyte inline data URL to keep

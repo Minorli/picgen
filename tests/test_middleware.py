@@ -6,7 +6,7 @@ from collections import deque
 import pytest
 
 from picgen.main import _retention_loop
-from picgen.middleware import RateLimitMiddleware
+from picgen.middleware import RateLimitMiddleware, _single_message_receive
 
 
 def _dummy_app(scope, receive, send):  # pragma: no cover - never invoked in these tests
@@ -28,6 +28,14 @@ def test_rate_limit_sweep_drops_idle_clients() -> None:
     assert "old" not in mw._burst_buckets
     assert "recent" in mw._minute_buckets
     assert "recent" in mw._burst_buckets
+
+
+async def test_replayed_disconnect_remains_disconnected() -> None:
+    message = {"type": "http.disconnect"}
+    receive = _single_message_receive(message)
+
+    assert await receive() == message
+    assert await receive() == message
 
 
 async def test_retention_loop_noop_when_disabled(settings_factory) -> None:

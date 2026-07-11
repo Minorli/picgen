@@ -105,9 +105,10 @@ def test_generation_success_alert_text_is_detailed_and_redacted() -> None:
     assert "尺寸：1088x2240" in content
     assert "图片数：2" in content
     assert "LOGO：请求=是 / 成品=否" in content
-    assert "files/outputs/20260606/alice-generate.png" in content
+    assert "files/outputs/20260606/alice-generate.png" not in content
     assert "sk-secret123456" not in content
-    assert "api_key=***" in content
+    assert "api_key=***" not in content
+    assert "生成一张旅行海报" not in content
     assert len(content) <= 3900
 
 
@@ -139,7 +140,7 @@ def test_final_image_success_alert_text_has_distinct_title() -> None:
     assert "接口：POST /api/final-images" in content
     assert "模式：itinerary" in content
     assert "LOGO：请求=是 / 成品=是" in content
-    assert "files/outputs/20260608/alice-itinerary-logo.png" in content
+    assert "files/outputs/20260608/alice-itinerary-logo.png" not in content
 
 
 def test_password_reset_email_uses_smtp_without_leaking_secret(settings_factory, monkeypatch) -> None:

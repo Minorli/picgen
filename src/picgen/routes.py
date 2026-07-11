@@ -11,12 +11,15 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import anyio
 from fastapi import APIRouter, Body, Depends, Request
@@ -26,13 +29,19 @@ from . import __version__
 from .auth import (
     TEAM_CHAT_BOT_NAME,
     AccountLockedError,
+    AuthSession,
     AuthStore,
     AuthUser,
     InvalidCredentialsError,
     UserExistsError,
     normalize_username,
 )
-from .config import Settings
+from .config import (
+    DEFAULT_RESPONSES_MODEL,
+    LEGACY_DEFAULT_RESPONSES_MODEL,
+    RESPONSES_REASONING_EFFORTS,
+    Settings,
+)
 from .errors import APIError
 from .itinerary_map import (
     apply_itinerary_coordinate_estimates,
@@ -83,6 +92,8 @@ from .schemas import (
     GroupAnnouncementRequest,
     GroupSavedItemRequest,
     HealthResponse,
+    ImageJobAdvancedOptions,
+    ImageJobRequest,
     ImageResultResponse,
     ItineraryMapPlanRequest,
     ItineraryMapRenderRequest,
@@ -92,13 +103,16 @@ from .schemas import (
     ReadinessResponse,
     ResponsesImageRequest,
     ShareResultRequest,
+    SimpleChecklistPreferenceRequest,
     TeamChatMessageRequest,
     TeamChatReadRequest,
     TextFidelityRequest,
     UserPreferencesRequest,
     UserProfileRequest,
+    UserUiModeRequest,
 )
 from .storage import (
+    MAX_EXACT_IMAGE_PIXELS,
     detect_image_mime,
     extension_for_mime,
     resolve_storage_path,
@@ -130,6 +144,17 @@ def _strict_requested_size(size: str | None) -> bool:
     return bool(cleaned and cleaned != "auto")
 
 
+def _details_text(payload: object) -> str:
+    # APIError.details 是 str：直接塞 dict 会以 Python repr 展示给用户，
+    # 也绕过其它错误路径统一的 4000 字截断。
+    if isinstance(payload, str):
+        return payload[:4000]
+    try:
+        return json.dumps(payload, ensure_ascii=False)[:4000]
+    except (TypeError, ValueError):
+        return repr(payload)[:4000]
+
+
 def _parse_requested_size(size: Any) -> tuple[int, int] | None:
     if not isinstance(size, str):
         return None
@@ -139,11 +164,301 @@ def _parse_requested_size(size: Any) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+MAX_EXACT_IMAGE_SIDE = 3840
+MAX_EXACT_IMAGE_ASPECT_RATIO = 3.0
+
+
+def _validate_exact_image_size(size: str | None) -> tuple[int, int] | None:
+    cleaned = (size or "").strip()
+    if not cleaned or cleaned == "auto":
+        return None
+    parsed = _parse_requested_size(cleaned)
+    if parsed is None:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "图片尺寸必须是 auto 或 WIDTHxHEIGHT 格式",
+            code="invalid_parameter",
+        )
+    width, height = parsed
+    if width > MAX_EXACT_IMAGE_SIDE or height > MAX_EXACT_IMAGE_SIDE:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸单边不能超过 {MAX_EXACT_IMAGE_SIDE} 像素",
+            code="invalid_parameter",
+        )
+    if width * height > MAX_EXACT_IMAGE_PIXELS:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸总像素不能超过 {MAX_EXACT_IMAGE_PIXELS}",
+            code="invalid_parameter",
+        )
+    aspect_ratio = max(width / height, height / width)
+    if aspect_ratio > MAX_EXACT_IMAGE_ASPECT_RATIO:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            f"图片尺寸宽高比不能超过 {MAX_EXACT_IMAGE_ASPECT_RATIO:g}:1",
+            code="invalid_parameter",
+        )
+    return parsed
+
+
 def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
     quality = str(options.get("quality") or "").strip()
     if quality and quality != "auto":
         return options
     return {**options, "quality": "high"}
+
+
+def _responses_reasoning_options(
+    model: str,
+    reasoning_effort: str,
+) -> dict[str, dict[str, str]]:
+    if model.strip() != DEFAULT_RESPONSES_MODEL:
+        return {}
+    return {"reasoning": {"effort": reasoning_effort}}
+
+
+def _normalize_responses_model(
+    model: str,
+    *,
+    default_model: str,
+) -> str:
+    normalized_model = model.strip()
+    normalized_default = default_model.strip()
+    if not normalized_default or normalized_default == LEGACY_DEFAULT_RESPONSES_MODEL:
+        normalized_default = DEFAULT_RESPONSES_MODEL
+    if not normalized_model or normalized_model == LEGACY_DEFAULT_RESPONSES_MODEL:
+        return normalized_default
+    return normalized_model
+
+
+IMAGES_API_EXACT_SIZES = frozenset({"auto", "1024x1024", "1024x1536", "1536x1024"})
+IMAGE_INPUT_MODES = frozenset({"reference", "edit", "variant"})
+USER_EXECUTION_OVERRIDE_FIELDS = frozenset(
+    {"api_key", "endpoint_url", "model", "reasoning_effort"}
+)
+@dataclass(frozen=True)
+class ImageExecutionPlan:
+    transport: str
+    endpoint_url: str
+    model: str
+    api_key: str
+    reasoning_effort: str
+
+
+def _server_managed_execution_payload(
+    payload: dict[str, Any],
+    user: AuthUser | None,
+    settings: Settings,
+) -> dict[str, Any]:
+    if _execution_overrides_allowed(user, settings):
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in USER_EXECUTION_OVERRIDE_FIELDS
+    }
+
+
+def _execution_overrides_allowed(user: AuthUser | None, settings: Settings) -> bool:
+    if user is not None:
+        return user.is_admin
+    return not settings.auth_enabled and settings.allow_anonymous_execution_overrides
+
+
+def _resolve_execution_api_key(
+    *,
+    requested_key: str | None,
+    endpoint_url: str,
+    default_endpoint_url: str,
+    default_api_key: str,
+) -> str:
+    explicit_key = (requested_key or "").strip()
+    is_custom_endpoint = _endpoint_differs(endpoint_url, default_endpoint_url)
+    if is_custom_endpoint and not explicit_key:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "自定义上游接口必须同时提供对应的 API Key",
+            code="bad_request",
+        )
+    return explicit_key or default_api_key.strip()
+
+
+def _endpoint_differs(endpoint_url: str, default_endpoint_url: str) -> bool:
+    return endpoint_url.strip().rstrip("/") != default_endpoint_url.strip().rstrip("/")
+
+
+def _advanced_api_key_for_endpoint(
+    advanced: ImageJobAdvancedOptions | None,
+    *,
+    endpoint_url: str,
+    default_endpoint_url: str,
+    settings: Settings,
+) -> str | None:
+    if advanced is None:
+        return None
+    selected_endpoint_is_custom = _endpoint_differs(endpoint_url, default_endpoint_url)
+    configured_endpoints = (
+        (advanced.generate_url, settings.default_generate_url),
+        (advanced.edit_url, settings.default_edit_url),
+        (advanced.responses_url, settings.default_responses_url),
+    )
+    has_any_custom_endpoint = any(
+        value and _endpoint_differs(value, default_value)
+        for value, default_value in configured_endpoints
+    )
+    if selected_endpoint_is_custom or not has_any_custom_endpoint:
+        return advanced.api_key
+    return None
+
+
+def _validate_advanced_api_key_scope(
+    advanced: ImageJobAdvancedOptions | None,
+    settings: Settings,
+) -> None:
+    if advanced is None or not (advanced.api_key or "").strip():
+        return
+    configured_endpoints = (
+        (advanced.generate_url, settings.default_generate_url, "生成接口 URL"),
+        (advanced.edit_url, settings.default_edit_url, "编辑接口 URL"),
+        (advanced.responses_url, settings.default_responses_url, "Responses 图像接口 URL"),
+    )
+    custom_endpoints = [
+        (value, label)
+        for value, default_value, label in configured_endpoints
+        if value and _endpoint_differs(value, default_value)
+    ]
+    if custom_endpoints:
+        key_endpoints = custom_endpoints
+    elif advanced.preferred_transport == "responses":
+        key_endpoints = [(settings.default_responses_url, "Responses 图像接口 URL")]
+    else:
+        key_endpoints = [
+            (default_value, label)
+            for _, default_value, label in configured_endpoints
+        ]
+
+    origins: set[tuple[str, str, int | None]] = set()
+    for endpoint_url, label in key_endpoints:
+        validated_url = validate_url(endpoint_url, label)
+        parsed = urlsplit(validated_url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise APIError(
+                HTTPStatus.BAD_REQUEST,
+                f"{label} 无效",
+                code="invalid_url",
+            ) from exc
+        if port is None:
+            port = 443 if parsed.scheme.lower() == "https" else 80
+        origins.add((parsed.scheme.lower(), (parsed.hostname or "").lower(), port))
+    if len(origins) > 1:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "一个自定义 API Key 只能用于同一来源的上游接口",
+            code="bad_request",
+        )
+
+
+def _resolve_image_job_transport(
+    *,
+    size: str,
+    mode: str,
+    has_input: bool,
+    preferred_transport: str = "auto",
+) -> str:
+    if preferred_transport == "responses" or size not in IMAGES_API_EXACT_SIZES:
+        return "responses-image"
+    if has_input or mode in IMAGE_INPUT_MODES:
+        return "images-edit"
+    return "images-generate"
+
+
+def _resolve_image_execution_plan(
+    parsed: ImageJobRequest,
+    settings: Settings,
+) -> ImageExecutionPlan:
+    advanced = parsed.advanced
+    _validate_advanced_api_key_scope(advanced, settings)
+    size = (parsed.size or settings.default_size).strip() or settings.default_size
+    has_input = parsed.image is not None or bool(parsed.images)
+    transport = _resolve_image_job_transport(
+        size=size,
+        mode=parsed.mode,
+        has_input=has_input,
+        preferred_transport=advanced.preferred_transport if advanced else "auto",
+    )
+    if transport == "images-generate":
+        endpoint_url = (advanced.generate_url if advanced else None) or settings.default_generate_url
+        return ImageExecutionPlan(
+            transport=transport,
+            endpoint_url=endpoint_url,
+            model=((advanced.images_model if advanced else None) or settings.default_model).strip(),
+            api_key=_resolve_execution_api_key(
+                requested_key=_advanced_api_key_for_endpoint(
+                    advanced,
+                    endpoint_url=endpoint_url,
+                    default_endpoint_url=settings.default_generate_url,
+                    settings=settings,
+                ),
+                endpoint_url=endpoint_url,
+                default_endpoint_url=settings.default_generate_url,
+                default_api_key=settings.default_api_key,
+            ),
+            reasoning_effort="",
+        )
+    if transport == "images-edit":
+        endpoint_url = (advanced.edit_url if advanced else None) or settings.default_edit_url
+        return ImageExecutionPlan(
+            transport=transport,
+            endpoint_url=endpoint_url,
+            model=((advanced.images_model if advanced else None) or settings.default_model).strip(),
+            api_key=_resolve_execution_api_key(
+                requested_key=_advanced_api_key_for_endpoint(
+                    advanced,
+                    endpoint_url=endpoint_url,
+                    default_endpoint_url=settings.default_edit_url,
+                    settings=settings,
+                ),
+                endpoint_url=endpoint_url,
+                default_endpoint_url=settings.default_edit_url,
+                default_api_key=settings.default_api_key,
+            ),
+            reasoning_effort="",
+        )
+    model = _normalize_responses_model(
+        (advanced.responses_model if advanced else None) or "",
+        default_model=settings.default_responses_model,
+    )
+    endpoint_url = (advanced.responses_url if advanced else None) or settings.default_responses_url
+    requested_reasoning_effort = (
+        advanced.reasoning_effort
+        if advanced and advanced.reasoning_effort
+        else settings.default_responses_reasoning_effort
+    )
+    reasoning_effort = (
+        requested_reasoning_effort
+        if _responses_reasoning_options(model, requested_reasoning_effort)
+        else ""
+    )
+    return ImageExecutionPlan(
+        transport=transport,
+        endpoint_url=endpoint_url,
+        model=model,
+        api_key=_resolve_execution_api_key(
+            requested_key=_advanced_api_key_for_endpoint(
+                advanced,
+                endpoint_url=endpoint_url,
+                default_endpoint_url=settings.default_responses_url,
+                settings=settings,
+            ),
+            endpoint_url=endpoint_url,
+            default_endpoint_url=settings.default_responses_url,
+            default_api_key=settings.default_api_key,
+        ),
+        reasoning_effort=reasoning_effort,
+    )
 
 
 JSON_BODY = Body(...)
@@ -305,10 +620,9 @@ async def require_admin_user(user: AuthUser | None = Depends(require_current_use
 def _auth_response(
     *,
     settings: Settings,
-    auth_store: AuthStore,
     user: AuthUser,
+    session: AuthSession,
 ) -> JSONResponse:
-    session = auth_store.create_session(user.id, days=settings.auth_session_days)
     response = JSONResponse({"status": "ok", "user": user.public_dict()})
     response.set_cookie(
         key=settings.auth_cookie_name,
@@ -369,7 +683,7 @@ def _save_user_avatar(
     avatar_dir = settings.data_dir / "avatars"
     avatar_dir.mkdir(parents=True, exist_ok=True)
     prefix = sanitize_filename_prefix(user.username) or f"user-{user.id}"
-    avatar_path = avatar_dir / f"{prefix}-{user.id}{extension_for_mime(image_mime)}"
+    avatar_path = avatar_dir / f"{prefix}-{user.id}-{uuid.uuid4().hex[:12]}{extension_for_mime(image_mime)}"
     fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=avatar_path.suffix, dir=str(avatar_dir))
     temporary_path = Path(tmp_name)
     try:
@@ -382,6 +696,20 @@ def _save_user_avatar(
         temporary_path.unlink(missing_ok=True)
         raise
     return avatar_path, storage_url_for_path(settings.data_dir, avatar_path)
+
+
+def _delete_previous_user_avatar(*, settings: Settings, previous_path: str, new_path: Path) -> None:
+    if not previous_path:
+        return
+    avatar_dir = (settings.data_dir / "avatars").resolve()
+    candidate_path = Path(previous_path)
+    try:
+        resolved_previous = candidate_path.resolve()
+        resolved_previous.relative_to(avatar_dir)
+    except (OSError, ValueError):
+        return
+    if resolved_previous != new_path.resolve():
+        resolved_previous.unlink(missing_ok=True)
 
 
 def _map_geocoding_enabled(settings: Settings) -> bool:
@@ -400,9 +728,10 @@ def _parse_itinerary_size(value: str) -> tuple[int, int]:
     cleaned = (value or ITINERARY_DEFAULT_SIZE).strip() or ITINERARY_DEFAULT_SIZE
     if cleaned.casefold() == ITINERARY_AUTO_SIZE:
         cleaned = ITINERARY_DEFAULT_SIZE
+    cleaned = cleaned.lower()
     if "x" not in cleaned:
         raise APIError(HTTPStatus.BAD_REQUEST, "行程地图尺寸无效", code="invalid_parameter")
-    width_text, height_text = cleaned.lower().split("x", 1)
+    width_text, height_text = cleaned.split("x", 1)
     try:
         width = int(width_text)
         height = int(height_text)
@@ -599,7 +928,11 @@ def _error_mentions_sample_count(exc: APIError) -> bool:
         "param n",
         "value of n",
         "n must",
-        "sample",
+        # 裸 "sample" 会命中 "flagged sample" 这类审核文案，触发一次注定
+        # 失败的全价重试；只认真正指参数名的写法。
+        "sample_count",
+        "sample count",
+        "samples",
         "best_of",
         "num_images",
         "n_images",
@@ -934,7 +1267,10 @@ async def _generate_itinerary_artwork(
     api_key = (parsed.api_key or settings.default_api_key).strip()
     if not api_key:
         return {}
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = _normalize_responses_model(
+        parsed.model,
+        default_model=settings.default_responses_model,
+    )
     width, height = _parse_itinerary_size(output_size)
     # Pure-Python pixel rendering + zlib over a multi-MB canvas takes seconds of
     # CPU; run it in a worker thread so the event loop keeps serving requests.
@@ -969,6 +1305,7 @@ async def _generate_itinerary_artwork(
     upstream_payload: dict[str, Any] = {
         "model": model,
         "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "stream": True,
         "input": [{"role": "user", "content": content}],
         "tools": [tool],
@@ -1036,7 +1373,7 @@ async def _generate_itinerary_artwork(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "路线图生成接口没有返回可保存的图片",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_no_image",
         )
     image_mime = str(saved.get("saved_image_mime") or "")
@@ -1054,7 +1391,7 @@ async def _generate_itinerary_artwork(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "路线图生成接口没有返回可用的底图",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_error",
         )
 
@@ -1225,11 +1562,14 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     if not api_key:
         return plan
 
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = _normalize_responses_model(
+        parsed.model,
+        default_model=settings.default_responses_model,
+    )
     upstream_payload = {
         "model": model,
         "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
-        "reasoning": {"effort": "high"},
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -1301,7 +1641,7 @@ async def handle_itinerary_map_render(
     # where itinerary maps must work like generate/edit do.
     if settings.auth_enabled and user is None:
         raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
-    payload = _ensure_dict(body)
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     parsed = _validate_request(ItineraryMapRenderRequest, payload)
     _ensure_itinerary_request_has_no_restricted_destination(parsed)
     plan = await build_itinerary_map_plan_async(
@@ -1486,6 +1826,7 @@ def create_router() -> APIRouter:
             responses_url=settings.default_responses_url,
             default_model=settings.default_model,
             default_responses_model=settings.default_responses_model,
+            default_responses_reasoning_effort=settings.default_responses_reasoning_effort,
             default_size=settings.default_size,
             has_default_api_key=bool(settings.default_api_key),
             storage_dir=str(settings.outputs_dir),
@@ -1494,6 +1835,8 @@ def create_router() -> APIRouter:
             rate_limit_per_minute=settings.rate_limit_per_minute,
             upstream_timeout_seconds=settings.upstream_timeout_seconds,
             auth_enabled=settings.auth_enabled,
+            self_registration_enabled=settings.self_registration_enabled,
+            allow_anonymous_execution_overrides=settings.allow_anonymous_execution_overrides,
             bug_report_notifications_enabled=admin_notifications_enabled(settings),
             error_alert_notifications_enabled=error_alert_notifications_enabled(settings),
             password_reset_email_enabled=smtp_notifications_enabled(settings)
@@ -1556,16 +1899,29 @@ def create_router() -> APIRouter:
         target_path = _resolve_served_file(settings, relative_path)
         if not target_path.is_file():
             raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
-        if settings.auth_enabled and relative_path.startswith("outputs/") and target_path.suffix.lower() != ".json":
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.record_image_delivery(
+        if settings.auth_enabled and relative_path.startswith("outputs/"):
+            if user is None:  # pragma: no cover - require_current_user enforces this
+                raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
+            authorized = await anyio.to_thread.run_sync(
+                lambda: auth_store.can_user_access_output(
+                    user_id=user.id,
+                    is_admin=user.is_admin,
                     relative_path=relative_path,
-                    user_id=user.id if user else None,
-                    status_code=200,
-                    client_host=request.client.host if request.client else "",
-                    user_agent=request.headers.get("user-agent", ""),
+                    absolute_path=target_path,
                 )
             )
+            if not authorized:
+                raise APIError(HTTPStatus.NOT_FOUND, "文件不存在", code="not_found")
+            if target_path.suffix.lower() != ".json":
+                await anyio.to_thread.run_sync(
+                    lambda: auth_store.record_image_delivery(
+                        relative_path=relative_path,
+                        user_id=user.id,
+                        status_code=200,
+                        client_host=request.client.host if request.client else "",
+                        user_agent=request.headers.get("user-agent", ""),
+                    )
+                )
         # Output filenames embed a UUID, so they are safely immutable. Avatar
         # filenames are deterministic per user (same URL after re-upload) — an
         # immutable year-long cache would show the old avatar forever.
@@ -1584,17 +1940,24 @@ def create_router() -> APIRouter:
         settings: Settings = Depends(get_settings),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> JSONResponse:
+        if not settings.self_registration_enabled:
+            raise APIError(
+                HTTPStatus.FORBIDDEN,
+                "当前不开放自助注册，请联系管理员创建账号。",
+                code="registration_disabled",
+            )
         payload = _ensure_dict(body)
         parsed = _validate_request(AuthRequest, payload)
         try:
             normalize_username(parsed.username)
             _ensure_self_service_username_allowed(parsed.username, settings)
-            user = await anyio.to_thread.run_sync(
-                lambda: auth_store.create_user(
+            user, session = await anyio.to_thread.run_sync(
+                lambda: auth_store.create_user_and_session(
                     parsed.username,
                     parsed.password,
-                    company=parsed.company,
-                    department=parsed.department,
+                    days=settings.auth_session_days,
+                    company="",
+                    department="",
                 )
             )
         except UserExistsError as exc:
@@ -1602,7 +1965,7 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
         return await anyio.to_thread.run_sync(
-            lambda: _auth_response(settings=settings, auth_store=auth_store, user=user)
+            lambda: _auth_response(settings=settings, user=user, session=session)
         )
 
     @router.post("/api/auth/login")
@@ -1616,7 +1979,13 @@ def create_router() -> APIRouter:
         parsed = _validate_request(AuthRequest, payload)
         await _ensure_admin_bootstrap(request, settings, auth_store)
         try:
-            user = await anyio.to_thread.run_sync(auth_store.authenticate, parsed.username, parsed.password)
+            user, session = await anyio.to_thread.run_sync(
+                lambda: auth_store.authenticate_and_create_session(
+                    parsed.username,
+                    parsed.password,
+                    days=settings.auth_session_days,
+                )
+            )
         except AccountLockedError as exc:
             raise APIError(
                 HTTPStatus.TOO_MANY_REQUESTS,
@@ -1626,7 +1995,7 @@ def create_router() -> APIRouter:
         except (InvalidCredentialsError, ValueError) as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, "用户名或密码错误", code="invalid_credentials") from exc
         return await anyio.to_thread.run_sync(
-            lambda: _auth_response(settings=settings, auth_store=auth_store, user=user)
+            lambda: _auth_response(settings=settings, user=user, session=session)
         )
 
     @router.post("/api/password-reset-requests")
@@ -1692,6 +2061,7 @@ def create_router() -> APIRouter:
                 else:
                     reset_notification_info = _safe_admin_reset_request_info(reset_request)
             if not email_sent:
+                reset_notification_info = _safe_admin_reset_request_info(reset_request)
                 _spawn_notification_task(
                     _notify_password_reset_request(settings, reset_notification_info)
                 )
@@ -1799,8 +2169,8 @@ def create_router() -> APIRouter:
                     phone_country_code=parsed.phone_country_code,
                     phone=parsed.phone,
                     email=parsed.email,
-                    company=parsed.company,
-                    department=parsed.department,
+                    company=user.company,
+                    department=user.department,
                     team=parsed.team,
                     job_title=parsed.job_title,
                     note=parsed.note,
@@ -1843,15 +2213,23 @@ def create_router() -> APIRouter:
                 image_mime=image_mime,
             )
         )
-        updated_user = await anyio.to_thread.run_sync(
-            lambda: auth_store.update_user_avatar(
+        updated_user, previous_avatar_path = await anyio.to_thread.run_sync(
+            lambda: auth_store.replace_user_avatar(
                 user_id=user.id,
                 avatar_path=str(avatar_path),
                 avatar_url=avatar_url,
             )
         )
         if updated_user is None:
+            avatar_path.unlink(missing_ok=True)
             raise APIError(HTTPStatus.NOT_FOUND, "用户不存在", code="not_found")
+        await anyio.to_thread.run_sync(
+            lambda: _delete_previous_user_avatar(
+                settings=settings,
+                previous_path=previous_avatar_path,
+                new_path=avatar_path,
+            )
+        )
         return {"status": "ok", "user": updated_user.public_dict()}
 
     @router.get("/api/preferences")
@@ -1869,23 +2247,66 @@ def create_router() -> APIRouter:
         body: Any = JSON_BODY,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
+        settings: Settings = Depends(get_settings),
     ) -> dict[str, Any]:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(UserPreferencesRequest, payload)
+        explicit_fields = parsed.model_fields_set
+        responses_model = _normalize_responses_model(
+            parsed.default_responses_model,
+            default_model=settings.default_responses_model,
+        )
         preferences = await anyio.to_thread.run_sync(
             lambda: auth_store.update_user_preferences(
                 user_id=user.id,
                 default_model=parsed.default_model,
-                default_responses_model=parsed.default_responses_model,
+                default_responses_model=responses_model,
                 default_size=parsed.default_size,
                 default_quality=parsed.default_quality,
                 default_output_format=parsed.default_output_format,
                 default_image_transport=parsed.default_image_transport,
                 logo_overlay_enabled=parsed.logo_overlay_enabled,
                 auto_copyright_check_enabled=parsed.auto_copyright_check_enabled,
+                simple_checklist_completed=(
+                    parsed.simple_checklist_completed
+                    if "simple_checklist_completed" in explicit_fields
+                    else None
+                ),
+                ui_mode=parsed.ui_mode if "ui_mode" in explicit_fields else None,
             )
+        )
+        return {"status": "ok", "preferences": preferences}
+
+    @router.patch("/api/preferences/simple-checklist")
+    async def update_simple_checklist_preference(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        parsed = _validate_request(SimpleChecklistPreferenceRequest, _ensure_dict(body))
+        preferences = await anyio.to_thread.run_sync(
+            lambda: auth_store.update_user_preferences(
+                user_id=user.id,
+                simple_checklist_completed=parsed.completed,
+            )
+        )
+        return {"status": "ok", "preferences": preferences}
+
+    @router.patch("/api/preferences/ui-mode")
+    async def update_ui_mode_preference(
+        body: Any = JSON_BODY,
+        user: AuthUser | None = Depends(require_current_user),
+        auth_store: AuthStore = Depends(get_auth_store),
+    ) -> dict[str, Any]:
+        if user is None:
+            raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
+        parsed = _validate_request(UserUiModeRequest, _ensure_dict(body))
+        preferences = await anyio.to_thread.run_sync(
+            lambda: auth_store.update_user_preferences(user_id=user.id, ui_mode=parsed.ui_mode)
         )
         return {"status": "ok", "preferences": preferences}
 
@@ -1913,6 +2334,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/org-units")
     async def public_org_units(
+        _user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
         org_units = await anyio.to_thread.run_sync(auth_store.list_organization_units)
@@ -2472,6 +2894,9 @@ def create_router() -> APIRouter:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(BugReportRequest, payload)
+        notification_configured = error_alert_notifications_enabled(settings) or bool(
+            settings.bug_report_webhook_url.strip()
+        )
         try:
             report = await anyio.to_thread.run_sync(
                 lambda: auth_store.record_bug_report(
@@ -2481,20 +2906,70 @@ def create_router() -> APIRouter:
                     contact=parsed.contact,
                     page_url=parsed.page_url,
                     user_agent=request.headers.get("user-agent", ""),
+                    notification_status="pending" if notification_configured else "not_configured",
                 )
             )
         except ValueError as exc:
             raise APIError(HTTPStatus.BAD_REQUEST, str(exc), code="validation_error") from exc
-        notification = await send_bug_report_notification(settings=settings, report=report, username=user.username)
-        if notification.status != report["notification_status"]:
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.update_bug_report_notification_status(report["id"], notification.status)
-            )
-            report = {**report, "notification_status": notification.status}
+        # 通知走后台：Telegram 不可达时重试+超时最坏要卡 ~48s，不能让
+        # 用户的提交按钮等它；结果状态由 update_bug_report_notification_status
+        # 异步补写，前端对缺失 notification 字段有兜底文案。
+        report_id = report["id"]
+        report_username = user.username
+
+        async def _notify_bug_report() -> None:
+            notification_status = report["notification_status"]
+            try:
+                try:
+                    notification = await send_bug_report_notification(
+                        settings=settings, report=report, username=report_username
+                    )
+                    notification_status = notification.status
+                except Exception as exc:
+                    notification_status = "failed"
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "bug_report_notification_failed",
+                        report_id=report_id,
+                        error=type(exc).__name__,
+                        message=redact_sensitive_text(str(exc), limit=300),
+                    )
+                if notification_status != report["notification_status"]:
+                    await anyio.to_thread.run_sync(
+                        lambda: auth_store.update_bug_report_notification_status(report_id, notification_status)
+                    )
+            except asyncio.CancelledError:
+                # Cancellation can arrive while the terminal status is being
+                # offloaded, after the external notification already completed.
+                # Persist synchronously during shutdown so it cannot remain pending.
+                cancelled_status = (
+                    notification_status
+                    if notification_status != report["notification_status"]
+                    else "cancelled"
+                )
+                try:
+                    auth_store.update_bug_report_notification_status(report_id, cancelled_status)
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "bug_report_notification_cancel_record_failed",
+                        report_id=report_id,
+                        error=type(exc).__name__,
+                    )
+                raise
+
+        _spawn_notification_task(_notify_bug_report())
         return {
             "status": "ok",
             "report": report,
-            "notification": notification.public_dict(),
+            "notification": {
+                "configured": admin_notifications_enabled(settings),
+                "sent": False,
+                "status": report["notification_status"],
+                "error": "",
+            },
         }
 
     @router.get("/api/bug-reports")
@@ -2685,6 +3160,28 @@ def create_router() -> APIRouter:
             await _with_timing("/api/generate", handle_generate, body, settings, client, auth_store, user, request)
         )
 
+    @router.post("/api/image-jobs")
+    async def image_job(
+        request: Request,
+        body: Any = JSON_BODY,
+        settings: Settings = Depends(get_settings),
+        client: UpstreamClient = Depends(get_client),
+        auth_store: AuthStore = Depends(get_auth_store),
+        user: AuthUser | None = Depends(require_current_user),
+    ) -> JSONResponse:
+        return JSONResponse(
+            await _with_timing(
+                "/api/image-jobs",
+                handle_image_job,
+                body,
+                settings,
+                client,
+                auth_store,
+                user,
+                request,
+            )
+        )
+
     @router.post("/api/edit")
     async def edit(
         request: Request,
@@ -2726,10 +3223,18 @@ def create_router() -> APIRouter:
         body: Any = JSON_BODY,
         settings: Settings = Depends(get_settings),
         client: UpstreamClient = Depends(get_client),
-        _user: AuthUser | None = Depends(require_current_user),
+        user: AuthUser | None = Depends(require_current_user),
     ) -> JSONResponse:
         return JSONResponse(
-            await _with_timing("/api/copyright-risk", handle_copyright_risk, body, settings, client, request=request)
+            await _with_timing(
+                "/api/copyright-risk",
+                handle_copyright_risk,
+                body,
+                settings,
+                client,
+                user=user,
+                request=request,
+            )
         )
 
     @router.post("/api/text-fidelity")
@@ -2738,10 +3243,18 @@ def create_router() -> APIRouter:
         body: Any = JSON_BODY,
         settings: Settings = Depends(get_settings),
         client: UpstreamClient = Depends(get_client),
-        _user: AuthUser | None = Depends(require_current_user),
+        user: AuthUser | None = Depends(require_current_user),
     ) -> JSONResponse:
         return JSONResponse(
-            await _with_timing("/api/text-fidelity", handle_text_fidelity, body, settings, client, request=request)
+            await _with_timing(
+                "/api/text-fidelity",
+                handle_text_fidelity,
+                body,
+                settings,
+                client,
+                user=user,
+                request=request,
+            )
         )
 
     return router
@@ -3028,11 +3541,14 @@ async def _create_team_chat_bot_reply(
                 mentions=[user.username],
             )
         )
-    model = settings.default_responses_model.strip() or "gpt-5.5"
+    model = _normalize_responses_model(
+        settings.default_responses_model,
+        default_model=DEFAULT_RESPONSES_MODEL,
+    )
     upstream_payload = {
         "model": model,
         "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
-        "reasoning": {"effort": "high"},
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3164,15 +3680,23 @@ def _extract_text_output(payload: dict[str, Any]) -> str:
 async def handle_copyright_risk(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    payload = _ensure_dict(body)
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     parsed = _validate_request(CopyrightRiskRequest, payload)
 
     endpoint_url = validate_url(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    model = _normalize_responses_model(
+        parsed.model or "",
+        default_model=settings.default_responses_model,
+    )
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
@@ -3185,6 +3709,7 @@ async def handle_copyright_risk(
     upstream_payload = {
         "model": model,
         "instructions": COPYRIGHT_RISK_INSTRUCTIONS,
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3205,15 +3730,23 @@ async def handle_copyright_risk(
 async def handle_text_fidelity(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    payload = _ensure_dict(body)
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     parsed = _validate_request(TextFidelityRequest, payload)
 
     endpoint_url = validate_url(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    model = _normalize_responses_model(
+        parsed.model or "",
+        default_model=settings.default_responses_model,
+    )
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
 
@@ -3238,6 +3771,9 @@ async def handle_text_fidelity(
                 {
                     "model": model,
                     "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+                    **_responses_reasoning_options(
+                        model, settings.default_responses_reasoning_effort
+                    ),
                     "input": [
                         {
                             "role": "user",
@@ -3270,6 +3806,7 @@ async def handle_text_fidelity(
     upstream_payload = {
         "model": model,
         "instructions": TEXT_FIDELITY_INSTRUCTIONS,
+        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "input": [
             {
                 "role": "user",
@@ -3339,10 +3876,13 @@ def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any
     images = saved.get("images")
     candidates = [item for item in images if isinstance(item, dict)] if isinstance(images, list) else [saved]
     mismatches: list[str] = []
+    first_checked: dict[str, Any] | None = None
     for image in candidates:
         actual = _image_dimensions_for_size_check(image)
         if actual is None:
             continue
+        if first_checked is None:
+            first_checked = image
         image["actual_size"] = f"{actual[0]}x{actual[1]}"
         image["requested_size"] = requested_size
         if actual != expected:
@@ -3356,6 +3896,19 @@ def _mark_image_size_mismatch(saved: dict[str, Any], save_context: dict[str, Any
         else:
             image["size_mismatch"] = False
     if not mismatches:
+        if first_checked is not None:
+            for key in (
+                "actual_size",
+                "requested_size",
+                "size_mismatch",
+                "image_size_normalized",
+                "image_size_normalized_method",
+                "upstream_actual_size",
+                "upstream_image_width",
+                "upstream_image_height",
+            ):
+                if key in first_checked:
+                    saved[key] = first_checked[key]
         return
 
     # Summarize from the first candidate that actually mismatched — candidate 0
@@ -3375,6 +3928,7 @@ def _should_track_generation_job(path: str) -> bool:
     return path in {
         "/api/generate",
         "/api/edit",
+        "/api/image-jobs",
         "/api/responses-image",
         "/api/itinerary-map/render",
     }
@@ -3434,6 +3988,8 @@ def _job_mode(path: str, payload: dict[str, Any]) -> str:
         return "itinerary"
     if path == "/api/generate":
         return _generate_mode(payload.get("mode"))
+    if path == "/api/image-jobs":
+        return str(payload.get("mode") or "generate")
     if path == "/api/edit":
         return str(payload.get("mode") or "edit")
     if path == "/api/responses-image":
@@ -3446,21 +4002,70 @@ def _job_transport(path: str) -> str:
     return {
         "/api/generate": "images-generate",
         "/api/edit": "images-edit",
+        "/api/image-jobs": "auto",
         "/api/responses-image": "responses-image",
         "/api/itinerary-map/render": "responses-itinerary-artwork",
     }.get(path, "")
 
 
-def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
+def _resolved_image_job_metadata(
+    payload: dict[str, Any],
+    user: AuthUser,
+    settings: Settings,
+) -> dict[str, str]:
+    try:
+        parsed = _validate_request(ImageJobRequest, payload)
+        if parsed.advanced is not None and not _execution_overrides_allowed(user, settings):
+            return {}
+        size = (parsed.size or settings.default_size).strip() or settings.default_size
+        _validate_exact_image_size(size)
+        plan = _resolve_image_execution_plan(parsed, settings)
+    except APIError:
+        return {}
+    return {
+        "transport": plan.transport,
+        "model": plan.model,
+        "reasoning_effort": plan.reasoning_effort,
+        "size": size,
+    }
+
+
+def _job_metadata(path: str, body: Any, user: AuthUser, settings: Settings) -> dict[str, Any]:
     payload = body if isinstance(body, dict) else {}
+    execution_payload = _server_managed_execution_payload(payload, user, settings)
+    execution = (
+        _resolved_image_job_metadata(payload, user, settings)
+        if path == "/api/image-jobs"
+        else {}
+    )
     prompt_mode = str(payload.get("prompt_mode") or "free")
     raw_recipe_id = str(payload.get("recipe_id") or "").strip()
     recipe = recipe_public_dict(raw_recipe_id) if raw_recipe_id else None
     recipe_id = raw_recipe_id if prompt_mode == "recipe" and recipe is not None else ""
     recipe_version = str(payload.get("recipe_version") or "").strip() if recipe_id else ""
     default_model = {
-        "/api/itinerary-map/render": "responses-itinerary-artwork",
+        "/api/generate": settings.default_model,
+        "/api/edit": settings.default_model,
+        "/api/responses-image": settings.default_responses_model,
+        "/api/itinerary-map/render": settings.default_responses_model,
     }.get(path, "")
+    requested_model = str(execution_payload.get("model") or default_model)
+    effective_model = (
+        _normalize_responses_model(requested_model, default_model=settings.default_responses_model)
+        if path in {"/api/responses-image", "/api/itinerary-map/render"}
+        else requested_model
+    )
+    requested_reasoning_effort = str(
+        execution_payload.get("reasoning_effort")
+        or settings.default_responses_reasoning_effort
+    )
+    if requested_reasoning_effort not in RESPONSES_REASONING_EFFORTS:
+        requested_reasoning_effort = settings.default_responses_reasoning_effort
+    default_reasoning_effort = (
+        requested_reasoning_effort
+        if _responses_reasoning_options(effective_model, requested_reasoning_effort)
+        else ""
+    )
     default_size = {
         "/api/itinerary-map/render": ITINERARY_DEFAULT_SIZE,
     }.get(path, "")
@@ -3470,7 +4075,7 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "username": user.username,
         "endpoint_path": path,
         "mode": _job_mode(path, payload),
-        "transport": _job_transport(path),
+        "transport": execution.get("transport") or _job_transport(path),
         "prompt": str(payload.get("prompt") or payload.get("title") or ""),
         "original_prompt": str(
             payload.get("original_prompt")
@@ -3482,8 +4087,9 @@ def _job_metadata(path: str, body: Any, user: AuthUser) -> dict[str, Any]:
         "prompt_mode": prompt_mode,
         "recipe_id": recipe_id,
         "recipe_version": recipe_version,
-        "model": str(payload.get("model") or default_model),
-        "size": str(payload.get("size") or default_size),
+        "model": execution.get("model") or effective_model,
+        "reasoning_effort": execution.get("reasoning_effort") or default_reasoning_effort,
+        "size": execution.get("size") or str(payload.get("size") or default_size),
         "sample_count": _job_sample_count(payload),
         "logo_requested": (
             bool(payload.get("logo_requested", True))
@@ -3699,6 +4305,24 @@ def _should_send_generation_success_alert(alert: GenerationSuccessAlert) -> bool
 _notification_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _notification_task_done(task: asyncio.Task[Any]) -> None:
+    _notification_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        log_event(
+            logger,
+            logging.ERROR,
+            "notification_task_failed",
+            error=type(error).__name__,
+            message=redact_sensitive_text(str(error), limit=300),
+        )
+
+
 def _spawn_notification_task(coro: Coroutine[Any, Any, Any]) -> None:
     """Send a notification off the request path.
 
@@ -3710,7 +4334,19 @@ def _spawn_notification_task(coro: Coroutine[Any, Any, Any]) -> None:
 
     task = asyncio.create_task(coro)
     _notification_tasks.add(task)
-    task.add_done_callback(_notification_tasks.discard)
+    task.add_done_callback(_notification_task_done)
+
+
+async def drain_notification_tasks(timeout_seconds: float = 5.0) -> None:
+    current_loop = asyncio.get_running_loop()
+    tasks = [task for task in _notification_tasks if task.get_loop() is current_loop and not task.done()]
+    if not tasks:
+        return
+    _done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout_seconds))
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _send_generation_success_alert(settings: Settings, alert: GenerationSuccessAlert) -> None:
@@ -3762,32 +4398,39 @@ async def _run_handler_until_client_disconnect(
         return await handler(body, settings, client, user)
 
     result: dict[str, Any] | None = None
-    error: BaseException | None = None
+    handler_error: BaseException | None = None
+    disconnect_error: APIError | None = None
 
     async def _run_handler() -> None:
-        nonlocal result, error
+        nonlocal result, handler_error
         try:
             result = await handler(body, settings, client, user)
         except Exception as exc:
-            error = exc
+            handler_error = exc
 
     async def _watch_disconnect() -> None:
-        nonlocal error
+        nonlocal disconnect_error
         try:
             await _raise_if_client_disconnects(request)
         except APIError as exc:
-            error = exc
+            disconnect_error = exc
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_run_handler)
         task_group.start_soon(_watch_disconnect)
-        while result is None and error is None:
+        while result is None and handler_error is None and disconnect_error is None:
             await anyio.sleep(0.05)
         task_group.cancel_scope.cancel()
 
-    if error is not None:
-        raise error
-    return result or {}
+    # 结果优先：生成完成和"断线"落在同一个轮询窗口时，这张图已经付费
+    # 并落盘，宁可返回给一个可能已离开的客户端，也不能把它记成 499 丢掉。
+    if result is not None:
+        return result
+    if handler_error is not None:
+        raise handler_error
+    if disconnect_error is not None:
+        raise disconnect_error
+    return {}
 
 
 async def _with_timing(
@@ -3806,7 +4449,7 @@ async def _with_timing(
     try:
         if auth_store is not None and user is not None and _should_track_generation_job(path):
             job_id = await anyio.to_thread.run_sync(
-                lambda: auth_store.create_generation_job(**_job_metadata(path, body, user))
+                lambda: auth_store.create_generation_job(**_job_metadata(path, body, user, settings))
             )
         result = await _run_handler_until_client_disconnect(
             handler=handler,
@@ -3928,10 +4571,50 @@ async def _with_timing(
     return result
 
 
-async def handle_generate(
+async def handle_image_job(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
     payload = _ensure_dict(body)
+    parsed = _validate_request(ImageJobRequest, payload)
+    has_input = parsed.image is not None or bool(parsed.images)
+    if parsed.advanced is not None and not _execution_overrides_allowed(user, settings):
+        raise APIError(
+            HTTPStatus.FORBIDDEN,
+            "只有管理员可以覆盖图像执行设置",
+            code="forbidden",
+        )
+    if (parsed.mode in IMAGE_INPUT_MODES or parsed.mask is not None) and not has_input:
+        raise APIError(
+            HTTPStatus.BAD_REQUEST,
+            "编辑、参考图和延展模式必须提供输入图片",
+            code="validation_error",
+        )
+
+    size = (parsed.size or settings.default_size).strip() or settings.default_size
+    _validate_exact_image_size(size)
+    plan = _resolve_image_execution_plan(parsed, settings)
+    mapped_payload = parsed.model_dump(exclude={"advanced"}, exclude_none=True)
+    mapped_payload.update(
+        {
+            "api_key": plan.api_key,
+            "endpoint_url": plan.endpoint_url,
+            "model": plan.model,
+            "size": size,
+        }
+    )
+    if plan.transport == "responses-image":
+        if plan.reasoning_effort:
+            mapped_payload["reasoning_effort"] = plan.reasoning_effort
+        return await handle_responses_image(mapped_payload, settings, client, user)
+    if plan.transport == "images-edit":
+        return await handle_edit(mapped_payload, settings, client, user)
+    return await handle_generate(mapped_payload, settings, client, user)
+
+
+async def handle_generate(
+    body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
+) -> dict[str, Any]:
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     parsed = _validate_request(GenerateRequest, payload)
 
     endpoint_url = validate_url(
@@ -3940,10 +4623,17 @@ async def handle_generate(
     )
     model = (parsed.model or settings.default_model).strip() or settings.default_model
     size = (parsed.size or settings.default_size).strip() or settings.default_size
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_generate_url,
+        default_api_key=settings.default_api_key,
+    )
     image_options = _highest_quality_image_options(openai_image_options(payload))
     mode = _generate_mode(parsed.mode)
-    strict_size = mode != "itinerary" and _strict_requested_size(parsed.size)
+    if mode != "itinerary":
+        _validate_exact_image_size(size)
+    strict_size = mode != "itinerary" and _strict_requested_size(size)
     original_prompt = (parsed.original_prompt or parsed.prompt).strip()
     prompt_mode = parsed.prompt_mode
     recipe_id = parsed.recipe_id or ""
@@ -3972,14 +4662,16 @@ async def handle_generate(
     if parsed.sample_count > 1:
         upstream_payload["n"] = parsed.sample_count
 
-    upstream_response = await _run_json_candidates(
-        client=client,
-        endpoint_url=endpoint_url,
-        api_key=api_key,
-        payload=upstream_payload,
-        user_agent=settings.upstream_user_agent,
-        sample_count=parsed.sample_count,
-    )
+    async def _run_generate_upstream() -> dict[str, Any]:
+        return await _run_json_candidates(
+            client=client,
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            payload=upstream_payload,
+            user_agent=settings.upstream_user_agent,
+            sample_count=parsed.sample_count,
+        )
+
     metadata = request_metadata({**payload, **image_options}, size=size)
     lineage_metadata: dict[str, Any] = {
         "original_prompt": original_prompt,
@@ -3996,8 +4688,9 @@ async def handle_generate(
         lineage_metadata["recipe_title"] = recipe["title"]
     metadata.update(lineage_metadata)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_generate_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4019,6 +4712,8 @@ async def handle_generate(
             **lineage_metadata,
             **({"recipe": recipe} if recipe is not None else {}),
             "model": model,
+            "transport": "images-generate",
+            "reasoning_effort": "",
             "logo_requested": parsed.logo_requested,
             "sample_count": parsed.sample_count,
             **({"user": user.public_dict()} if user else {}),
@@ -4031,7 +4726,7 @@ async def handle_generate(
 async def handle_edit(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    payload = _ensure_dict(body)
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     if not payload.get("image") and not payload.get("images"):
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 image 文件", code="bad_request")
     parsed = _validate_request(EditRequest, payload)
@@ -4041,7 +4736,12 @@ async def handle_edit(
         "编辑接口 URL",
     )
     model = (parsed.model or settings.default_model).strip() or settings.default_model
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_edit_url,
+        default_api_key=settings.default_api_key,
+    )
     _ensure_no_restricted_destination_text(parsed.prompt)
     itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
     effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
@@ -4059,6 +4759,7 @@ async def handle_edit(
 
     files_for_multipart = [*image_parts, *([mask_part] if mask_part else [])]
     size = (parsed.size or "").strip()
+    _validate_exact_image_size(size)
     strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
     fields: dict[str, Any] = {
@@ -4071,15 +4772,17 @@ async def handle_edit(
     if parsed.sample_count > 1:
         fields["n"] = parsed.sample_count
 
-    upstream_response = await _run_multipart_candidates(
-        client=client,
-        endpoint_url=endpoint_url,
-        api_key=api_key,
-        fields=fields,
-        files=files_for_multipart,
-        user_agent=settings.upstream_user_agent,
-        sample_count=parsed.sample_count,
-    )
+    async def _run_edit_upstream() -> dict[str, Any]:
+        return await _run_multipart_candidates(
+            client=client,
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            fields=fields,
+            files=files_for_multipart,
+            user_agent=settings.upstream_user_agent,
+            sample_count=parsed.sample_count,
+        )
+
     metadata = request_metadata({**payload, **image_options}, size=size or None)
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
@@ -4087,8 +4790,9 @@ async def handle_edit(
     mode = (parsed.mode or "edit").strip() or "edit"
     image_metadata = _image_reference_metadata(image_parts)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_edit_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4109,6 +4813,8 @@ async def handle_edit(
             "mode": mode,
             "prompt": effective_prompt,
             "model": model,
+            "transport": "images-edit",
+            "reasoning_effort": "",
             "logo_requested": parsed.logo_requested,
             **metadata,
             "endpoint_url": endpoint_url,
@@ -4143,18 +4849,32 @@ def _responses_inline_input_content(prompt: str, image_parts: list[dict[str, Any
 async def handle_responses_image(
     body: Any, settings: Settings, client: UpstreamClient, user: AuthUser | None = None
 ) -> dict[str, Any]:
-    payload = _ensure_dict(body)
+    payload = _server_managed_execution_payload(_ensure_dict(body), user, settings)
     parsed = _validate_request(ResponsesImageRequest, payload)
 
     endpoint_url = validate_url(
         parsed.endpoint_url or settings.default_responses_url,
         "Responses 图像接口 URL",
     )
-    model = (parsed.model or settings.default_responses_model).strip() or settings.default_responses_model
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    model = _normalize_responses_model(
+        parsed.model or "",
+        default_model=settings.default_responses_model,
+    )
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
     size = (parsed.size or settings.default_size).strip() or settings.default_size
-    strict_size = _strict_requested_size(parsed.size)
+    _validate_exact_image_size(size)
+    strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
+    requested_reasoning_effort = (
+        parsed.reasoning_effort or settings.default_responses_reasoning_effort
+    )
+    reasoning_options = _responses_reasoning_options(model, requested_reasoning_effort)
+    reasoning_effort = requested_reasoning_effort if reasoning_options else ""
 
     _ensure_no_restricted_destination_text(parsed.prompt)
     itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
@@ -4217,9 +4937,19 @@ async def handle_responses_image(
         tool["input_image_mask"] = {"image_url": f"data:{mask_mime};base64,{mask_b64}"}
 
     guarded_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size and size and size != "auto":
+        # The image_generation tool's `size` param is treated as advisory by
+        # some gateways (they "lazily" return a downscaled canvas). Restating
+        # the requirement in the prompt measurably improves compliance.
+        guarded_prompt = (
+            f"{guarded_prompt.rstrip()}\n\n"
+            f"画布尺寸要求：最终输出图片必须精确为 {size} 像素（宽x高），"
+            "不得缩小画布、更换为其它分辨率或改变宽高比。"
+        )
     upstream_payload = {
         "model": model,
         "instructions": RESPONSES_IMAGE_INSTRUCTIONS,
+        **reasoning_options,
         "stream": True,
         "input": [
             {
@@ -4234,34 +4964,35 @@ async def handle_responses_image(
         "tools": [tool],
     }
 
-    try:
-        upstream_response = await client.run_responses(
-            endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
-        )
-    except APIError as exc:
-        # `n` is not part of the official image_generation tool schema; strict
-        # upstreams reject the whole request. Mirror the Images-API fallback:
-        # retry once without it when the error clearly points at the field.
-        if (
-            "n" in tool
-            and exc.status == HTTPStatus.BAD_REQUEST
-            and _error_mentions_sample_count(exc)
-        ):
-            log_event(
-                logger,
-                logging.WARNING,
-                "responses_image_sample_count_fallback",
-                endpoint_url=endpoint_url,
-                sample_count=parsed.sample_count,
-                status=exc.status,
-                message=exc.message,
-            )
-            tool.pop("n", None)
-            upstream_response = await client.run_responses(
+    async def _run_responses_upstream() -> dict[str, Any]:
+        try:
+            return await client.run_responses(
                 endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
             )
-        else:
+        except APIError as exc:
+            # `n` is not part of the official image_generation tool schema; strict
+            # upstreams reject the whole request. Mirror the Images-API fallback:
+            # retry once without it when the error clearly points at the field.
+            if (
+                "n" in tool
+                and exc.status == HTTPStatus.BAD_REQUEST
+                and _error_mentions_sample_count(exc)
+            ):
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "responses_image_sample_count_fallback",
+                    endpoint_url=endpoint_url,
+                    sample_count=parsed.sample_count,
+                    status=exc.status,
+                    message=exc.message,
+                )
+                tool.pop("n", None)
+                return await client.run_responses(
+                    endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+                )
             raise
+
     metadata = request_metadata({**payload, **image_options}, size=size)
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
@@ -4269,8 +5000,9 @@ async def handle_responses_image(
     mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
     image_metadata = _image_reference_metadata(image_parts)
 
-    return await _finalize_image_response(
-        upstream_response=upstream_response,
+    return await _finalize_with_size_retry(
+        run_upstream=_run_responses_upstream,
+        sample_count=parsed.sample_count,
         settings=settings,
         client=client,
         save_context={
@@ -4285,6 +5017,7 @@ async def handle_responses_image(
             "file_upload_fallback": bool(upload_error),
             "file_upload_error": upload_error.message if upload_error else None,
             "transport": "responses-image",
+            "reasoning_effort": reasoning_effort,
             "strict_size": strict_size,
             "sample_count": parsed.sample_count,
             "logo_requested": parsed.logo_requested,
@@ -4295,6 +5028,8 @@ async def handle_responses_image(
             "mode": mode,
             "prompt": effective_prompt,
             "model": model,
+            "transport": "responses-image",
+            "reasoning_effort": reasoning_effort,
             "logo_requested": parsed.logo_requested,
             **metadata,
             "endpoint_url": endpoint_url,
@@ -4335,11 +5070,209 @@ async def _finalize_image_response(
         raise APIError(
             HTTPStatus.BAD_GATEWAY,
             "图片生成接口这次没有返回图片，请稍后重试。",
-            compact_raw_response(upstream_response),
+            _details_text(compact_raw_response(upstream_response)),
             code="upstream_no_image",
         )
     _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
+
+
+def _saved_dimensions(saved: dict[str, Any]) -> tuple[int, int] | None:
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if isinstance(image, dict):
+            width = image.get("saved_image_width")
+            height = image.get("saved_image_height")
+            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                return width, height
+    return None
+
+
+def _upstream_dimensions(saved: dict[str, Any]) -> tuple[int, int] | None:
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        width = image.get("upstream_image_width")
+        height = image.get("upstream_image_height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            return width, height
+    return _saved_dimensions(saved)
+
+
+def _requires_size_retry(saved: dict[str, Any], target_size: tuple[int, int] | None) -> bool:
+    dimensions = _upstream_dimensions(saved)
+    if target_size is None or dimensions is None:
+        return bool(saved.get("size_mismatch"))
+    return dimensions != target_size
+
+
+def _size_mismatch_score(saved: dict[str, Any], target_size: tuple[int, int] | None) -> tuple[float, float, int]:
+    dimensions = _upstream_dimensions(saved)
+    if dimensions is None:
+        return math.inf, math.inf, 0
+    width, height = dimensions
+    pixels = width * height
+    if target_size is None:
+        return math.inf, math.inf, -pixels
+    target_width, target_height = target_size
+    aspect_delta = abs((width / height) - (target_width / target_height)) / (target_width / target_height)
+    dimension_delta = abs(width / target_width - 1) + abs(height / target_height - 1)
+    return aspect_delta, dimension_delta, -pixels
+
+
+def _with_size_retry_metadata(
+    saved: dict[str, Any],
+    *,
+    retries: int,
+    retry_error: APIError | None = None,
+) -> dict[str, Any]:
+    audit: dict[str, Any] = {
+        "size_mismatch_retries": retries,
+        "upstream_attempts": retries + 1,
+    }
+    if retry_error is not None:
+        audit["size_mismatch_retry_error_code"] = retry_error.code
+        audit["size_mismatch_retry_error_message"] = redact_sensitive_text(retry_error.message, limit=300)
+
+    updated_images: list[Any] = []
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            updated_images.append(image)
+            continue
+        metadata = image.get("metadata")
+        updated_images.append(
+            {
+                **image,
+                **audit,
+                "metadata": {**(metadata if isinstance(metadata, dict) else {}), **audit},
+            }
+        )
+
+    updated = {**saved, **audit, "images": updated_images}
+    if updated_images and isinstance(updated_images[0], dict):
+        updated["metadata"] = updated_images[0].get("metadata", updated.get("metadata"))
+    return updated
+
+
+def _discard_saved_result_files(saved: dict[str, Any]) -> None:
+    """Best-effort removal of a losing retry attempt's files so retries don't
+    litter the outputs dir (only the returned result gets DB records)."""
+
+    images = saved.get("images")
+    for image in images if isinstance(images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        for key in ("saved_image_path", "saved_metadata_path"):
+            path_text = str(image.get(key) or "")
+            if path_text:
+                with suppress(OSError):
+                    Path(path_text).unlink()
+
+
+async def _finalize_with_size_retry(
+    *,
+    run_upstream: Callable[[], Awaitable[dict[str, Any]]],
+    settings: Settings,
+    client: UpstreamClient,
+    save_context: dict[str, Any],
+    extra: dict[str, Any],
+    sample_count: int,
+) -> dict[str, Any]:
+    """Retry the (paid) upstream call when it "lazily" returns a smaller size.
+
+    Production gateways honor exact poster sizes most of the time but
+    intermittently downscale under load; a plain local upscale cannot recover
+    the missing detail, so the effective fix is to try again and keep the
+    attempt closest to the target. Scope is deliberately narrow: exact-size
+    requests with sample_count == 1, up to size_mismatch_max_retries extra
+    calls (0 disables).
+    """
+
+    max_retries = (
+        settings.size_mismatch_max_retries
+        if save_context.get("strict_size") and sample_count == 1
+        else 0
+    )
+    best: dict[str, Any] | None = None
+    retries_used = 0
+    retry_error: APIError | None = None
+    target_size = _parse_requested_size(str(save_context.get("requested_size") or save_context.get("size") or ""))
+    for attempt in range(max_retries + 1):
+        try:
+            upstream_response = await run_upstream()
+            saved = await _finalize_image_response(
+                upstream_response=upstream_response,
+                settings=settings,
+                client=client,
+                save_context=save_context,
+                extra=extra,
+            )
+        except APIError as exc:
+            if best is not None:
+                # A retry failing outright must not discard a usable result.
+                # 这次失败的重试也真实扣了费，计数不能丢。
+                retries_used = attempt
+                retry_error = exc
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "size_mismatch_retry_failed",
+                    requested_size=str(save_context.get("requested_size") or save_context.get("size") or ""),
+                    attempt=attempt,
+                    error_code=exc.code,
+                    status=exc.status,
+                )
+                break
+            raise
+        retries_used = attempt
+        if not _requires_size_retry(saved, target_size):
+            if best is not None:
+                _discard_saved_result_files(best)
+            if attempt:
+                saved = _with_size_retry_metadata(saved, retries=attempt)
+            return saved
+        if best is None:
+            best = saved
+        elif _size_mismatch_score(saved, target_size) < _size_mismatch_score(best, target_size):
+            _discard_saved_result_files(best)
+            best = saved
+        else:
+            _discard_saved_result_files(saved)
+        if attempt < max_retries:
+            actual_dimensions = _upstream_dimensions(saved)
+            log_event(
+                logger,
+                logging.WARNING,
+                "size_mismatch_retry",
+                requested_size=str(save_context.get("requested_size") or save_context.get("size") or ""),
+                actual_size=(
+                    f"{actual_dimensions[0]}x{actual_dimensions[1]}"
+                    if actual_dimensions is not None
+                    else str(saved.get("actual_size") or "")
+                ),
+                attempt=attempt + 1,
+                max_retries=max_retries,
+            )
+    assert best is not None
+    if retries_used:
+        retry_note = (
+            f"已自动重新生成 {retries_used} 次，最后一次重试失败，已保留此前最接近目标画幅的一次。"
+            if retry_error is not None
+            else f"已自动重新生成 {retries_used} 次，上游仍未按目标尺寸返回，已保留其中最接近的一次。"
+        )
+        message = str(best.get("size_mismatch_message") or "").rstrip()
+        best["size_mismatch_message"] = f"{message}{retry_note}" if message else retry_note
+        images = best.get("images")
+        for image in images if isinstance(images, list) else []:
+            if isinstance(image, dict) and image.get("size_mismatch"):
+                candidate_message = str(image.get("size_mismatch_message") or "").rstrip()
+                image["size_mismatch_message"] = (
+                    f"{candidate_message}{retry_note}" if candidate_message else retry_note
+                )
+        best = _with_size_retry_metadata(best, retries=retries_used, retry_error=retry_error)
+    return best
 
 
 def _make_remote_fetcher(client: UpstreamClient) -> Any:

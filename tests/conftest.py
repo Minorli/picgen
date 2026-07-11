@@ -41,6 +41,10 @@ def settings_factory(tmp_path: Path):
             "static_dir": tmp_path,
             "data_dir": tmp_path / "data",
             "auth_enabled": False,
+            # Most route tests intentionally exercise registration. Production
+            # keeps this closed by default and has dedicated coverage below.
+            "self_registration_enabled": True,
+            "allow_anonymous_execution_overrides": True,
             "rate_limit_per_minute": 0,
             "rate_limit_burst": 0,
             "log_level": "WARNING",

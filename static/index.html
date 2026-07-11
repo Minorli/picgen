@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=0.1.44">
+    <link rel="stylesheet" href="styles.css?v=0.1.55">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
       <section class="auth-panel" aria-labelledby="authTitle">
         <div class="auth-mark" aria-hidden="true"></div>
         <h2 id="authTitle">登录 PicGen</h2>
-        <p id="authSubtitle">已有账号可直接登录；新用户可以注册后进入图像工作台。</p>
+        <p id="authSubtitle">请使用管理员创建的账号登录。</p>
         <form id="authForm" class="auth-form" novalidate>
           <label>
             <span>用户名</span>
@@ -39,7 +39,7 @@
           <p id="authError" class="auth-error" role="alert"></p>
           <div class="auth-actions">
             <button id="loginAuthButton" class="primary-button" type="submit">登录</button>
-            <button id="registerAuthButton" class="ghost-button" type="button">注册</button>
+            <button id="registerAuthButton" class="ghost-button hidden" type="button" aria-hidden="true" tabindex="-1">注册</button>
           </div>
           <button id="forgotPasswordButton" class="text-button auth-forgot-button" type="button">忘记密码？</button>
         </form>
@@ -89,6 +89,10 @@
             <strong id="currentUsername">未登录</strong>
           </button>
           <div id="userImageStats" class="system-pill image-stats-pill hidden" aria-live="polite"></div>
+          <button id="uiModeToggleButton" class="ux-button ux-button-secondary ui-mode-toggle" type="button" title="切换界面模式">
+            <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-list"></use></svg>
+            <span id="uiModeToggleLabel">简洁模式</span>
+          </button>
           <button id="teamChatButton" class="ghost-button compact-top-button team-chat-button" type="button">
             <span>Team Chat</span>
             <span id="teamChatUnreadBadge" class="team-chat-unread-badge hidden" aria-live="polite">0</span>
@@ -110,7 +114,7 @@
             <button class="nav-link active" type="button" data-mode="generate">海报生成</button>
             <button class="nav-link" type="button" data-mode="itinerary">行程路线</button>
             <button class="nav-link" type="button" data-mode="edit">编辑</button>
-            <a href="#connectionSettings">设置</a>
+            <a id="connectionSettingsLink" class="hidden" href="#connectionSettings">高级设置</a>
           </nav>
 
           <section class="rail-section" data-rail-section="history">
@@ -167,6 +171,80 @@
         </aside>
 
         <main class="workbench">
+          <section id="simpleModePanel" class="simple-mode-panel hidden" aria-label="简洁模式创作">
+            <nav class="simple-workflow-steps" aria-label="创作步骤">
+              <div class="simple-workflow-step current" data-simple-workflow-step="1">
+                <span class="simple-step-marker">1</span>
+                <span>选场景</span>
+              </div>
+              <div class="simple-workflow-step" data-simple-workflow-step="2">
+                <span class="simple-step-marker">2</span>
+                <span>填内容</span>
+              </div>
+              <div class="simple-workflow-step" data-simple-workflow-step="3">
+                <span class="simple-step-marker">3</span>
+                <span>出成品</span>
+              </div>
+            </nav>
+
+            <section id="simpleScenarioPicker" class="simple-scenario-picker">
+              <header class="simple-section-header">
+                <div>
+                  <h2>想做什么图？</h2>
+                  <p>选择一个场景开始</p>
+                </div>
+              </header>
+              <div id="simpleScenarioGrid" class="simple-scenario-grid" aria-live="polite"></div>
+              <input id="simpleEditImageInput" class="hidden" type="file" accept="image/*">
+            </section>
+
+            <form id="simpleScenarioForm" class="simple-scenario-form hidden" novalidate>
+              <header class="simple-form-header">
+                <button id="simpleBackButton" class="ux-icon-button" type="button" title="返回场景选择" aria-label="返回场景选择">
+                  <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-arrow-left"></use></svg>
+                </button>
+                <div>
+                  <h2 id="simpleScenarioTitle">填写内容</h2>
+                  <p id="simpleScenarioSubtitle"></p>
+                </div>
+              </header>
+              <div id="simpleScenarioFields" class="simple-scenario-fields"></div>
+              <div id="simpleFormAlert" class="ux-alert ux-alert-error hidden" role="alert">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-exclamation-circle"></use></svg>
+                <span id="simpleFormAlertText"></span>
+              </div>
+              <div class="simple-form-actions">
+                <button id="simpleGenerateButton" class="ux-button ux-button-primary" type="submit">
+                  <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-send"></use></svg>
+                  <span>开始生成</span>
+                </button>
+                <div class="simple-timing-note">
+                  <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-clock-circle"></use></svg>
+                  <span id="simpleTimingEstimate">通常需要 1–3 分钟</span>
+                </div>
+              </div>
+            </form>
+
+            <section id="simpleGallerySection" class="simple-gallery-section" aria-labelledby="simpleGalleryTitle">
+              <header class="simple-gallery-header">
+                <h2 id="simpleGalleryTitle">最近作品</h2>
+                <button id="simpleGalleryRefreshButton" class="ux-icon-button" type="button" title="刷新作品" aria-label="刷新作品">
+                  <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-refresh"></use></svg>
+                </button>
+              </header>
+              <div id="simpleGalleryList" class="simple-gallery-list"></div>
+              <div id="simpleGalleryEmpty" class="simple-gallery-empty">
+                <svg class="simple-empty-illustration" viewBox="0 0 120 78" fill="none" aria-hidden="true">
+                  <rect x="24" y="12" width="72" height="50" rx="4"></rect>
+                  <path d="M35 49l15-15 11 10 8-7 16 14M72 26h.01"></path>
+                  <path d="M46 69h28"></path>
+                </svg>
+                <strong>还没有作品</strong>
+                <p>生成成功后，成品会出现在这里</p>
+              </div>
+            </section>
+          </section>
+
           <section class="control-panel">
             <div class="mode-tabs" aria-label="模式切换">
               <button id="generateTab" class="mode-tab active" type="button" data-mode="generate">海报生成</button>
@@ -302,23 +380,6 @@
               </section>
 
               <section class="studio-block model-block">
-                <div class="section-title">
-                  <h2>模型</h2>
-                </div>
-                <label class="select-shell">
-                  <input id="generateModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImageModels">
-                  <span>本地</span>
-                </label>
-                <datalist id="openaiImageModels">
-                  <option value="gpt-image-2"></option>
-                  <option value="gpt-image-1.5"></option>
-                  <option value="gpt-image-1"></option>
-                  <option value="gpt-5.5"></option>
-                  <option value="gpt-5.5-pro"></option>
-                  <option value="gpt-5.4"></option>
-                  <option value="gpt-5"></option>
-                </datalist>
-
                 <h2 class="compact-title">图像尺寸</h2>
                 <div class="size-picker">
                   <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
@@ -434,9 +495,11 @@
               <div id="imageDropzone" class="dropzone" tabindex="0" role="button" aria-label="上传或替换要编辑的图片">
                 <input id="editImageInput" type="file" accept="image/*" hidden>
                 <div class="upload-icon" aria-hidden="true">▧</div>
-                <p id="imageDropzoneTitle" class="dropzone-title">拖拽图片到这里，或点击选择</p>
-                <p id="imageDropzoneSubtitle" class="dropzone-subtitle">也支持在编辑模式下直接粘贴剪贴板图片</p>
-                <p id="editImageMeta" class="helper-text"></p>
+                <div>
+                  <p id="imageDropzoneTitle" class="dropzone-title">拖拽图片到这里，或点击选择</p>
+                  <p id="imageDropzoneSubtitle" class="dropzone-subtitle">也支持在编辑模式下直接粘贴剪贴板图片</p>
+                  <p id="editImageMeta" class="helper-text"></p>
+                </div>
               </div>
 
               <div id="maskDropzone" class="dropzone mask-dropzone" tabindex="0" role="button" aria-label="上传或替换编辑 mask">
@@ -463,12 +526,7 @@
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="色调更统一，整体更克制">统一色调</button>
               </div>
 
-              <label class="select-shell edit-model">
-                <input id="editModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImageModels">
-                <span>模型</span>
-              </label>
-
-              <p class="helper-text">编辑模式只发送提示词、模型和可选 mask，避免误带生成区的隐藏输出参数。需要改尺寸或做风格延展，请回到生成模式。</p>
+              <p class="helper-text">编辑模式只发送提示词、输入图和可选 mask。需要改尺寸或做风格延展，请回到生成模式。</p>
 
               <div class="primary-run-row">
                 <button id="editButton" class="primary-button" type="button">▶ 开始编辑</button>
@@ -556,8 +614,8 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
             <section id="resultPanel" class="studio-card result-panel">
               <div class="canvas-header">
                 <div>
-                  <h2>结果对比</h2>
-                  <p>并排查看源图与结果图</p>
+                  <h2 id="resultPanelTitle">结果对比</h2>
+                  <p id="resultPanelSubtitle">并排查看源图与结果图</p>
                 </div>
                 <div class="canvas-actions">
                   <div id="requestBadge" class="status-badge idle">空闲</div>
@@ -579,7 +637,21 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   <div id="resultPreviewTrigger" class="preview-frame result-frame" tabindex="0" role="button" aria-label="放大预览输出图片">
                     <img id="resultImage" alt="结果预览">
                     <p id="resultPreviewEmpty" class="empty-placeholder">生成或编辑成功后，这里会显示输出结果。</p>
+                    <div id="simpleResultEmpty" class="simple-result-empty hidden">
+                      <svg class="simple-empty-illustration" viewBox="0 0 120 78" fill="none" aria-hidden="true">
+                        <rect x="24" y="12" width="72" height="50" rx="4"></rect>
+                        <path d="M35 49l15-15 11 10 8-7 16 14M72 26h.01"></path>
+                        <path d="M46 69h28"></path>
+                      </svg>
+                      <strong>成品会显示在这里</strong>
+                      <p>选场景、填内容，然后开始生成</p>
+                    </div>
                     <div id="generationOverlay" class="generation-overlay hidden" aria-live="polite">
+                      <div id="simpleResultSkeleton" class="simple-result-skeleton" aria-hidden="true">
+                        <span class="simple-skeleton-block simple-skeleton-image"></span>
+                        <span class="simple-skeleton-block simple-skeleton-line"></span>
+                        <span class="simple-skeleton-block simple-skeleton-line short"></span>
+                      </div>
                       <div class="generation-orbit" aria-hidden="true">
                         <span></span>
                         <span></span>
@@ -613,6 +685,33 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                     <button id="showVersionsButton" class="ghost-button" type="button" disabled>版本记录</button>
                     <button id="saveGroupAssetButton" class="ghost-button" type="button" disabled>存入部门群</button>
                     <button id="copyPromptButton" class="ghost-button" type="button">复制提示词</button>
+                    <button id="simpleShareResultButton" class="ux-button ux-button-secondary simple-result-action" type="button" disabled>
+                      <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-share-alt"></use></svg>
+                      <span>分享</span>
+                    </button>
+                    <div class="simple-more-actions simple-result-action">
+                      <button id="simpleMoreActionsButton" class="ux-button ux-button-secondary" type="button" aria-haspopup="menu" aria-expanded="false">
+                        <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-more"></use></svg>
+                        <span>更多</span>
+                      </button>
+                      <div id="simpleMoreActionsMenu" class="simple-more-menu hidden" role="menu">
+                        <button type="button" role="menuitem" data-simple-result-action="original">
+                          <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-image"></use></svg><span>原始底图</span>
+                        </button>
+                        <button type="button" role="menuitem" data-simple-result-action="versions">
+                          <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-history"></use></svg><span>版本记录</span>
+                        </button>
+                        <button type="button" role="menuitem" data-simple-result-action="group">
+                          <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-send"></use></svg><span>存入部门群</span>
+                        </button>
+                        <button type="button" role="menuitem" data-simple-result-action="copy">
+                          <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-copy"></use></svg><span>复制提示词</span>
+                        </button>
+                        <button type="button" role="menuitem" data-simple-result-action="organize">
+                          <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-settings"></use></svg><span>整理作品</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                   <div id="versionHistoryPanel" class="version-history-panel hidden">
                     <div class="version-history-title">
@@ -672,7 +771,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
               <section class="studio-card progress-card">
                 <div class="task-card-title">
                   <h2>请求进度</h2>
-                  <button id="refreshJobsButton" class="text-button" type="button">任务中心</button>
+                  <button id="refreshJobsButton" class="text-button" type="button">刷新</button>
                 </div>
                 <div id="progressInspectorItem" class="progress-inspector hidden">
                   <span id="progressStageLabel">等待阶段</span>
@@ -715,6 +814,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   <div class="risk-panel-title">
                     <span>版权风险提醒</span>
                     <strong id="copyrightRiskStatus">等待检查</strong>
+                    <button id="retryResultReviewButton" class="text-button" type="button">重新检查</button>
                   </div>
                   <p id="copyrightRiskText">生成完成后自动检查。</p>
                 </div>
@@ -828,26 +928,30 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
               </section>
             </section>
 
-            <section id="connectionSettings" class="studio-card settings-drawer">
+            <section id="connectionSettings" class="studio-card settings-drawer hidden">
               <div class="section-title">
-                <h2>连接设置</h2>
+                <h2>管理员高级设置</h2>
                 <button id="saveSettingsButton" class="ghost-button" type="button">保存本地配置</button>
               </div>
               <div class="transport-toggle" role="radiogroup" aria-label="图像通道">
                 <span class="transport-label">图像通道</span>
                 <label class="transport-option">
-                  <input type="radio" name="imageTransport" value="images" checked>
-                  <span>Images API<small>gpt-image-2 · 推荐</small></span>
+                  <input type="radio" name="imageTransport" value="auto" checked>
+                  <span>自动<small>按尺寸和输入图路由</small></span>
+                </label>
+                <label class="transport-option">
+                  <input type="radio" name="imageTransport" value="images">
+                  <span>Images API<small>原生尺寸优先</small></span>
                 </label>
                 <label class="transport-option">
                   <input type="radio" name="imageTransport" value="responses">
-                  <span>Responses API<small>gpt-5.5 · 兼容兜底</small></span>
+                  <span>Responses API<small>强制使用 Responses</small></span>
                 </label>
               </div>
-              <p id="imageTransportHint" class="helper-text">编辑、参考图、延展默认走图像通道 + gpt-image-2，更稳定也更便宜。</p>
+              <p id="imageTransportHint" class="helper-text">自动模式由服务端根据尺寸、模式和输入图选择实际通道。</p>
               <div class="settings-grid">
                 <label>
-                  <span>API Key</span>
+                  <span>自定义上游 API Key</span>
                   <div class="secret-field">
                     <input id="apiKeyInput" type="password" autocomplete="new-password" placeholder="填入新 key 后保存替换" spellcheck="false">
                   </div>
@@ -865,11 +969,41 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   <input id="responsesUrlInput" type="url" placeholder="https://.../v1/responses" spellcheck="false">
                 </label>
                 <label>
+                  <span>Images 生成模型</span>
+                  <input id="generateModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImagesModels">
+                </label>
+                <label>
+                  <span>Images 编辑模型</span>
+                  <input id="editModelInput" type="text" placeholder="gpt-image-2" spellcheck="false" list="openaiImagesModels">
+                </label>
+                <label>
                   <span>Responses 主模型</span>
-                  <input id="responsesModelInput" type="text" placeholder="gpt-5.5" spellcheck="false" list="openaiImageModels">
+                  <input id="responsesModelInput" type="text" placeholder="gpt-5.6-sol" spellcheck="false" list="openaiResponsesModels">
+                </label>
+                <label>
+                  <span>Responses 思考等级</span>
+                  <select id="responsesReasoningEffortSelect">
+                    <option value="" selected>服务端默认</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                    <option value="max">max</option>
+                    <option value="ultra">ultra</option>
+                  </select>
                 </label>
               </div>
-              <p id="settingsHint" class="helper-text">API Key 仅保存在当前浏览器本地存储；容器重启不会清除。输入框只用于填入新 key，不会回显现有 key。服务端如果已预设默认 key，这里可以留空。</p>
+              <datalist id="openaiImagesModels">
+                <option value="gpt-image-2"></option>
+                <option value="gpt-image-1.5"></option>
+                <option value="gpt-image-1"></option>
+              </datalist>
+              <datalist id="openaiResponsesModels">
+                <option value="gpt-5.6-sol"></option>
+                <option value="gpt-5.6-terra"></option>
+                <option value="gpt-5.6-luna"></option>
+              </datalist>
+              <p id="settingsHint" class="helper-text">这些覆盖项只对管理员生效；留空时使用服务端配置。自定义 URL 必须同时填写对应 Key；一个 Key 只能覆盖同一来源的自定义端点。</p>
             </section>
 
             <div class="feedback-strip">
@@ -891,10 +1025,24 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
             </details>
           </section>
         </main>
+
+        <aside id="simpleFirstRunChecklist" class="simple-first-run-checklist hidden" aria-labelledby="simpleChecklistTitle">
+          <header>
+            <strong id="simpleChecklistTitle">第一次出图</strong>
+            <button id="simpleChecklistCloseButton" class="ux-icon-button" type="button" title="关闭清单" aria-label="关闭清单">
+              <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-close"></use></svg>
+            </button>
+          </header>
+          <ol>
+            <li data-simple-checklist-step="1"><span class="simple-check-icon">1</span><span>选一个场景</span></li>
+            <li data-simple-checklist-step="2"><span class="simple-check-icon">2</span><span>填好标题点生成</span></li>
+            <li data-simple-checklist-step="3"><span class="simple-check-icon">3</span><span>下载成品或分享</span></li>
+          </ol>
+        </aside>
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.44</span>
+        <span>PicGen Console　v0.1.55</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -984,13 +1132,13 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
             </label>
             <label>
               <span>公司</span>
-              <select id="profileCompanyInput">
+              <select id="profileCompanyInput" disabled aria-readonly="true">
                 <option value="6renyou">6renyou</option>
               </select>
             </label>
             <label>
               <span>部门</span>
-              <select id="profileDepartmentInput">
+              <select id="profileDepartmentInput" disabled aria-readonly="true">
                 <option value="PD &amp; OPS">PD &amp; OPS</option>
               </select>
             </label>
@@ -1199,8 +1347,11 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
       </div>
     </div>
 
-    <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite"></div>
+    <div id="toastMessage" class="toast-message hidden" role="status" aria-live="polite">
+      <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-info-circle"></use></svg>
+      <span id="toastMessageText"></span>
+    </div>
 
-    <script src="app.js?v=0.1.44" type="module"></script>
+    <script src="app.js?v=0.1.55" type="module"></script>
   </body>
 </html>

@@ -177,8 +177,16 @@ COUNTRY_BOUNDING_BOXES: tuple[tuple[str, float, float, float, float], ...] = (
 )
 
 
+# XML 1.0 不允许的控制字符（html.escape 不处理它们）；从 PDF 粘贴的地名
+# 可能携带 \x08 之类的字符，混进 <text> 会让整张 SVG 解析失败、海报全空。
+_XML_ILLEGAL_CHARS = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff\ufffe\uffff\U000f0000-\U0010ffff]"
+)
+
+
 def _clean_text(value: Any, *, limit: int = 160) -> str:
-    cleaned = " ".join(str(value or "").strip().split())
+    stripped = _XML_ILLEGAL_CHARS.sub("", str(value or ""))
+    cleaned = " ".join(stripped.strip().split())
     return cleaned[:limit]
 
 
@@ -281,7 +289,9 @@ async def geocode_place_with_settings(name: str, settings: Settings) -> list[dic
         if provider == "mapbox" and settings.mapbox_token:
             return await _geocode_mapbox(name, settings)
         return await _geocode_nominatim(name, settings)
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+        # InvalidURL 直接继承 Exception（不在 HTTPError 家族里）：
+        # nominatim_url 配错时必须照样降级成"未定位"，不能 500。
         return []
 
 
