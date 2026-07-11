@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.58"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.59"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.58"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.59"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "expandLogoSafetyRegion" in placement_js

@@ -1,11 +1,11 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.58"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.59"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.58"
+} from "./responses-settings.mjs?v=0.1.59"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"

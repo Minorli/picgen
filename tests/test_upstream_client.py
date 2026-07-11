@@ -66,6 +66,63 @@ async def test_run_json_reports_retry_exhaustion_to_user() -> None:
         await client.aclose()
 
 
+async def test_run_multipart_invalid_mask_is_not_misclassified_as_content_policy() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "code": "invalid_mask_image_format",
+                "message": "Invalid mask image format - mask size does not match image size",
+                "type": "image_generation_user_error",
+            }
+        }
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(400, text=body))
+    client = await _build_client(transport, max_retries=0)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.run_multipart(
+                "https://upstream.test/images/edits",
+                "sk-test",
+                {"prompt": "add a lamp"},
+                [],
+                "UA",
+            )
+        assert info.value.status == 400
+        assert info.value.code == "upstream_invalid_image_input"
+        assert "内容审核" not in info.value.message
+        assert "像素尺寸一致" in info.value.message
+        assert "mask size does not match image size" in (info.value.details or "")
+    finally:
+        await client.aclose()
+
+
+async def test_run_multipart_explicit_content_policy_code_is_still_classified() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "code": "content_policy_violation",
+                "message": "The request violates content policy",
+                "type": "image_generation_user_error",
+            }
+        }
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(400, text=body))
+    client = await _build_client(transport, max_retries=0)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.run_multipart(
+                "https://upstream.test/images/edits",
+                "sk-test",
+                {"prompt": "disallowed"},
+                [],
+                "UA",
+            )
+        assert info.value.code == "upstream_content_policy"
+        assert "内容审核" in info.value.message
+    finally:
+        await client.aclose()
+
+
 async def test_run_json_translates_timeout() -> None:
     calls = {"count": 0}
 

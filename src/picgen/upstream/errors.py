@@ -60,6 +60,8 @@ def classify_upstream_error(status: int, message: str, details: str | None = Non
     haystack = f"{message}\n{details or ''}".lower()
     if status == 429 or "rate limit" in haystack or "rate_limit" in haystack:
         return "upstream_rate_limited"
+    if "invalid_mask_image_format" in _error_values(details):
+        return "upstream_invalid_image_input"
     if _looks_like_content_policy_error(status, message, details):
         return "upstream_content_policy"
     if "cloudflare" in haystack or "error 1010" in haystack:
@@ -76,7 +78,6 @@ def _looks_like_content_policy_error(status: int, message: str, details: str | N
             "policy_violation",
             "safety_policy_violation",
             "moderation_blocked",
-            "image_generation_user_error",
         }
         for value in explicit_values
     ):
@@ -120,6 +121,8 @@ def _error_values(details: str | None) -> set[str]:
 def public_upstream_error_message(status: int, code: str, action: str) -> str:
     if code == "upstream_rate_limited":
         return "图片生成服务当前请求较多，请稍后再试。"
+    if code == "upstream_invalid_image_input":
+        return "上游不接受当前输入图或蒙版的格式/尺寸，请改用像素尺寸一致的标准 PNG 后重试。"
     if code == "upstream_content_policy":
         return "这次提示词没有通过上游内容审核，请调整描述后重试。"
     if code == "upstream_blocked":
