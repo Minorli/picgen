@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.56"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.57"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.56"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.57"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "expandLogoSafetyRegion" in placement_js
@@ -315,6 +315,67 @@ def test_share_success_status_survives_recipient_list_reset() -> None:
     reset_index = submit_share.index("renderShareRecipientOptions()")
     success_index = submit_share.index("setShareStatus(`已分享给 ${count} 人`)")
     assert reset_index < success_index
+
+
+def test_result_displays_and_restores_size_mismatch_warning() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="resultSizeWarning"' in index_html
+    assert 'id="resultSizeWarningText"' in index_html
+    assert ".result-size-warning:not(.hidden)" in styles_css
+    assert "function setResultSizeWarning" in app_js
+    assert "setResultSizeWarning(sizeMismatchMessage)" in app_js
+    assert "sizeWarningText: refs.resultSizeWarningText" in app_js
+    assert 'setResultSizeWarning(result.sizeWarningText || "")' in app_js
+    assert "setError(sizeMismatchMessage)" not in app_js
+
+
+def test_size_mismatch_warning_prefers_server_summary_for_mixed_candidates() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function parseSizeValue") : app_js.index("function setGenerateSize")
+    ]
+    expression = """
+const serverSummary = "上游返回尺寸为 1024x1536，与请求尺寸 1024x1024 不一致。图片已按上游原始返回保存，本地没有缩放。";
+console.log(JSON.stringify({
+  exact: resolveSizeMismatchWarning(
+    { size: "1024x1024", size_mismatch: false },
+    "1024x1024",
+  ),
+  observed: resolveSizeMismatchWarning(
+    { size: "1024x1024", size_mismatch: false },
+    "1024x1536",
+  ),
+  mixed: resolveSizeMismatchWarning(
+    { size: "1024x1024", size_mismatch: true, size_mismatch_message: serverSummary },
+    "1024x1024",
+  ),
+  mixedWithoutMessage: resolveSizeMismatchWarning(
+    { size: "1024x1024", size_mismatch: true },
+    "1024x1024",
+  ),
+}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", f"{function_source}\n{expression}"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["exact"] == ""
+    assert "1024x1536" in result["observed"]
+    assert result["mixed"] == (
+        "上游返回尺寸为 1024x1536，与请求尺寸 1024x1024 不一致。"
+        "图片已按上游原始返回保存，本地没有缩放。"
+    )
+    assert "部分候选图" in result["mixedWithoutMessage"]
+    assert "1024x1024" in result["mixedWithoutMessage"]
+    assert "没有缩放" in result["mixedWithoutMessage"]
 
 
 def test_gallery_library_controls_are_present() -> None:

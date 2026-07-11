@@ -1,11 +1,11 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.56"
+import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.57"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.56"
+} from "./responses-settings.mjs?v=0.1.57"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -525,6 +525,8 @@ const refs = {
   resultHoverActions: document.querySelector("#resultHoverActions"),
   resultActions: document.querySelector("#resultActions"),
   resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
+  resultSizeWarning: document.querySelector("#resultSizeWarning"),
+  resultSizeWarningText: document.querySelector("#resultSizeWarningText"),
   generationOverlay: document.querySelector("#generationOverlay"),
   generationOrbit: document.querySelector(".generation-orbit"),
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
@@ -3139,6 +3141,14 @@ function updateSimpleResultSurface() {
   }
 }
 
+function setResultSizeWarning(message = "") {
+  const text = String(message || "").trim()
+  if (refs.resultSizeWarningText) {
+    refs.resultSizeWarningText.textContent = text
+  }
+  refs.resultSizeWarning?.classList.toggle("hidden", !text)
+}
+
 function normalizeUiMode(value) {
   return UI_MODES.has(value) ? value : ""
 }
@@ -4104,6 +4114,7 @@ function resetReviewStateForExternalResult() {
   state.lastReviewPayload = null
   state.lastFeedbackPayload = null
   state.lastFeedbackRating = null
+  setResultSizeWarning("")
   setError("")
   setRiskPanel("未检查", "这张图片尚未在当前工作区进行版权风险检查。")
   setTextFidelityPanel("未检查", "这张图片尚未在当前工作区进行文字一致性检查。")
@@ -6569,6 +6580,7 @@ function createWorkspaceSnapshot() {
       metaText: refs.resultMeta.textContent,
       timingText: refs.resultTiming.textContent,
       storageText: refs.resultStorage.textContent,
+      sizeWarningText: refs.resultSizeWarningText?.textContent || "",
       labelText: refs.resultPreviewLabel.textContent,
       imageSrc: state.resultPreview?.src || refs.resultImage.getAttribute("src") || "",
       lastResultPrompt: state.lastResultPrompt,
@@ -6784,6 +6796,7 @@ async function restoreWorkspaceState() {
     refs.resultMeta.textContent = result.metaText || ""
     refs.resultTiming.textContent = result.timingText || ""
     refs.resultStorage.textContent = result.storageText || ""
+    setResultSizeWarning(result.sizeWarningText || "")
     setDownloadAvailable(
       state.resultPreview.src,
       state.lastResultImage?.name || `picgen-${state.lastResultMode || "result"}-restored.png`,
@@ -7565,6 +7578,25 @@ function isSameSize(requestedSize, actualSize) {
   const requested = parseSizeValue(requestedSize)
   const actual = parseSizeValue(actualSize)
   return Boolean(requested && actual && requested.width === actual.width && requested.height === actual.height)
+}
+
+function resolveSizeMismatchWarning(payload, actualSize) {
+  const requestedSize = String(payload?.size || "").trim()
+  const measuredMismatch = Boolean(
+    requestedSize && requestedSize !== "auto" && actualSize && !isSameSize(requestedSize, actualSize),
+  )
+  if (payload?.size_mismatch !== true && !measuredMismatch) {
+    return ""
+  }
+  const serverMessage = String(payload?.size_mismatch_message || "").trim()
+  if (serverMessage) {
+    return serverMessage
+  }
+  if (measuredMismatch) {
+    return `上游返回尺寸为 ${actualSize}，与请求尺寸 ${requestedSize} 不一致。图片已按上游原始返回保存，本地没有缩放。`
+  }
+  const requestedDescription = requestedSize && requestedSize !== "auto" ? ` ${requestedSize}` : ""
+  return `部分候选图与请求尺寸${requestedDescription}不一致。图片已按上游原始返回保存，本地没有缩放。`
 }
 
 function setGenerateSize(size) {
@@ -8811,6 +8843,7 @@ function clearResult() {
   refs.resultMeta.textContent = ""
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = ""
+  setResultSizeWarning("")
   refs.logoComposeStatus.textContent = refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用"
   refs.rawResponseOutput.textContent = "{}"
   refs.debugOutput.textContent = "等待操作。"
@@ -8869,6 +8902,7 @@ function snapshotCurrentResultState() {
     meta: refs.resultMeta.textContent,
     timing: refs.resultTiming.textContent,
     storage: refs.resultStorage.textContent,
+    sizeWarningText: refs.resultSizeWarningText?.textContent || "",
     logoStatus: refs.logoComposeStatus.textContent,
     rawResponse: state.rawResponsePreview,
     debugLines: [...state.debugLines],
@@ -8922,6 +8956,7 @@ function restoreResultStateSnapshot(snapshot) {
   refs.resultMeta.textContent = snapshot.meta || ""
   refs.resultTiming.textContent = snapshot.timing || ""
   refs.resultStorage.textContent = snapshot.storage || ""
+  setResultSizeWarning(snapshot.sizeWarningText || "")
   refs.logoComposeStatus.textContent = snapshot.logoStatus || (refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用")
 
   state.lastResultPrompt = snapshot.lastResultPrompt || ""
@@ -9029,6 +9064,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = "请求进行中 0.0s"
   refs.resultStorage.textContent = ""
+  setResultSizeWarning("")
   setDownloadDisabled()
   refs.shareResultPanel?.classList.add("hidden")
   state.resultCandidates = []
@@ -9501,11 +9537,8 @@ async function setResult(payload, durationMs, requestSource = null) {
   if (payload.mode === "itinerary" && compositionMessage) {
     setStatusMessage(compositionMessage)
   }
-  if (payload.size && payload.size !== "auto" && actualSize && !isSameSize(payload.size, actualSize)) {
-    setError(`上游返回尺寸为 ${actualSize}，与请求尺寸 ${payload.size} 不一致。图片已按上游原始返回保存，本地没有缩放。`)
-  } else {
-    setError("")
-  }
+  const sizeMismatchMessage = resolveSizeMismatchWarning(payload, actualSize)
+  setResultSizeWarning(sizeMismatchMessage)
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
 
