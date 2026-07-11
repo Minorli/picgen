@@ -2454,6 +2454,43 @@ def test_edit_passes_mask_and_options(make_client, settings_factory):
     assert field_names == ["image", "mask"]
 
 
+def test_edit_invalid_mask_returns_actionable_input_error(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.side_effect = APIError(
+        400,
+        "上游不接受当前输入图或蒙版的格式/尺寸，请改用像素尺寸一致的标准 PNG 后重试。",
+        "Invalid mask image format - mask size does not match image size",
+        code="upstream_invalid_image_input",
+    )
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "prompt": "只修改蒙版透明区域",
+            "model": "gpt-image-2",
+            "image": {
+                "name": "source.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+            "mask": {
+                "name": "mask.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["code"] == "upstream_invalid_image_input"
+    assert "像素尺寸一致" in payload["error"]
+    assert "内容审核" not in payload["error"]
+    fake.run_multipart.assert_awaited_once()
+
+
 def test_responses_image_requires_prompt(make_client):
     client, _, _ = make_client()
     response = client.post("/api/responses-image", json={"api_key": "sk-test"})
