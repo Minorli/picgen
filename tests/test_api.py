@@ -3392,8 +3392,8 @@ def test_payload_size_limit_streams_through_with_valid_content_length():
     assert response_start["status"] == 204
 
 
-def test_rate_limit_returns_429(make_client, settings_factory):
-    settings = settings_factory(rate_limit_per_minute=2, rate_limit_burst=2)
+def test_rate_limit_write_burst_returns_429(make_client, settings_factory):
+    settings = settings_factory(rate_limit_per_minute=100, rate_limit_burst=2)
     client, _, _ = make_client(settings=settings)
     # generate endpoint -> still validation 400, but counts toward rate limit
     client.post("/api/generate", json={})
@@ -3402,6 +3402,44 @@ def test_rate_limit_returns_429(make_client, settings_factory):
     assert response.status_code == 429
     assert response.json()["code"] == "rate_limited"
     assert "Retry-After" in response.headers
+
+
+def test_rate_limit_burst_does_not_block_read_only_ui_refresh(make_client, settings_factory):
+    settings = settings_factory(rate_limit_per_minute=100, rate_limit_burst=2)
+    client, _, _ = make_client(settings=settings)
+
+    responses = [client.get("/api/recipes") for _ in range(5)]
+
+    assert all(response.status_code != 429 for response in responses)
+
+
+def test_read_requests_do_not_consume_write_burst(make_client, settings_factory):
+    settings = settings_factory(rate_limit_per_minute=100, rate_limit_burst=2)
+    client, _, _ = make_client(settings=settings)
+
+    for _ in range(5):
+        assert client.get("/api/recipes").status_code != 429
+
+    first_write = client.post("/api/generate", json={})
+    second_write = client.post("/api/generate", json={})
+    blocked_write = client.post("/api/generate", json={})
+
+    assert first_write.status_code != 429
+    assert second_write.status_code != 429
+    assert blocked_write.status_code == 429
+
+
+def test_rate_limit_per_minute_still_applies_to_read_requests(make_client, settings_factory):
+    settings = settings_factory(rate_limit_per_minute=2, rate_limit_burst=1)
+    client, _, _ = make_client(settings=settings)
+
+    first = client.get("/api/recipes")
+    second = client.get("/api/recipes")
+    third = client.get("/api/recipes")
+
+    assert first.status_code != 429
+    assert second.status_code != 429
+    assert third.status_code == 429
 
 
 def test_proxy_auth_token_enforced(make_client, settings_factory):
