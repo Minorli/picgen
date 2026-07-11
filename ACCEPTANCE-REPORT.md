@@ -1,7 +1,7 @@
 # PicGen 双模式 UX 验收报告
 
 验收开始：2026-07-11
-当前记录时间：2026-07-11T08:52:45Z
+当前记录时间：2026-07-11T09:22:18Z
 实施规格：`TASK-UX-MASTER.md`、`TASK-UX-IMPLEMENT.md`、`TASK-UX-ACCEPTANCE.md`
 
 ## 第 1 关：静态检查
@@ -161,7 +161,15 @@
 
 ## 第 5 关：发版、发布、部署
 
-待执行。
+通过。
+
+- 发布分支 `release/0.1.55-simple-mode` 经 PR #27 合并到受保护的 `main`；必需检查 `validate` 通过，合并提交为 `e5755598cc9ad769328d301b17f983ef8dad6607`。合并后已确认 `main` 仍启用严格分支保护、必需检查、1 人审批和管理员约束。
+- 从上述合并提交构建并发布 `minorli/picgen:0.1.55`。多架构索引摘要为 `sha256:f6e0365e067e0b68901327d08b3e585e4c2e01722749b9e93e85cf0253a67e03`，amd64 manifest 摘要为 `sha256:2569efb5323fa6d29e66a2f390b1466fdc3e54a02f59bd742c05392b7c214e13`。
+- 部署前生产 SQLite 已备份到 `/vol1/data1/picgen/backups/auth-20260711-pre-0.1.55.sqlite3`；大小 3,780,608 bytes，`quick_check=ok`，SHA256 为 `be91eb6d7ace9a854f06514f85184295a15a2ae438c3316f2f68c7b4bc73bd4f`。
+- fnfarm Compose 仅把镜像标签从 `0.1.53` 改为 `0.1.55`；原文件和部署后文件 SHA256 分别为 `dbd53744f4711cf207d305af2e3173b315ab9df3bc9ea1a8a22acc53896ca4c5`、`57302dc2b392f6a8a04adaa4da36cda3f2d4882b96285d515f3991b98adc641d`，原文件备份为 `/vol1/data1/picgen/docker-compose.yml.bak-0.1.53`。
+- 部署后容器持续 `running/healthy`、重启数为 0；`/api/ready` 返回版本 `0.1.55`、存储可写、上游客户端就绪。静态资源戳均为 `0.1.55`，数据库 `quick_check=ok` 并完成 schema v15，既有用户数保持 15。
+- 生产真实冒烟通过：一次性账号向 `/api/image-jobs` 请求 1024x1024、单图、无 Logo；`images-generate` / `gpt-image-2` 在 26.21 秒返回 HTTP 200。上游原始像素为 1254x1254，本地按同宽高比 Lanczos 缩小，最终文件与数据库记录均为真实 1024x1024 PNG，767,088 bytes。
+- 冒烟结束后测试图片、生成任务、会话和用户全部删除；复核对应任务/图片/用户计数均为 0、总用户数恢复为 15。随后连续观察五分钟，容器未重启，错误级日志、Traceback 和 HTTP 5xx 计数均为 0。
 
 ## 已知限制
 
