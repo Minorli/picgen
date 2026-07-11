@@ -1988,14 +1988,11 @@ def test_generate_fans_out_when_upstream_returns_fewer_candidates(make_client, s
     assert "n" not in fake.run_json.await_args_list[1].args[2]
 
 
-def test_generate_retries_without_sample_count_after_502(make_client, settings_factory):
+def test_generate_does_not_retry_ambiguous_502(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_json.side_effect = [
         APIError(502, "Upstream request failed", code="upstream_error"),
-        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
-        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
-        {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
     ]
 
     response = client.post(
@@ -2009,11 +2006,8 @@ def test_generate_retries_without_sample_count_after_502(make_client, settings_f
         },
     )
 
-    assert response.status_code == 200
-    assert response.json()["candidate_count"] == 3
-    assert fake.run_json.await_count == 4
-    assert fake.run_json.await_args_list[0].args[2]["n"] == 3
-    assert "n" not in fake.run_json.await_args_list[1].args[2]
+    assert response.status_code == 502
+    assert fake.run_json.await_count == 1
 
 
 def test_generate_does_not_retry_on_content_moderation_400(make_client, settings_factory):
@@ -2036,6 +2030,66 @@ def test_generate_does_not_retry_on_content_moderation_400(make_client, settings
 
     # The bare " n" inside "is not allowed" must NOT be read as a sample-count
     # error: the 400 should surface unchanged with no extra fallback call.
+    assert response.status_code == 400
+    assert fake.run_json.await_count == 1
+
+
+def test_generate_does_not_retry_plural_moderation_sample_message(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(
+            400,
+            "Image request rejected",
+            "上游状态码：400\n"
+            "上游错误：One or more samples were flagged by moderation.\n\n"
+            '{"code":"moderation_blocked","param":"prompt"}',
+            code="upstream_content_policy",
+        ),
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成两张海报",
+            "model": "gpt-image-2",
+            "sample_count": 2,
+        },
+    )
+
+    assert response.status_code == 400
+    assert fake.run_json.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Unknown parameter name is invalid",
+        "Image generation must be retried manually",
+    ],
+)
+def test_generate_does_not_retry_ambiguous_plaintext_n_substrings(
+    make_client, settings_factory, message
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [APIError(400, message, code="upstream_error")]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成两张海报",
+            "model": "gpt-image-2",
+            "sample_count": 2,
+        },
+    )
+
     assert response.status_code == 400
     assert fake.run_json.await_count == 1
 
@@ -2376,11 +2430,54 @@ def test_edit_fans_out_when_upstream_returns_fewer_candidates(make_client, setti
     assert "n" not in second_fields
 
 
-def test_edit_retries_without_sample_count_after_502(make_client, settings_factory):
+def test_edit_does_not_retry_ambiguous_502(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_multipart.side_effect = [
         APIError(502, "Upstream request failed", code="upstream_error"),
+    ]
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/edits",
+            "prompt": "生成三张候选",
+            "model": "gpt-image-2",
+            "sample_count": 3,
+            "images": [
+                {
+                    "name": "style.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+                {
+                    "name": "material.png",
+                    "type": "image/png",
+                    "data_url": f"data:image/png;base64,{TINY_PNG_B64}",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 502
+    assert fake.run_multipart.await_count == 1
+
+
+def test_edit_retries_when_upstream_rejects_nested_sample_count_parameter(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_multipart.side_effect = [
+        APIError(
+            400,
+            "Upstream request failed",
+            "上游状态码：400\n"
+            "上游错误：Unknown parameter: 'tools[0].n'.\n\n"
+            '{"code":"unknown_parameter","param":"tools[0].n"}',
+            code="upstream_error",
+        ),
         {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
         {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
         {"data": [{"b64_json": TINY_PNG_B64}], "created": 3},
@@ -2413,7 +2510,7 @@ def test_edit_retries_without_sample_count_after_502(make_client, settings_facto
     assert response.json()["candidate_count"] == 3
     assert fake.run_multipart.await_count == 4
     assert fake.run_multipart.await_args_list[0].args[2]["n"] == 3
-    assert "n" not in fake.run_multipart.await_args_list[1].args[2]
+    assert all("n" not in call.args[2] for call in fake.run_multipart.await_args_list[1:])
 
 
 def test_edit_passes_mask_and_options(make_client, settings_factory):
