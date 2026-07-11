@@ -915,44 +915,74 @@ def _extend_candidate_items(target: dict[str, Any], source: dict[str, Any], limi
         target_data.append(item)
 
 
-def _error_mentions_sample_count(exc: APIError) -> bool:
-    haystack = f"{exc.message}\n{exc.details or ''}".lower()
-    # Be specific: a bare " n" substring matches ordinary prose ("is not
-    # allowed", "no credit") and would wrongly strip `n` on, e.g., a content
-    # moderation 400. Only react to errors that actually name the sample-count
-    # parameter.
-    needles = (
-        '"n"',
-        "'n'",
-        "parameter n",
-        "param n",
-        "value of n",
-        "n must",
-        # 裸 "sample" 会命中 "flagged sample" 这类审核文案，触发一次注定
-        # 失败的全价重试；只认真正指参数名的写法。
-        "sample_count",
-        "sample count",
-        "samples",
-        "best_of",
-        "num_images",
-        "n_images",
+def _decode_trailing_error_json(details: str) -> object | None:
+    starts = (0, *(match.start() for match in re.finditer(r"[\[{]", details)))
+    for start in dict.fromkeys(starts):
+        try:
+            return json.loads(details[start:])
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _structured_error_parameters(details: str | None) -> tuple[str, ...]:
+    if not details:
+        return ()
+    payload = _decode_trailing_error_json(details)
+    if payload is None:
+        return ()
+
+    def _walk(value: object) -> tuple[str, ...]:
+        if isinstance(value, dict):
+            direct = tuple(
+                child
+                for key, child in value.items()
+                if key.lower() in {"param", "parameter"} and isinstance(child, str)
+            )
+            nested = tuple(parameter for child in value.values() for parameter in _walk(child))
+            return (*direct, *nested)
+        if isinstance(value, list):
+            return tuple(parameter for child in value for parameter in _walk(child))
+        return ()
+
+    return _walk(payload)
+
+
+def _is_sample_count_parameter(parameter: str) -> bool:
+    path_parts = tuple(
+        part for part in re.split(r"[.\[\]'\"\s]+", parameter.strip().lower()) if part
     )
-    return any(needle in haystack for needle in needles)
+    return bool(
+        path_parts
+        and path_parts[-1]
+        in {"n", "sample_count", "best_of", "num_images", "n_images", "samples"}
+    )
+
+
+def _error_mentions_sample_count(exc: APIError) -> bool:
+    structured_parameters = _structured_error_parameters(exc.details)
+    if structured_parameters:
+        return any(_is_sample_count_parameter(value) for value in structured_parameters)
+    haystack = f"{exc.message}\n{exc.details or ''}".lower()
+    parameter_path = r"(?:[\w-]+(?:\[\d+\])?\.)*n"
+    patterns = (
+        rf"\b(?:parameter|param)\s*[:=]?\s*[\"'`]?{parameter_path}(?:[\"'`]|\b)",
+        r"\bvalue\s+of\s+[\"'`]?n(?:[\"'`]|\b)",
+        r"(?<!\w)n\s+must\b",
+        r"(?<!\w)[\"'`](?:n|samples)[\"'`](?!\w)",
+        r"(?<!\w)(?:sample_count|best_of|num_images|n_images)(?!\w)",
+        r"\bsample\s+count\b",
+    )
+    return any(re.search(pattern, haystack) is not None for pattern in patterns)
 
 
 def _should_retry_without_sample_count(exc: APIError, sample_count: int) -> bool:
     if sample_count <= 1:
         return False
-    if exc.status == HTTPStatus.BAD_REQUEST:
-        return _error_mentions_sample_count(exc)
-    # 502/503 from gateways that cannot handle n>1 usually mean the request
-    # was rejected outright, so a retry without n is safe. A 504 means the
-    # upstream may STILL be generating — re-POSTing would double the billing
-    # for a generation that eventually completes.
-    return exc.status in {
-        HTTPStatus.BAD_GATEWAY,
-        HTTPStatus.SERVICE_UNAVAILABLE,
-    }
+    # Only an explicit 400 parameter rejection proves the non-idempotent image
+    # request was not accepted. Gateway 5xx responses are ambiguous and must
+    # not be retried automatically because the upstream may still bill them.
+    return exc.status == HTTPStatus.BAD_REQUEST and _error_mentions_sample_count(exc)
 
 
 async def _fill_candidates(
