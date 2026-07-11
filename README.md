@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.57**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.58**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,9 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.57 主要特性
+## 0.1.58 主要特性
+
+- **Responses 候选数量收敛**：强制使用图像工具、关闭并行工具调用并把请求数量写入提示词；上游仍越界时在落盘前按 `sample_count` 截断，避免单图任务意外生成 6 张候选并拖到数百秒，同时不再为非官方 `n` 参数自动重发付费请求。
 
 - **简洁模式尺寸提示**：上游返回不同画幅时继续保留完整原图，并在结果按钮上方直接显示请求尺寸、实际尺寸和未缩放说明；提示随结果持久化，刷新后仍可见。
 
@@ -107,10 +109,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.57 .
+docker build -t minorli/picgen:0.1.58 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.57
+  minorli/picgen:0.1.58
 ```
 
 或：
@@ -125,10 +127,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.57`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.58`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.57 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.58 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -241,7 +243,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.57 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.58 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

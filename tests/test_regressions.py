@@ -232,6 +232,7 @@ def test_placeholder_candidates_are_dropped_and_index_preserved(tmp_path: Path) 
         "data": [
             {"revised_prompt": "moderated away"},  # no image at all
             {"b64_json": TINY_PNG_B64},
+            {"b64_json": TINY_PNG_B64, "revised_prompt": "extra valid candidate"},
         ],
     }
     payload = prepare_image_payload(
@@ -239,11 +240,12 @@ def test_placeholder_candidates_are_dropped_and_index_preserved(tmp_path: Path) 
         data_dir=tmp_path,
         outputs_dir=tmp_path / "outputs",
         user_agent="UA",
-        save_context={"mode": "generate"},
+        save_context={"mode": "generate", "sample_count": 1},
         fetch_remote=None,
     )
     assert payload["candidate_count"] == 1
     assert payload["images"][0]["candidate_index"] == 1
+    assert len([path for path in (tmp_path / "outputs").rglob("*") if path.is_file()]) == 1
 
 
 def test_all_placeholder_candidates_yield_zero_count(tmp_path: Path) -> None:

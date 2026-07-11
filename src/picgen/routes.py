@@ -1307,6 +1307,8 @@ async def _generate_itinerary_artwork(
         "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
         **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
         "stream": True,
+        "parallel_tool_calls": False,
+        "tool_choice": {"type": "image_generation"},
         "input": [{"role": "user", "content": content}],
         "tools": [tool],
     }
@@ -4925,8 +4927,6 @@ async def handle_responses_image(
     tool: dict[str, Any] = {"type": "image_generation"}
     if size and size != "auto":
         tool["size"] = size
-    if parsed.sample_count > 1:
-        tool["n"] = parsed.sample_count
     for key in ("quality", "background", "output_format", "output_compression", "moderation"):
         if key in image_options:
             tool[key] = image_options[key]
@@ -4937,6 +4937,12 @@ async def handle_responses_image(
         tool["input_image_mask"] = {"image_url": f"data:{mask_mime};base64,{mask_b64}"}
 
     guarded_prompt = append_restricted_destination_guard(effective_prompt)
+    guarded_prompt = (
+        f"{guarded_prompt.rstrip()}\n\n"
+        f"图像数量要求：只调用 image_generation 工具 {parsed.sample_count} 次，"
+        f"每次只生成一张，最终恰好返回 {parsed.sample_count} 张图片；"
+        "不要额外生成备选方案、变体、草稿或候选图。"
+    )
     if strict_size and size and size != "auto":
         # The image_generation tool's `size` param is treated as advisory by
         # some gateways (they "lazily" return a downscaled canvas). Restating
@@ -4951,6 +4957,11 @@ async def handle_responses_image(
         "instructions": RESPONSES_IMAGE_INSTRUCTIONS,
         **reasoning_options,
         "stream": True,
+        # The default compatible gateway rejects the official max_tool_calls
+        # field. Serial forced calls plus the explicit count instruction is the
+        # strongest control it accepts; the finalize path also caps overflow.
+        "parallel_tool_calls": False,
+        "tool_choice": {"type": "image_generation"},
         "input": [
             {
                 "role": "user",
@@ -4965,33 +4976,9 @@ async def handle_responses_image(
     }
 
     async def _run_responses_upstream() -> dict[str, Any]:
-        try:
-            return await client.run_responses(
-                endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
-            )
-        except APIError as exc:
-            # `n` is not part of the official image_generation tool schema; strict
-            # upstreams reject the whole request. Mirror the Images-API fallback:
-            # retry once without it when the error clearly points at the field.
-            if (
-                "n" in tool
-                and exc.status == HTTPStatus.BAD_REQUEST
-                and _error_mentions_sample_count(exc)
-            ):
-                log_event(
-                    logger,
-                    logging.WARNING,
-                    "responses_image_sample_count_fallback",
-                    endpoint_url=endpoint_url,
-                    sample_count=parsed.sample_count,
-                    status=exc.status,
-                    message=exc.message,
-                )
-                tool.pop("n", None)
-                return await client.run_responses(
-                    endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
-                )
-            raise
+        return await client.run_responses(
+            endpoint_url, api_key, upstream_payload, settings.upstream_user_agent
+        )
 
     metadata = request_metadata({**payload, **image_options}, size=size)
     if itinerary_id:
