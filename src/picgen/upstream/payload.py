@@ -380,6 +380,8 @@ def prepare_image_payload(
 
     data_items = upstream.get("data")
     candidate_items = [item for item in data_items if isinstance(item, dict)] if isinstance(data_items, list) else []
+    requested_count = save_context.get("sample_count")
+    candidate_limit = max(1, int(requested_count)) if requested_count is not None else None
     # Process candidates independently: a single sample that fails to download or
     # save must not discard the others. Only surface an error if every candidate
     # failed (otherwise the customer silently loses good images they asked for).
@@ -411,6 +413,16 @@ def prepare_image_payload(
         ):
             continue
         images.append(payload)
+        if candidate_limit is not None and len(images) >= candidate_limit:
+            if index + 1 < len(candidate_items):
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "upstream_candidate_count_capped",
+                    requested_count=candidate_limit,
+                    upstream_count=len(candidate_items),
+                )
+            break
     if not images and candidate_errors:
         raise candidate_errors[0]
     first_image = images[0] if images else {}

@@ -1101,6 +1101,9 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert fake.run_responses.await_args.args[1] == "sk-test"
     assert upstream_payload["model"] == "gpt-5.6-sol"
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
+    assert upstream_payload["parallel_tool_calls"] is False
+    assert "max_tool_calls" not in upstream_payload
+    assert upstream_payload["tool_choice"] == {"type": "image_generation"}
     assert upstream_payload["tools"][0]["size"] == "1792x1792"
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
@@ -2522,7 +2525,75 @@ def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
     assert "图像生成助手" in upstream_payload["instructions"]
     assert upstream_payload["stream"] is True
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
+    assert upstream_payload["parallel_tool_calls"] is False
+    assert "max_tool_calls" not in upstream_payload
+    assert upstream_payload["tool_choice"] == {"type": "image_generation"}
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
+
+
+def test_responses_image_caps_unexpected_extra_upstream_candidates(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, resolved = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [
+            {"b64_json": valid_png_b64(10 + index, 20 + index), "revised_prompt": f"candidate-{index}"}
+            for index in range(6)
+        ],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "只生成一张旅行海报",
+            "model": "gpt-5.6-sol",
+            "mode": "generate",
+            "sample_count": 1,
+            "size": "20x40",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate_count"] == 1
+    assert len(payload["images"]) == 1
+    assert payload["images"][0]["revised_prompt"] == "candidate-0"
+    assert len([path for path in resolved.outputs_dir.rglob("*") if path.is_file()]) == 1
+    upstream_payload = fake.run_responses.await_args.args[2]
+    assert upstream_payload["parallel_tool_calls"] is False
+    assert "max_tool_calls" not in upstream_payload
+    assert upstream_payload["tool_choice"] == {"type": "image_generation"}
+    assert "n" not in upstream_payload["tools"][0]
+    assert "只调用 image_generation 工具 1 次" in upstream_payload["input"][0]["content"][0]["text"]
+
+
+def test_responses_image_does_not_retry_rejected_legacy_sample_count_parameter(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.side_effect = APIError(
+        400,
+        'image_generation parameter "n" is not supported',
+        code="upstream_error",
+    )
+
+    response = client.post(
+        "/api/responses-image",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://sub.tidba.com/v1/responses",
+            "prompt": "只生成一张旅行海报",
+            "model": "gpt-5.6-sol",
+            "sample_count": 3,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "upstream_error"
+    fake.run_responses.assert_awaited_once()
 
 
 def test_responses_image_uploads_input_file_and_uses_file_id(make_client, settings_factory):
@@ -2567,7 +2638,13 @@ def test_responses_image_uploads_ordered_reference_images(make_client, settings_
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
     fake.run_file_upload.side_effect = [{"id": "file_style"}, {"id": "file_material"}]
-    fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+    fake.run_responses.return_value = {
+        "data": [
+            {"b64_json": valid_png_b64(20 + index, 40 + index), "revised_prompt": f"candidate-{index}"}
+            for index in range(4)
+        ],
+        "created": 1,
+    }
 
     response = client.post(
         "/api/responses-image",
@@ -2599,15 +2676,21 @@ def test_responses_image_uploads_ordered_reference_images(make_client, settings_
     payload = response.json()
     assert payload["source_file_ids"] == ["file_style", "file_material"]
     assert payload["source_image_names"] == ["style.png", "material.png"]
+    assert payload["candidate_count"] == 3
+    assert len(payload["images"]) == 3
     assert fake.run_file_upload.await_count == 2
 
     uploaded = [call.args[2]["filename"] for call in fake.run_file_upload.await_args_list]
     assert uploaded == ["style.png", "material.png"]
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["tools"][0]["n"] == 3
+    assert upstream_payload["parallel_tool_calls"] is False
+    assert "max_tool_calls" not in upstream_payload
+    assert upstream_payload["tool_choice"] == {"type": "image_generation"}
+    assert "n" not in upstream_payload["tools"][0]
     content = upstream_payload["input"][0]["content"]
     assert content[0]["type"] == "input_text"
     assert content[0]["text"].startswith("把素材做成模板风格")
+    assert "只调用 image_generation 工具 3 次" in content[0]["text"]
     assert "硬性目的地限制" in content[0]["text"]
     assert content[1:] == [
         {"type": "input_image", "file_id": "file_style"},
