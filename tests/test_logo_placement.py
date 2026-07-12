@@ -11,6 +11,7 @@ def _run_logo_policy(expression: str) -> object:
     script = f"""
 import {{
   calculateLogoPlacementScore,
+  calculateOfficialLogoPixelMatch,
   calculateRegionComplexity,
   calculateRegionTextEdgePenalty,
   chooseLogoPlacement,
@@ -38,6 +39,49 @@ def test_logo_stays_at_standard_position_for_marginal_improvement() -> None:
     )
 
     assert result == {"x": 42, "y": 42, "width": 174, "height": 54}
+
+
+def test_official_logo_pixel_match_accepts_lossless_and_small_color_drift() -> None:
+    result = _run_logo_policy(
+        "(() => {"
+        "const logo = { data: Uint8ClampedArray.from(["
+        "10,20,30,255, 40,160,90,255, 250,250,250,0, 90,80,70,240"
+        "]) };"
+        "const exact = { data: Uint8ClampedArray.from(["
+        "10,20,30,255, 40,160,90,255, 1,2,3,255, 90,80,70,255"
+        "]) };"
+        "const drift = { data: Uint8ClampedArray.from(["
+        "26,5,48,255, 58,143,108,255, 1,2,3,255, 90,80,70,255"
+        "]) };"
+        "return {"
+        "exact: calculateOfficialLogoPixelMatch(exact, logo),"
+        "drift: calculateOfficialLogoPixelMatch(drift, logo),"
+        "};"
+        "})()"
+    )
+
+    assert result["exact"] == {"score": 1, "matchedPixels": 2, "comparedPixels": 2}
+    assert result["drift"] == {"score": 1, "matchedPixels": 2, "comparedPixels": 2}
+
+
+def test_official_logo_pixel_match_rejects_unrelated_or_invalid_regions() -> None:
+    result = _run_logo_policy(
+        "(() => {"
+        "const logo = { data: Uint8ClampedArray.from(["
+        "10,20,30,255, 40,160,90,255, 250,250,250,0"
+        "]) };"
+        "const unrelated = { data: Uint8ClampedArray.from(["
+        "200,210,220,255, 180,20,30,255, 1,2,3,255"
+        "]) };"
+        "return {"
+        "unrelated: calculateOfficialLogoPixelMatch(unrelated, logo),"
+        "invalid: calculateOfficialLogoPixelMatch({ data: new Uint8ClampedArray(4) }, logo),"
+        "};"
+        "})()"
+    )
+
+    assert result["unrelated"] == {"score": 0, "matchedPixels": 0, "comparedPixels": 2}
+    assert result["invalid"] == {"score": 0, "matchedPixels": 0, "comparedPixels": 0}
 
 
 def test_logo_moves_only_for_absolute_and_relative_score_improvement() -> None:

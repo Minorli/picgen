@@ -2551,6 +2551,53 @@ def test_edit_passes_mask_and_options(make_client, settings_factory):
     assert field_names == ["image", "mask"]
 
 
+def test_edit_composites_original_pixels_outside_mask(make_client, settings_factory):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+
+    def encoded(image: Image.Image) -> str:
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return base64.b64encode(output.getvalue()).decode("ascii")
+
+    source = Image.new("RGBA", (4, 4), (220, 30, 30, 255))
+    generated = Image.new("RGBA", (4, 4), (20, 80, 220, 255))
+    mask = Image.new("RGBA", (4, 4), (255, 255, 255, 255))
+    mask.putpixel((1, 1), (255, 255, 255, 0))
+    fake.run_multipart.return_value = {
+        "data": [{"b64_json": encoded(generated)}],
+        "created": 0,
+    }
+
+    response = client.post(
+        "/api/edit",
+        json={
+            "api_key": "sk-test",
+            "prompt": "只修改蒙版透明区域",
+            "model": "gpt-image-2",
+            "output_format": "png",
+            "image": {
+                "name": "source.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{encoded(source)}",
+            },
+            "mask": {
+                "name": "mask.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{encoded(mask)}",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    with Image.open(payload["saved_image_path"]) as result:
+        rgba = result.convert("RGBA")
+        assert rgba.getpixel((0, 0)) == (220, 30, 30, 255)
+        assert rgba.getpixel((1, 1)) == (20, 80, 220, 255)
+    assert payload["metadata"]["mask_composited"] is True
+
+
 def test_edit_invalid_mask_returns_actionable_input_error(make_client, settings_factory):
     settings = settings_factory(default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)

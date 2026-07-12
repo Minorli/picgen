@@ -265,6 +265,68 @@ def resize_image_to_exact_size(
     )
 
 
+def composite_masked_edit_image(
+    *,
+    source_image_bytes: bytes,
+    mask_image_bytes: bytes,
+    generated_image_bytes: bytes,
+    generated_image_mime: str,
+) -> tuple[bytes, str, dict[str, object]]:
+    """Keep source pixels wherever the OpenAI-style mask is opaque."""
+
+    normalized_mime = generated_image_mime.lower().split(";", 1)[0].strip()
+    output_format = _MIME_TO_PIL_FORMAT.get(normalized_mime)
+    if output_format is None:
+        raise ValueError(f"unsupported image mime for masked edit: {generated_image_mime}")
+
+    with (
+        Image.open(BytesIO(source_image_bytes)) as source_file,
+        Image.open(BytesIO(mask_image_bytes)) as mask_file,
+        Image.open(BytesIO(generated_image_bytes)) as generated_file,
+    ):
+        source = ImageOps.exif_transpose(source_file).convert("RGBA")
+        mask = ImageOps.exif_transpose(mask_file)
+        generated = ImageOps.exif_transpose(generated_file).convert("RGBA")
+        if source.width * source.height > MAX_EXACT_IMAGE_PIXELS:
+            raise ValueError(f"source image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
+        if mask.size != source.size:
+            raise ValueError("mask dimensions must match source image dimensions")
+        if "A" not in mask.getbands():
+            raise ValueError("mask image must contain an alpha channel")
+        if generated.size != source.size:
+            generated = ImageOps.fit(
+                generated,
+                source.size,
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+
+        edit_alpha = ImageOps.invert(mask.getchannel("A"))
+        composed = Image.composite(generated, source, edit_alpha)
+        if output_format == "JPEG":
+            composed = composed.convert("RGB")
+
+        output = BytesIO()
+        if output_format == "PNG":
+            composed.save(output, format=output_format, compress_level=6)
+        elif output_format == "JPEG":
+            composed.save(output, format=output_format, quality=95, optimize=True)
+        elif output_format == "WEBP":
+            composed.save(output, format=output_format, quality=95)
+        else:  # pragma: no cover - guarded by _MIME_TO_PIL_FORMAT
+            composed.save(output, format=output_format)
+
+    return (
+        output.getvalue(),
+        normalized_mime,
+        {
+            "mask_composited": True,
+            "mask_preserve_mode": "inverse_alpha",
+            "mask_source_size": f"{source.width}x{source.height}",
+        },
+    )
+
+
 def storage_url_for_path(data_dir: Path, file_path: Path) -> str:
     # Relative URL (no leading slash) so it resolves correctly both when PicGen is
     # served at the site root and when it is mounted under a sub-path (e.g. /picgen/).

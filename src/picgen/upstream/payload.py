@@ -5,6 +5,7 @@ import binascii
 import json
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -22,6 +23,8 @@ from ..storage import (
 )
 
 logger = get_logger("picgen.upstream.payload")
+
+ImageTransform = Callable[[bytes, str, int], tuple[bytes, str, dict[str, object]]]
 
 _IMAGE_OPTION_KEYS = ("quality", "background", "output_format", "output_compression", "moderation")
 _RAW_IMAGE_KEYS = frozenset({"b64_json", "result", "partial_image_b64", "image_b64"})
@@ -283,6 +286,7 @@ def _image_item_payload(
     user_agent: str,
     save_context: dict[str, Any],
     fetch_remote: Any | None = None,
+    image_transform: ImageTransform | None = None,
     index: int = 0,
 ) -> dict[str, Any]:
     base64_image = item.get("b64_json")
@@ -325,6 +329,17 @@ def _image_item_payload(
             image_mime,
             save_context,
         )
+        transform_metadata: dict[str, object] = {}
+        if image_transform is not None:
+            image_bytes, image_mime, transform_metadata = image_transform(
+                image_bytes,
+                image_mime,
+                index,
+            )
+            image_data_url = (
+                f"data:{image_mime};base64,"
+                f"{base64.b64encode(image_bytes).decode('ascii')}"
+            )
         saved_payload = save_output_image(
             data_dir=data_dir,
             outputs_dir=outputs_dir,
@@ -340,9 +355,11 @@ def _image_item_payload(
                 "upstream_image_url": image_url,
                 "saved_image_mime": image_mime,
                 **normalization_metadata,
+                **transform_metadata,
             },
         )
         saved_payload.update(normalization_metadata)
+        saved_payload.update(transform_metadata)
 
     # When the image is persisted, the browser loads it from the saved file URL
     # (same-origin), so we drop the multi-megabyte inline data URL to keep
@@ -370,6 +387,7 @@ def prepare_image_payload(
     user_agent: str,
     save_context: dict[str, Any],
     fetch_remote: Any | None = None,
+    image_transform: ImageTransform | None = None,
 ) -> dict[str, Any]:
     """Build the response payload sent back to the browser and persist the image.
 
@@ -397,6 +415,7 @@ def prepare_image_payload(
                 user_agent=user_agent,
                 save_context=save_context,
                 fetch_remote=fetch_remote,
+                image_transform=image_transform,
                 index=index,
             )
         except Exception as exc:

@@ -11,6 +11,7 @@ from PIL import Image
 
 from picgen.errors import APIError
 from picgen.storage import (
+    composite_masked_edit_image,
     detect_image_dimensions,
     detect_image_mime,
     extension_for_mime,
@@ -34,6 +35,64 @@ def _oriented_jpeg_bytes(width: int, height: int, orientation: int) -> bytes:
     exif[274] = orientation
     Image.new("RGB", (width, height), (20, 120, 200)).save(output, format="JPEG", exif=exif)
     return output.getvalue()
+
+
+def test_masked_edit_composite_preserves_every_pixel_outside_transparent_mask() -> None:
+    source = Image.new("RGBA", (4, 4), (220, 30, 30, 255))
+    generated = Image.new("RGBA", (4, 4), (20, 80, 220, 255))
+    mask = Image.new("RGBA", (4, 4), (255, 255, 255, 255))
+    mask.putpixel((1, 1), (255, 255, 255, 0))
+    mask.putpixel((2, 2), (255, 255, 255, 0))
+
+    def encode(image: Image.Image) -> bytes:
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    result_bytes, result_mime, metadata = composite_masked_edit_image(
+        source_image_bytes=encode(source),
+        mask_image_bytes=encode(mask),
+        generated_image_bytes=encode(generated),
+        generated_image_mime="image/png",
+    )
+
+    with Image.open(BytesIO(result_bytes)) as result:
+        assert result.convert("RGBA").getpixel((0, 0)) == (220, 30, 30, 255)
+        assert result.convert("RGBA").getpixel((3, 3)) == (220, 30, 30, 255)
+        assert result.convert("RGBA").getpixel((1, 1)) == (20, 80, 220, 255)
+        assert result.convert("RGBA").getpixel((2, 2)) == (20, 80, 220, 255)
+    assert result_mime == "image/png"
+    assert metadata == {
+        "mask_composited": True,
+        "mask_preserve_mode": "inverse_alpha",
+        "mask_source_size": "4x4",
+    }
+
+
+def test_masked_edit_composite_returns_to_source_dimensions_before_preserving_pixels() -> None:
+    source = Image.new("RGBA", (4, 6), (220, 30, 30, 255))
+    generated = Image.new("RGBA", (2, 2), (20, 80, 220, 255))
+    mask = Image.new("RGBA", source.size, (255, 255, 255, 255))
+    mask.putpixel((2, 3), (255, 255, 255, 0))
+
+    def encode(image: Image.Image) -> bytes:
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    result_bytes, _, _ = composite_masked_edit_image(
+        source_image_bytes=encode(source),
+        mask_image_bytes=encode(mask),
+        generated_image_bytes=encode(generated),
+        generated_image_mime="image/png",
+    )
+
+    with Image.open(BytesIO(result_bytes)) as result:
+        rgba = result.convert("RGBA")
+        assert rgba.size == source.size
+        assert rgba.getpixel((0, 0)) == (220, 30, 30, 255)
+        assert rgba.getpixel((3, 5)) == (220, 30, 30, 255)
+        assert rgba.getpixel((2, 3)) == (20, 80, 220, 255)
 
 
 def test_itinerary_map_svg_requires_coordinates(tmp_path: Path) -> None:
