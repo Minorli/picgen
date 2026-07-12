@@ -64,6 +64,54 @@ def test_official_logo_pixel_match_accepts_lossless_and_small_color_drift() -> N
     assert result["drift"] == {"score": 1, "matchedPixels": 2, "comparedPixels": 2}
 
 
+def test_official_logo_pixel_match_accepts_small_resampling_shift() -> None:
+    result = _run_logo_policy(
+        "(() => {"
+        "const width = 7; const height = 3;"
+        "const logo = new Uint8ClampedArray(width * height * 4);"
+        "const base = new Uint8ClampedArray(width * height * 4);"
+        "for (let pixel = 0; pixel < width * height; pixel += 1) {"
+        "base[pixel * 4] = 230; base[pixel * 4 + 1] = 230; base[pixel * 4 + 2] = 230; base[pixel * 4 + 3] = 255;"
+        "}"
+        "for (let y = 0; y < height; y += 1) {"
+        "for (let x = 2; x <= 4; x += 1) {"
+        "const logoIndex = (y * width + x) * 4; const baseIndex = (y * width + x + 1) * 4;"
+        "const red = 20 + x * 31 + y * 7; const green = 45 + x * 13 + y * 29; const blue = 70 + x * 17 + y * 11;"
+        "logo[logoIndex] = red; logo[logoIndex + 1] = green; logo[logoIndex + 2] = blue; logo[logoIndex + 3] = 255;"
+        "base[baseIndex] = red; base[baseIndex + 1] = green; base[baseIndex + 2] = blue;"
+        "}"
+        "}"
+        "return calculateOfficialLogoPixelMatch({ data: base, width, height }, { data: logo, width, height });"
+        "})()"
+    )
+
+    assert result == {"score": 1, "matchedPixels": 9, "comparedPixels": 9}
+
+
+def test_official_logo_pixel_match_rejects_matching_colors_outside_local_radius() -> None:
+    result = _run_logo_policy(
+        "(() => {"
+        "const width = 15; const height = 3;"
+        "const logo = new Uint8ClampedArray(width * height * 4);"
+        "const base = new Uint8ClampedArray(width * height * 4);"
+        "for (let pixel = 0; pixel < width * height; pixel += 1) {"
+        "base[pixel * 4] = 230; base[pixel * 4 + 1] = 230; base[pixel * 4 + 2] = 230; base[pixel * 4 + 3] = 255;"
+        "}"
+        "for (let y = 0; y < height; y += 1) {"
+        "for (let x = 2; x <= 4; x += 1) {"
+        "const logoIndex = (y * width + x) * 4; const baseIndex = (y * width + x + 8) * 4;"
+        "const red = 20 + x * 31 + y * 7; const green = 45 + x * 13 + y * 29; const blue = 70 + x * 17 + y * 11;"
+        "logo[logoIndex] = red; logo[logoIndex + 1] = green; logo[logoIndex + 2] = blue; logo[logoIndex + 3] = 255;"
+        "base[baseIndex] = red; base[baseIndex + 1] = green; base[baseIndex + 2] = blue;"
+        "}"
+        "}"
+        "return calculateOfficialLogoPixelMatch({ data: base, width, height }, { data: logo, width, height });"
+        "})()"
+    )
+
+    assert result == {"score": 0, "matchedPixels": 0, "comparedPixels": 9}
+
+
 def test_official_logo_pixel_match_rejects_unrelated_or_invalid_regions() -> None:
     result = _run_logo_policy(
         "(() => {"
