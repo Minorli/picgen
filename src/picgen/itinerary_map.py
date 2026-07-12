@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import html
+import logging
 import math
 import os
 import re
@@ -14,11 +15,14 @@ import zlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib import parse
 
 import httpx
+from fontTools import subset as font_subset
+from fontTools.ttLib import TTFont
 
 from .config import Settings
 from .restricted_destinations import stop_has_restricted_destination
@@ -32,6 +36,8 @@ NOMINATIM_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 LOGO_HREF = "6renyou.png"
 TITLE_FONT_FAMILY = "PicGenRouteTitle"
 TITLE_FONT_RELATIVE_PATH = Path("fonts/zcool-xiaowei/ZCOOLXiaoWei-Regular.ttf")
+logger = logging.getLogger(__name__)
+logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
 INSTRUCTION_STOP_PREFIXES = (
     "地点与地理校验",
     "地理校验",
@@ -81,14 +87,29 @@ def _candidate_static_dirs() -> list[Path]:
     return deduped
 
 
-@lru_cache(maxsize=1)
-def _embedded_title_font_face_css_cached() -> str:
+def _subset_title_font_bytes(font_path: Path, glyphs: str) -> bytes:
+    font = TTFont(font_path, recalcTimestamp=False)
+    try:
+        subsetter = font_subset.Subsetter(options=font_subset.Options())
+        subsetter.populate(text=glyphs)
+        subsetter.subset(font)
+        output = BytesIO()
+        font.save(output, reorderTables=False)
+        return output.getvalue()
+    finally:
+        font.close()
+
+
+@lru_cache(maxsize=64)
+def _embedded_title_font_face_css_cached(glyphs: str) -> str:
     for static_dir in _candidate_static_dirs():
-        font_path = static_dir / TITLE_FONT_RELATIVE_PATH
         try:
-            font_bytes = font_path.read_bytes()
+            font_bytes = _subset_title_font_bytes(static_dir / TITLE_FONT_RELATIVE_PATH, glyphs)
         except OSError:
             continue
+        except Exception as exc:
+            logger.warning("itinerary_title_font_subset_failed", extra={"error_type": type(exc).__name__})
+            return ""
         encoded = base64.b64encode(font_bytes).decode("ascii")
         return (
             "/* ZCOOL XiaoWei, SIL Open Font License 1.1 */"
@@ -99,11 +120,14 @@ def _embedded_title_font_face_css_cached() -> str:
     return ""
 
 
-def _embedded_title_font_face_css() -> str:
+def _embedded_title_font_face_css(text: str) -> str:
     # Only cache SUCCESS: a transient read failure (missing volume, bad cwd at
     # first render) must not permanently strip the title font from every
     # poster this process renders afterwards.
-    css = _embedded_title_font_face_css_cached()
+    glyphs = "".join(sorted(set(text)))
+    if not glyphs:
+        return ""
+    css = _embedded_title_font_face_css_cached(glyphs)
     if not css:
         _embedded_title_font_face_css_cached.cache_clear()
     return css
@@ -1743,8 +1767,10 @@ def render_itinerary_map_svg(
         f'<path d="{segment["path"]}" class="route-line{" transfer" if segment["transfer"] else ""}"/>'
         for segment in route_segments
     ]
-    title = _svg_text(plan.get("title") or "定制旅行路线图")
-    subtitle = _svg_text(plan.get("subtitle") or "")
+    title_text = str(plan.get("title") or "定制旅行路线图")
+    subtitle_text = str(plan.get("subtitle") or "")
+    title = _svg_text(title_text)
+    subtitle = _svg_text(subtitle_text)
     safe_background_url = (
         background_image_url
         if background_image_url.startswith(
@@ -1836,7 +1862,7 @@ def render_itinerary_map_svg(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img">'
     )
-    title_font_face_css = _embedded_title_font_face_css() if safe_background_url else ""
+    title_font_face_css = _embedded_title_font_face_css(f"{title_text}{subtitle_text}") if safe_background_url else ""
     return "\n".join(
         [
             svg_open[:-1] + f' data-density="{"dense" if dense_layout else "normal"}">',
