@@ -12,6 +12,7 @@ from pathlib import Path
 import anyio
 import pytest
 from fastapi.testclient import TestClient
+from fontTools.ttLib import TTFont
 from PIL import Image
 from starlette.types import Scope
 
@@ -1778,6 +1779,54 @@ def test_itinerary_map_svg_uses_soft_route_style_and_country_labels():
     assert 'class="title-gold-edge"' in svg
     assert 'id="titleInk"' in svg
     assert "font-family:'PicGenRouteTitle'" in svg
+
+
+def test_itinerary_map_svg_embeds_a_bounded_title_font_subset():
+    plan = build_itinerary_map_plan(
+        title="北疆<秋日&环线",
+        subtitle="9/5 - 9/8",
+        stops=[
+            {"date": "D1", "name": "乌鲁木齐", "lat": 43.8256, "lng": 87.6168},
+            {"date": "D2", "name": "喀纳斯", "lat": 48.7087, "lng": 87.0174},
+        ],
+    )
+
+    svg = render_itinerary_map_svg(plan, background_image_url=f"data:image/png;base64,{TINY_PNG_B64}")
+    encoded_font = svg.split("data:font/ttf;base64,", 1)[1].split(")", 1)[0]
+
+    font_bytes = base64.b64decode(encoded_font)
+    subset_font = TTFont(BytesIO(font_bytes))
+    embedded_characters = {chr(codepoint) for codepoint in subset_font.getBestCmap()}
+
+    assert set("北疆<秋日&环线9/5 - 8") <= embedded_characters
+    assert len(font_bytes) < 100_000
+    assert len(svg.encode("utf-8")) < 200_000
+
+
+def test_itinerary_map_svg_falls_back_when_title_font_subsetting_fails(monkeypatch, caplog):
+    import picgen.itinerary_map as itinerary_map
+
+    plan = build_itinerary_map_plan(
+        title="北疆秋日环线",
+        subtitle="9/5 - 9/8",
+        stops=[
+            {"date": "D1", "name": "乌鲁木齐", "lat": 43.8256, "lng": 87.6168},
+            {"date": "D2", "name": "喀纳斯", "lat": 48.7087, "lng": 87.0174},
+        ],
+    )
+
+    def fail_subset(*_args):
+        raise ValueError("broken font")
+
+    itinerary_map._embedded_title_font_face_css_cached.cache_clear()
+    monkeypatch.setattr(itinerary_map, "_subset_title_font_bytes", fail_subset)
+
+    with caplog.at_level("WARNING"):
+        svg = render_itinerary_map_svg(plan, background_image_url=f"data:image/png;base64,{TINY_PNG_B64}")
+
+    assert "@font-face{font-family:'PicGenRouteTitle'" not in svg
+    assert "北疆秋日环线" in svg
+    assert "itinerary_title_font_subset_failed" in caplog.text
 
 
 def test_itinerary_country_labels_stay_inside_portrait_canvas():
