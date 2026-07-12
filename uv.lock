@@ -299,7 +299,7 @@ wheels = [
 
 [[package]]
 name = "picgen"
-version = "0.1.61"
+version = "0.1.62"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.61"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.62"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,9 +38,27 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.61"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.62"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
+    assert "calculateOfficialLogoPixelMatch" in app_js
+    assert "findExistingOfficialLogo" in app_js
+    assert "composed.preserved" in app_js
+    assert "已有官方 LOGO，保留原位置且不重复贴入" in app_js
+    compose = app_js[
+        app_js.index("async function composeLogoOverlayForCandidates") :
+        app_js.index("async function downscaleDataUrlForRisk")
+    ]
+    preserved_branch = compose.index("if (composed.preserved)")
+    persist_call = compose.index("persistFinalLogoImage")
+    assert preserved_branch < persist_call
+    assert "continue" in compose[preserved_branch:persist_call]
+    assert "logo_preserved: true" in compose[preserved_branch:persist_call]
+    storage_copy = app_js[
+        app_js.index("function updateSelectedCandidateStorageText") :
+        app_js.index("function updateResultActionSurface")
+    ]
+    assert "selectedCandidate.logo_preserved" in storage_copy
     assert "expandLogoSafetyRegion" in placement_js
     assert "calculateRegionTextEdgePenalty" in placement_js
     assert "hasTransparentLogoBackground" in app_js
@@ -317,6 +335,94 @@ def test_share_success_status_survives_recipient_list_reset() -> None:
     assert reset_index < success_index
 
 
+def test_simple_mode_exposes_shared_results_inbox() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="simpleSharedResultsSection"' in index_html
+    assert 'id="simpleSharedResultsList"' in index_html
+    assert 'id="simpleSharedResultsEmpty"' in index_html
+    assert 'id="simpleRefreshSharedResultsButton"' in index_html
+    assert index_html.index('id="simpleSharedResultsSection"') < index_html.index('id="simpleGallerySection"')
+    simple_shared_html = index_html[
+        index_html.index('id="simpleSharedResultsSection"') : index_html.index('id="simpleGallerySection"')
+    ]
+    assert 'aria-live=' not in simple_shared_html
+
+    refs = app_js[app_js.index("const refs = {") : app_js.index("function loadJSON")]
+    assert 'simpleSharedResultsList: document.querySelector("#simpleSharedResultsList")' in refs
+    assert 'simpleSharedResultsEmpty: document.querySelector("#simpleSharedResultsEmpty")' in refs
+    assert 'simpleRefreshSharedResultsButton: document.querySelector("#simpleRefreshSharedResultsButton")' in refs
+    assert 'simpleSharedResultsSection: document.querySelector("#simpleSharedResultsSection")' in refs
+
+    renderer = app_js[
+        app_js.index("function renderSharedResults") : app_js.index("async function refreshSharedResults")
+    ]
+    assert "refs.simpleSharedResultsList" in renderer
+    assert "refs.simpleSharedResultsEmpty" in renderer
+
+    bindings = app_js[app_js.index("function bindEvents()") : app_js.index("async function init()")]
+    assert "refs.simpleRefreshSharedResultsButton?.addEventListener(\"click\", refreshSharedResults)" in bindings
+    assert "bindSharedResultsList(refs.simpleSharedResultsList)" in bindings
+
+    assert ".simple-shared-results-list" in styles_css
+    assert ".simple-shared-result-item" in styles_css
+    shared_list_css = styles_css[
+        styles_css.index(".simple-shared-results-list {") : styles_css.index(".simple-shared-result-item {")
+    ]
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in shared_list_css
+    assert ".simple-shared-results-list > .empty-history" in styles_css
+    assert "grid-column: 1 / -1;" in styles_css[
+        styles_css.index(".simple-shared-results-list > .empty-history") :
+        styles_css.index(".simple-shared-result-item {")
+    ]
+    mobile_css = styles_css[styles_css.index("@media (max-width: 820px)") :]
+    assert ".simple-shared-results-list {\n    grid-template-columns: minmax(0, 1fr);" in mobile_css
+
+
+def test_received_share_actions_cannot_rerun_or_complete_onboarding() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    feedback_visibility = app_js[
+        app_js.index("function updateFeedbackPanelVisibility") :
+        app_js.index("function buildFeedbackPayload")
+    ]
+    assert "currentResultIsShared()" in feedback_visibility
+
+    bad_feedback = app_js[
+        app_js.index("async function submitBadFeedbackReason") :
+        app_js.index("async function regenerateFromBadFeedback")
+    ]
+    assert "!currentResultIsShared()" in bad_feedback
+
+    open_share = app_js[
+        app_js.index("function openSharedResult") : app_js.index("function bindSharedResultsList")
+    ]
+    assert "state.isBusy" in open_share
+    assert "updateFeedbackPanelVisibility()" in open_share
+    assert "updateResultActionSurface()" in open_share
+    assert "shared_generated_image_id" in open_share
+    assert "\n    generated_image_id: share.generated_image_id" not in open_share
+
+    bindings = app_js[app_js.index("function bindEvents()") : app_js.index("async function init()")]
+    download_binding = bindings[
+        bindings.index('refs.downloadButton?.addEventListener("click"') :
+        bindings.index('document.addEventListener("click"')
+    ]
+    assert "!currentResultIsShared()" in download_binding
+
+    simple_result_surface = app_js[
+        app_js.index("function updateSimpleResultSurface") : app_js.index("function setResultSizeWarning")
+    ]
+    assert "currentResultIsShared()" in simple_result_surface
+
+    anonymous = app_js[
+        app_js.index("function applyAnonymousShellChrome") : app_js.index("function renderAvatarElement")
+    ]
+    assert 'refs.simpleSharedResultsSection?.classList.add("hidden")' in anonymous
+
+
 def test_result_displays_and_restores_size_mismatch_warning() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
@@ -330,6 +436,36 @@ def test_result_displays_and_restores_size_mismatch_warning() -> None:
     assert "sizeWarningText: refs.resultSizeWarningText" in app_js
     assert 'setResultSizeWarning(result.sizeWarningText || "")' in app_js
     assert "setError(sizeMismatchMessage)" not in app_js
+
+
+def test_result_previews_show_the_complete_image_without_grid_clipping() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    preview_css = styles_css[
+        styles_css.index(".preview-frame img {") : styles_css.index(".preview-frame img.visible")
+    ]
+    assert "min-width: 0;" in preview_css
+    assert "min-height: 0;" in preview_css
+    assert "object-fit: contain;" in preview_css
+
+    candidate_css = styles_css[
+        styles_css.index(".candidate-button img {") : styles_css.index(".candidate-button span {")
+    ]
+    assert "object-fit: contain;" in candidate_css
+    assert "object-fit: cover;" not in candidate_css
+
+
+def test_gallery_favorite_checkbox_keeps_label_close() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    toggle_css = styles_css[
+        styles_css.index(".gallery-favorite-toggle input {") :
+        styles_css.index(".gallery-tags-field {")
+    ]
+    assert "width: 16px;" in toggle_css
+    assert "height: 16px;" in toggle_css
+    assert "min-height: 0;" in toggle_css
+    assert "flex: 0 0 auto;" in toggle_css
 
 
 def test_size_mismatch_warning_prefers_server_summary_for_mixed_candidates() -> None:
@@ -1809,7 +1945,12 @@ def test_simple_mode_css_uses_the_phase_zero_token_layer() -> None:
     assert ".simple-input:focus:not(:disabled)" in simple_css
     assert ".simple-textarea:focus:not(:disabled)" in simple_css
     assert ".simple-dynamic-input:focus:not(:disabled)" in simple_css
-    assert "width: min(calc(100% - (var(--ux-space-4) * 2)), var(--ux-checklist-width));" in simple_css
+    checklist_css = simple_css[
+        simple_css.index(".simple-first-run-checklist {") :
+        simple_css.index(".simple-first-run-checklist header {")
+    ]
+    assert "width: 100%;" in checklist_css
+    assert "position: fixed;" not in checklist_css
     assert "icons.svg#icon-" in (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
 

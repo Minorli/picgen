@@ -26,6 +26,12 @@ def _image_payload() -> dict[str, str]:
     }
 
 
+def _rgba_png_b64(image: Image.Image) -> str:
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
 @pytest.mark.parametrize(
     ("size", "mode", "has_input", "preferred_transport", "expected"),
     [
@@ -153,6 +159,48 @@ def test_image_job_routes_six_person_reference_to_responses(make_client, setting
     fake.run_file_upload.assert_awaited_once()
     fake.run_responses.assert_awaited_once()
     fake.run_multipart.assert_not_awaited()
+
+
+def test_responses_masked_edit_preserves_pixels_outside_mask(make_client, settings_factory) -> None:
+    settings = settings_factory(default_api_key="sk-server", default_size="16x16")
+    client, fake, _ = make_client(settings=settings)
+    source = Image.new("RGBA", (16, 16), (220, 30, 30, 255))
+    generated = Image.new("RGBA", (16, 16), (20, 80, 220, 255))
+    mask = Image.new("RGBA", (16, 16), (255, 255, 255, 255))
+    mask.putpixel((5, 5), (255, 255, 255, 0))
+    fake.run_file_upload.return_value = {"id": "file-source"}
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": _rgba_png_b64(generated)}],
+        "created": 1,
+    }
+
+    response = client.post(
+        "/api/image-jobs",
+        json={
+            "prompt": "只修改蒙版透明区域",
+            "mode": "edit",
+            "size": "16x16",
+            "image": {
+                "name": "source.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{_rgba_png_b64(source)}",
+            },
+            "mask": {
+                "name": "mask.png",
+                "type": "image/png",
+                "data_url": f"data:image/png;base64,{_rgba_png_b64(mask)}",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["transport"] == "responses-image"
+    with Image.open(payload["saved_image_path"]) as result:
+        rgba = result.convert("RGBA")
+        assert rgba.getpixel((0, 0)) == (220, 30, 30, 255)
+        assert rgba.getpixel((5, 5)) == (20, 80, 220, 255)
+    assert payload["metadata"]["mask_composited"] is True
 
 
 @pytest.mark.parametrize("mode", ["edit", "reference", "variant"])

@@ -113,6 +113,7 @@ from .schemas import (
 )
 from .storage import (
     MAX_EXACT_IMAGE_PIXELS,
+    composite_masked_edit_image,
     detect_image_mime,
     extension_for_mime,
     resolve_storage_path,
@@ -1098,6 +1099,45 @@ def _prepare_mask(part: FilePayload, max_image_bytes: int) -> dict[str, Any]:
     file_info = _validate_image_size(part, max_image_bytes)
     file_info["field_name"] = "mask"
     return file_info
+
+
+def _masked_edit_image_transform(
+    source_part: dict[str, Any] | None,
+    mask_part: dict[str, Any] | None,
+) -> Callable[[bytes, str, int], tuple[bytes, str, dict[str, object]]] | None:
+    if not source_part or not mask_part:
+        return None
+    source_bytes = bytes(source_part.get("data") or b"")
+    mask_bytes = bytes(mask_part.get("data") or b"")
+    if not source_bytes or not mask_bytes:
+        return None
+
+    def transform(
+        generated_bytes: bytes,
+        generated_mime: str,
+        candidate_index: int,
+    ) -> tuple[bytes, str, dict[str, object]]:
+        try:
+            return composite_masked_edit_image(
+                source_image_bytes=source_bytes,
+                mask_image_bytes=mask_bytes,
+                generated_image_bytes=generated_bytes,
+                generated_image_mime=generated_mime,
+            )
+        except (OSError, ValueError) as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "mask_composite_failed",
+                candidate_index=candidate_index,
+                error=type(exc).__name__,
+            )
+            return generated_bytes, generated_mime, {
+                "mask_composited": False,
+                "mask_composite_error": type(exc).__name__,
+            }
+
+    return transform
 
 
 def _itinerary_style_reference_part(settings: Settings) -> dict[str, Any] | None:
@@ -4855,6 +4895,7 @@ async def handle_edit(
             "sample_count": parsed.sample_count,
             **({"user": user.public_dict()} if user else {}),
         },
+        image_transform=_masked_edit_image_transform(image_parts[0], mask_part),
     )
 
 
@@ -4960,6 +5001,7 @@ async def handle_responses_image(
     for key in ("quality", "background", "output_format", "output_compression", "moderation"):
         if key in image_options:
             tool[key] = image_options[key]
+    mask_info: dict[str, Any] | None = None
     if parsed.mask is not None:
         mask_info = _validate_image_size(parsed.mask, settings.max_image_bytes)
         mask_b64 = base64.b64encode(mask_info["data"]).decode("ascii")
@@ -5058,6 +5100,10 @@ async def handle_responses_image(
             "sample_count": parsed.sample_count,
             **({"user": user.public_dict()} if user else {}),
         },
+        image_transform=_masked_edit_image_transform(
+            image_parts[0] if image_parts else None,
+            mask_info,
+        ),
     )
 
 
@@ -5068,6 +5114,7 @@ async def _finalize_image_response(
     client: UpstreamClient,
     save_context: dict[str, Any],
     extra: dict[str, Any],
+    image_transform: Callable[[bytes, str, int], tuple[bytes, str, dict[str, object]]] | None = None,
 ) -> dict[str, Any]:
     fetch_remote_sync = _make_remote_fetcher(client)
     saved = await anyio.to_thread.run_sync(
@@ -5078,6 +5125,7 @@ async def _finalize_image_response(
             user_agent=settings.upstream_user_agent,
             save_context=save_context,
             fetch_remote=fetch_remote_sync,
+            image_transform=image_transform,
         )
     )
     # An empty upstream response (no candidates) must be a clear error, not a blank
@@ -5196,6 +5244,7 @@ async def _finalize_with_size_retry(
     save_context: dict[str, Any],
     extra: dict[str, Any],
     sample_count: int,
+    image_transform: Callable[[bytes, str, int], tuple[bytes, str, dict[str, object]]] | None = None,
 ) -> dict[str, Any]:
     """Retry the (paid) upstream call when it "lazily" returns a smaller size.
 
@@ -5225,6 +5274,7 @@ async def _finalize_with_size_retry(
                 client=client,
                 save_context=save_context,
                 extra=extra,
+                image_transform=image_transform,
             )
         except APIError as exc:
             if best is not None:

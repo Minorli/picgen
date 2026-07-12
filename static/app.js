@@ -1,11 +1,15 @@
-import { calculateLogoPlacementScore, chooseLogoPlacement } from "./logo-placement.mjs?v=0.1.61"
+import {
+  calculateLogoPlacementScore,
+  calculateOfficialLogoPixelMatch,
+  chooseLogoPlacement,
+} from "./logo-placement.mjs?v=0.1.62"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.61"
+} from "./responses-settings.mjs?v=0.1.62"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -37,6 +41,8 @@ const COMPANY_LOGO_MAX_WIDTH = 220
 const COMPANY_LOGO_MARGIN_RATIO = 0.04
 const COMPANY_LOGO_MIN_MARGIN = 16
 const COMPANY_LOGO_MAX_MARGIN = 42
+const COMPANY_LOGO_EXISTING_MATCH_THRESHOLD = 0.9
+const COMPANY_LOGO_EXISTING_MATCH_MIN_PIXELS = 128
 const COMPANY_LOGO_LAYOUT_PROMPT = [
   "LOGO 布局要求：请在画面左上角为 6 人游 LOGO 预留自然干净的留白，避免人物、文字、建筑边缘、产品主体或高对比元素与 LOGO 位置发生重合。",
   "最终 LOGO 将使用官方透明 PNG 原样贴入，图标、字体、颜色和比例均不得改动。",
@@ -424,6 +430,10 @@ const refs = {
   simpleFirstRunChecklist: document.querySelector("#simpleFirstRunChecklist"),
   simpleChecklistCloseButton: document.querySelector("#simpleChecklistCloseButton"),
   simpleChecklistSteps: Array.from(document.querySelectorAll("[data-simple-checklist-step]")),
+  simpleSharedResultsSection: document.querySelector("#simpleSharedResultsSection"),
+  simpleSharedResultsList: document.querySelector("#simpleSharedResultsList"),
+  simpleSharedResultsEmpty: document.querySelector("#simpleSharedResultsEmpty"),
+  simpleRefreshSharedResultsButton: document.querySelector("#simpleRefreshSharedResultsButton"),
   simpleGallerySection: document.querySelector("#simpleGallerySection"),
   simpleGalleryRefreshButton: document.querySelector("#simpleGalleryRefreshButton"),
   simpleGalleryList: document.querySelector("#simpleGalleryList"),
@@ -995,6 +1005,7 @@ function applyAnonymousShellChrome() {
   refs.changePasswordButton?.classList.add("hidden")
   refs.logoutButton?.classList.add("hidden")
   refs.teamChatButton?.classList.add("hidden")
+  refs.simpleSharedResultsSection?.classList.add("hidden")
   if (refs.openProfileButton) {
     refs.openProfileButton.disabled = true
   }
@@ -1757,8 +1768,9 @@ async function deleteAdminUser(userId) {
 
 function updateFeedbackPanelVisibility() {
   const hasResult = Boolean(state.resultPreview?.src)
-  refs.resultFeedbackPanel?.classList.toggle("hidden", !hasResult)
-  if (!hasResult) {
+  const canSubmitFeedback = hasResult && !currentResultIsShared()
+  refs.resultFeedbackPanel?.classList.toggle("hidden", !canSubmitFeedback)
+  if (!canSubmitFeedback) {
     refs.feedbackReasonPanel?.classList.add("hidden")
     refs.shareResultPanel?.classList.add("hidden")
   }
@@ -3089,15 +3101,16 @@ function closeSimpleMoreActions() {
 }
 
 function updateSimpleMoreActionStates() {
+  const sharedResult = currentResultIsShared()
   const actions = Object.fromEntries(
     Array.from(refs.simpleMoreActionsMenu?.querySelectorAll("[data-simple-result-action]") || [])
       .map((button) => [button.dataset.simpleResultAction, button]),
   )
   if (actions.original) actions.original.disabled = refs.downloadOriginalButton?.disabled !== false
-  if (actions.versions) actions.versions.disabled = refs.showVersionsButton?.disabled !== false
-  if (actions.group) actions.group.disabled = refs.saveGroupAssetButton?.disabled !== false
+  if (actions.versions) actions.versions.disabled = sharedResult || refs.showVersionsButton?.disabled !== false
+  if (actions.group) actions.group.disabled = sharedResult || refs.saveGroupAssetButton?.disabled !== false
   if (actions.copy) actions.copy.disabled = !state.lastResultPrompt
-  if (actions.organize) actions.organize.disabled = !selectedGeneratedImageId()
+  if (actions.organize) actions.organize.disabled = sharedResult || !selectedGeneratedImageId()
 }
 
 function updateResultActionLabelsForMode() {
@@ -3132,7 +3145,7 @@ function updateSimpleResultSurface() {
   const showEmpty = state.uiMode === "simple" && !hasResult && !state.isBusy && !hasFailure
   refs.simpleResultEmpty?.classList.toggle("hidden", !showEmpty)
   if (refs.simpleShareResultButton) {
-    refs.simpleShareResultButton.disabled = !selectedGeneratedImageId() || state.isBusy
+    refs.simpleShareResultButton.disabled = !selectedGeneratedImageId() || state.isBusy || currentResultIsShared()
   }
   updateSimpleMoreActionStates()
   updateResultActionLabelsForMode()
@@ -3865,6 +3878,10 @@ function serverShareableImageUrl(candidate = {}) {
 }
 
 async function saveCurrentResultToGroupAssets() {
+  if (currentResultIsShared()) {
+    setStatusMessage("收到的分享需要先编辑生成自己的作品，才能存入部门群。")
+    return
+  }
   const generatedImageId = selectedGeneratedImageId()
   if (!generatedImageId) {
     setStatusMessage("这张图还没有服务端记录，暂时不能存入部门群。")
@@ -4004,7 +4021,7 @@ async function refreshShareRecipients() {
 }
 
 function showSharePanel() {
-  if (!state.resultPreview?.src) {
+  if (!state.resultPreview?.src || currentResultIsShared()) {
     return
   }
   refs.shareResultPanel?.classList.remove("hidden")
@@ -4017,7 +4034,7 @@ function showSharePanel() {
 }
 
 async function submitShareResult() {
-  if (!state.resultPreview?.src) {
+  if (!state.resultPreview?.src || currentResultIsShared()) {
     setError("当前没有可分享的结果图。")
     return
   }
@@ -4057,24 +4074,17 @@ async function submitShareResult() {
   }
 }
 
-function renderSharedResults(shares) {
-  state.sharedResults = Array.isArray(shares) ? shares : []
-  if (!refs.sharedResultsList || !refs.sharedResultsEmpty) {
-    return
-  }
-  refs.sharedResultsEmpty.classList.toggle("hidden", state.sharedResults.length > 0)
-  if (!state.sharedResults.length) {
-    refs.sharedResultsList.innerHTML = ""
-    return
-  }
-  refs.sharedResultsList.innerHTML = state.sharedResults.slice(0, 10).map((share) => {
+function sharedResultItemsMarkup(shares, { simple = false } = {}) {
+  const itemClass = simple ? "simple-shared-result-item" : "shared-result-item"
+  const copyClass = simple ? "simple-shared-result-copy" : "shared-result-copy"
+  return shares.slice(0, 10).map((share) => {
     const imageUrl = share.saved_image_url || ""
     const sender = share.sender_username || "用户"
     const prompt = share.prompt || "未附提示词"
     return `
-      <button class="shared-result-item" type="button" data-share-id="${Number(share.id || 0)}">
+      <button class="${itemClass}" type="button" data-share-id="${Number(share.id || 0)}">
         ${imageUrl ? `<img src="${escapeHTML(imageUrl)}" alt="">` : '<span class="shared-result-thumb"></span>'}
-        <span class="shared-result-copy">
+        <span class="${copyClass}">
           <strong>${escapeHTML(sender)}</strong>
           <span>${escapeHTML(share.mode || "生成")}</span>
           <p>${escapeHTML(prompt)}</p>
@@ -4084,8 +4094,25 @@ function renderSharedResults(shares) {
   }).join("")
 }
 
+function renderSharedResults(shares) {
+  state.sharedResults = Array.isArray(shares) ? [...shares] : []
+  const targets = [
+    { list: refs.sharedResultsList, empty: refs.sharedResultsEmpty, simple: false },
+    { list: refs.simpleSharedResultsList, empty: refs.simpleSharedResultsEmpty, simple: true },
+  ]
+  targets.forEach(({ list, empty, simple }) => {
+    if (!list || !empty) {
+      return
+    }
+    empty.classList.toggle("hidden", state.sharedResults.length > 0)
+    list.innerHTML = state.sharedResults.length
+      ? sharedResultItemsMarkup(state.sharedResults, { simple })
+      : ""
+  })
+}
+
 async function refreshSharedResults() {
-  if (!state.currentUser || !refs.sharedResultsList) {
+  if (!state.currentUser || (!refs.sharedResultsList && !refs.simpleSharedResultsList)) {
     return
   }
   try {
@@ -4100,8 +4127,13 @@ async function refreshSharedResults() {
     }
     // handled below
   }
-  refs.sharedResultsList.innerHTML = '<p class="empty-history">收到分享暂时不可用。</p>'
+  ;[refs.sharedResultsList, refs.simpleSharedResultsList].forEach((list) => {
+    if (list) {
+      list.innerHTML = '<p class="empty-history">收到分享暂时不可用。</p>'
+    }
+  })
   refs.sharedResultsEmpty?.classList.add("hidden")
+  refs.simpleSharedResultsEmpty?.classList.add("hidden")
 }
 
 function resetReviewStateForExternalResult() {
@@ -4121,6 +4153,10 @@ function resetReviewStateForExternalResult() {
 }
 
 function openSharedResult(shareId) {
+  if (state.isBusy) {
+    setStatusMessage("当前任务生成中，完成后再打开收到的分享。")
+    return
+  }
   const share = state.sharedResults.find((item) => Number(item.id) === Number(shareId))
   const asset = shareToAsset(share)
   if (!share || !asset) {
@@ -4131,7 +4167,7 @@ function openSharedResult(shareId) {
   state.resultCandidates = [{
     saved_image_url: share.saved_image_url || "",
     saved_image_path: share.saved_image_path || "",
-    generated_image_id: share.generated_image_id || null,
+    shared_generated_image_id: share.generated_image_id || null,
     image_url: share.saved_image_url || "",
     asset,
   }]
@@ -4162,9 +4198,22 @@ function openSharedResult(shareId) {
   refs.shareResultPanel?.classList.add("hidden")
   setGalleryEditorMeta(null)
   renderResultCandidates()
+  updateFeedbackPanelVisibility()
   updatePreviewAvailability()
+  updateResultActionSurface()
   scheduleWorkspacePersist()
   document.querySelector("#resultPanel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+}
+
+function bindSharedResultsList(list) {
+  list?.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null
+    const button = target?.closest("[data-share-id]")
+    if (!button || !list.contains(button)) {
+      return
+    }
+    openSharedResult(button.dataset.shareId)
+  })
 }
 
 function galleryItemToAsset(item) {
@@ -4652,6 +4701,10 @@ function renderImageVersions(versions = [], currentGeneratedImageId = selectedGe
 }
 
 async function showImageVersions() {
+  if (currentResultIsShared()) {
+    setStatusMessage("收到的分享没有你的版本记录。")
+    return
+  }
   const generatedImageId = selectedGeneratedImageId()
   if (!generatedImageId) {
     setStatusMessage("当前图片还没有服务端版本记录。")
@@ -6076,7 +6129,7 @@ function updateFeedbackSelection(rating) {
 }
 
 async function submitResultFeedback(rating, { reason = "", showReason = true } = {}) {
-  if (!state.resultPreview?.src) {
+  if (!state.resultPreview?.src || currentResultIsShared()) {
     setError("当前没有可评价的结果图。")
     return false
   }
@@ -6136,13 +6189,13 @@ async function submitResultFeedback(rating, { reason = "", showReason = true } =
 async function submitBadFeedbackReason() {
   const reason = refs.feedbackReasonInput?.value.trim() || ""
   const submitted = await submitResultFeedback("bad", { reason, showReason: false })
-  if (submitted && state.uiMode === "simple") {
+  if (submitted && state.uiMode === "simple" && !currentResultIsShared()) {
     await rerunLastGeneration()
   }
 }
 
 async function regenerateFromBadFeedback() {
-  if (state.feedbackSubmitting || state.rerunInProgress || state.isBusy) {
+  if (currentResultIsShared() || state.feedbackSubmitting || state.rerunInProgress || state.isBusy) {
     return
   }
   const reason = refs.feedbackReasonInput?.value.trim() || ""
@@ -8659,14 +8712,15 @@ function canComparePreviews() {
 function updatePreviewAvailability() {
   const hasSource = Boolean(getAssetDisplaySrc(state.displayedSourceImage))
   const hasResult = Boolean(state.resultPreview?.src)
+  const sharedResult = currentResultIsShared()
 
   refs.sourcePreviewTrigger.classList.toggle("preview-frame-clickable", hasSource)
   refs.resultPreviewTrigger.classList.toggle("preview-frame-clickable", hasResult)
   refs.previewCompareButton.disabled = !canComparePreviews()
   refs.previewCompareModeButton.disabled = !canComparePreviews()
   refs.continueEditButton.disabled = !state.lastResultImage
-  refs.startVariantButton.disabled = !state.lastResultImage
-  refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId()
+  refs.startVariantButton.disabled = !state.lastResultImage || sharedResult
+  refs.saveGroupAssetButton.disabled = !selectedGeneratedImageId() || sharedResult
   updateFeedbackPanelVisibility()
   updateWorkflowStatus()
 }
@@ -9116,6 +9170,11 @@ function selectedResultCandidate() {
   return state.resultCandidates[state.selectedCandidateIndex] || state.resultCandidates[0] || null
 }
 
+function currentResultIsShared() {
+  const candidate = selectedResultCandidate()
+  return candidate?.asset?.origin === "share" || state.lastResultImage?.origin === "share"
+}
+
 function originalCandidateDownloadSource(candidate = selectedResultCandidate()) {
   const asset = candidate?.asset || {}
   return {
@@ -9179,6 +9238,12 @@ function updateSelectedCandidateStorageText(selectedCandidate = selectedResultCa
     saved_image_width: selectedCandidate.saved_image_width || selectedCandidate.width || selectedCandidate.actual_width,
     saved_image_height: selectedCandidate.saved_image_height || selectedCandidate.height || selectedCandidate.actual_height,
   })
+  if (selectedCandidate.logo_preserved) {
+    refs.resultStorage.textContent = selectedCandidate.saved_image_path
+      ? `已有官方 LOGO 已保留 · 已落盘到 ${selectedCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+      : `已有官方 LOGO 已保留${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+    return
+  }
   if (selectedCandidate.logo_overlay_applied) {
     refs.resultStorage.textContent = selectedCandidate.saved_image_path
       ? `LOGO 成品已落盘到 ${selectedCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
@@ -9195,12 +9260,13 @@ function updateSelectedCandidateStorageText(selectedCandidate = selectedResultCa
 function updateResultActionSurface() {
   const hasResult = Boolean(state.resultPreview?.src)
   const hasImage = Boolean(state.lastResultImage)
+  const sharedResult = currentResultIsShared()
   refs.continueEditButton.disabled = !hasImage
-  refs.startVariantButton.disabled = !hasImage
+  refs.startVariantButton.disabled = !hasImage || sharedResult
   refs.hoverContinueEditButton && (refs.hoverContinueEditButton.disabled = !hasImage)
-  refs.hoverVariantButton && (refs.hoverVariantButton.disabled = !hasImage)
+  refs.hoverVariantButton && (refs.hoverVariantButton.disabled = !hasImage || sharedResult)
   refs.inspectLongImageButton && (refs.inspectLongImageButton.disabled = !hasResult)
-  refs.hoverShareButton && (refs.hoverShareButton.disabled = !selectedGeneratedImageId())
+  refs.hoverShareButton && (refs.hoverShareButton.disabled = !selectedGeneratedImageId() || sharedResult)
   refs.showVersionsButton && (refs.showVersionsButton.disabled = !selectedGeneratedImageId())
   if (!hasResult) {
     refs.versionHistoryPanel?.classList.add("hidden")
@@ -9344,7 +9410,11 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
   }
   state.lastResultImage = cloneImageAsset(firstCandidate.asset)
   refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
-  if (firstCandidate.logo_overlay_applied) {
+  if (firstCandidate.logo_preserved) {
+    refs.resultStorage.textContent = firstCandidate.saved_image_path
+      ? `已有官方 LOGO 已保留 · 已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+      : `已有官方 LOGO 已保留${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
+  } else if (firstCandidate.logo_overlay_applied) {
     refs.resultStorage.textContent = firstCandidate.saved_image_path
       ? `LOGO 成品已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
       : `LOGO 已在浏览器本地贴入，分享前需要重新保存${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
@@ -9382,7 +9452,11 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerat
     renderResultCandidates()
     updatePreviewAvailability()
     updateResultActionSurface()
-    refs.logoComposeStatus.textContent = selectedCandidate.logo_final_persisted ? "成品已保存" : "本地已贴图"
+    refs.logoComposeStatus.textContent = selectedCandidate.logo_preserved
+      ? "已有 LOGO 已保留"
+      : selectedCandidate.logo_final_persisted
+        ? "成品已保存"
+        : "本地已贴图"
     scheduleWorkspacePersist()
   } catch (error) {
     if (resultGenerationSeq !== state.resultGenerationSeq) {
@@ -10208,7 +10282,7 @@ async function loadCompanyLogoCanvas() {
   return state.companyLogoCanvas
 }
 
-function calculateLogoPlacement(canvas, logoCanvas) {
+function companyLogoCandidatePlacements(canvas, logoCanvas) {
   const targetWidth = Math.round(
     Math.min(
       COMPANY_LOGO_MAX_WIDTH,
@@ -10227,6 +10301,11 @@ function calculateLogoPlacement(canvas, logoCanvas) {
     { x: margin, y: Math.min(canvas.height - targetHeight - margin, margin + Math.round(targetHeight * 0.72)), width: targetWidth, height: targetHeight },
     { x: Math.min(canvas.width - targetWidth - margin, margin + Math.round(targetWidth * 0.42)), y: margin, width: targetWidth, height: targetHeight },
   ].filter((placement) => placement.x >= 0 && placement.y >= 0)
+  return candidates
+}
+
+function calculateLogoPlacement(canvas, logoCanvas) {
+  const candidates = companyLogoCandidatePlacements(canvas, logoCanvas)
 
   const ctx = canvas.getContext("2d")
   if (!ctx) {
@@ -10277,6 +10356,36 @@ function resizeCanvasHighQuality(sourceCanvas, targetWidth, targetHeight) {
   return finalCanvas
 }
 
+function findExistingOfficialLogo(canvas, logoCanvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })
+  if (!ctx) {
+    return null
+  }
+  let bestMatch = null
+  for (const placement of companyLogoCandidatePlacements(canvas, logoCanvas)) {
+    const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
+    const scaledLogoCtx = scaledLogoCanvas.getContext("2d", { willReadFrequently: true })
+    if (!scaledLogoCtx) {
+      continue
+    }
+    const match = calculateOfficialLogoPixelMatch(
+      ctx.getImageData(placement.x, placement.y, placement.width, placement.height),
+      scaledLogoCtx.getImageData(0, 0, placement.width, placement.height),
+    )
+    if (!bestMatch || match.score > bestMatch.score) {
+      bestMatch = { ...match, placement }
+    }
+  }
+  if (
+    !bestMatch
+    || bestMatch.comparedPixels < COMPANY_LOGO_EXISTING_MATCH_MIN_PIXELS
+    || bestMatch.score < COMPANY_LOGO_EXISTING_MATCH_THRESHOLD
+  ) {
+    return null
+  }
+  return bestMatch
+}
+
 async function applyLogoOverlayToDataUrl(dataUrl) {
   if (!dataUrl) {
     return null
@@ -10297,6 +10406,20 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
   }
 
   ctx.drawImage(baseImage, 0, 0, width, height)
+  const existingLogo = findExistingOfficialLogo(canvas, logoCanvas)
+  if (existingLogo) {
+    return {
+      dataUrl,
+      width,
+      height,
+      placement: {
+        ...existingLogo.placement,
+        textColor: "original",
+      },
+      preserved: true,
+      matchScore: existingLogo.score,
+    }
+  }
   const placement = calculateLogoPlacement(canvas, logoCanvas)
   const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
   ctx.drawImage(scaledLogoCanvas, placement.x, placement.y)
@@ -10359,6 +10482,29 @@ async function composeLogoOverlayForCandidates(candidates, logoRequested) {
       composedCandidates.push(candidate)
       continue
     }
+    if (composed.preserved) {
+      appendDebugLine("已有官方 LOGO，保留原位置且不重复贴入", {
+        placement: composed.placement,
+        matchScore: composed.matchScore,
+      })
+      const preservedAsset = {
+        ...asset,
+        logoOverlayApplied: true,
+        logoPreserved: true,
+        logoPlacement: composed.placement,
+        description: `${asset.description || asset.name || "结果图"} · 已保留 6 人游 LOGO`,
+      }
+      composedCandidates.push({
+        ...candidate,
+        logo_overlay_applied: true,
+        logo_preserved: true,
+        logo_overlay_source: COMPANY_LOGO_NAME,
+        logo_text_color: composed.placement.textColor || "original",
+        logo_final_persisted: Boolean(candidate.saved_image_url || asset.savedUrl),
+        asset: preservedAsset,
+      })
+      continue
+    }
     const composedName = imageDataUrlName(asset.name || candidate.saved_image_name, "6renyou-logo")
     let persisted = null
     try {
@@ -10384,10 +10530,11 @@ async function composeLogoOverlayForCandidates(candidates, logoRequested) {
       metadataPath: persisted?.saved_metadata_path || "",
       generatedImageId: persisted?.generated_image_id || candidate.generated_image_id || asset.generatedImageId || null,
       logoOverlayApplied: true,
+      logoPreserved: Boolean(composed.preserved),
       logoPlacement: composed.placement,
       description: serverUrl
-        ? `${asset.description || asset.name || "结果图"} · 已保存 6 人游 LOGO 成品`
-        : `${asset.description || asset.name || "结果图"} · 已本地贴入 6 人游 LOGO`,
+        ? `${asset.description || asset.name || "结果图"} · ${composed.preserved ? "已保留" : "已保存"} 6 人游 LOGO 成品`
+        : `${asset.description || asset.name || "结果图"} · ${composed.preserved ? "已保留" : "已本地贴入"} 6 人游 LOGO`,
     }
     composedCandidates.push({
       ...candidate,
@@ -10403,15 +10550,20 @@ async function composeLogoOverlayForCandidates(candidates, logoRequested) {
       saved_image_bytes: persisted?.saved_image_bytes || candidate.saved_image_bytes || 0,
       generated_image_id: persisted?.generated_image_id || candidate.generated_image_id || null,
       logo_overlay_applied: true,
+      logo_preserved: Boolean(composed.preserved),
       logo_overlay_source: COMPANY_LOGO_NAME,
       logo_text_color: composed.placement.textColor || "original",
       logo_final_persisted: Boolean(serverUrl),
       asset: composedAsset,
     })
   }
-  refs.logoComposeStatus.textContent = composedCandidates.some((candidate) => candidate.logo_final_persisted)
-    ? "成品已保存"
-    : "本地已贴图"
+  const allPreserved = composedCandidates.length > 0
+    && composedCandidates.every((candidate) => candidate.logo_preserved)
+  refs.logoComposeStatus.textContent = allPreserved
+    ? "已有 LOGO 已保留"
+    : composedCandidates.some((candidate) => candidate.logo_final_persisted)
+      ? "成品已保存"
+      : "本地已贴图"
   return composedCandidates
 }
 
@@ -11439,6 +11591,7 @@ function bindEvents() {
     }
   })
   refs.simpleChecklistCloseButton?.addEventListener("click", dismissSimpleChecklist)
+  refs.simpleRefreshSharedResultsButton?.addEventListener("click", refreshSharedResults)
   refs.simpleGalleryRefreshButton?.addEventListener("click", refreshGallery)
   refs.navModeButtons.forEach((button) => {
     button.addEventListener("click", () => {
@@ -11473,13 +11626,13 @@ function bindEvents() {
   refs.hoverVariantButton?.addEventListener("click", startVariantFromResult)
   refs.inspectLongImageButton?.addEventListener("click", () => openPreview("result", "cinema"))
   refs.hoverShareButton?.addEventListener("click", () => {
-    if (selectedGeneratedImageId()) {
+    if (selectedGeneratedImageId() && !currentResultIsShared()) {
       showSharePanel()
       refs.shareRecipientSearchInput?.focus()
     }
   })
   refs.simpleShareResultButton?.addEventListener("click", () => {
-    if (!selectedGeneratedImageId()) {
+    if (!selectedGeneratedImageId() || currentResultIsShared()) {
       return
     }
     showSharePanel()
@@ -11515,7 +11668,11 @@ function bindEvents() {
     closeSimpleMoreActions()
   })
   refs.downloadButton?.addEventListener("click", () => {
-    if (state.uiMode === "simple" && !refs.downloadButton.classList.contains("disabled-link")) {
+    if (
+      state.uiMode === "simple"
+      && !currentResultIsShared()
+      && !refs.downloadButton.classList.contains("disabled-link")
+    ) {
       markSimpleChecklistStep(3)
     }
   })
@@ -11554,13 +11711,8 @@ function bindEvents() {
   refs.submitShareResultButton?.addEventListener("click", submitShareResult)
   refs.shareRecipientSearchInput?.addEventListener("input", renderShareRecipientOptions)
   refs.refreshSharedResultsButton?.addEventListener("click", refreshSharedResults)
-  refs.sharedResultsList?.addEventListener("click", (event) => {
-    const button = event.target.closest(".shared-result-item")
-    if (!button) {
-      return
-    }
-    openSharedResult(button.dataset.shareId)
-  })
+  bindSharedResultsList(refs.sharedResultsList)
+  bindSharedResultsList(refs.simpleSharedResultsList)
   refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
   refs.refreshJobsButton?.addEventListener("click", refreshGenerationJobs)
   refs.gallerySearchInput?.addEventListener("input", () => {
