@@ -6227,3 +6227,146 @@ body.ui-simple-mode .toast-message .ux-icon {
     padding: 8px 12px;
   }
 }
+
+/* C6 simple shell: start */
+body.ui-simple-mode .app-topbar {
+  gap: var(--ux-space-4);
+  padding: var(--ux-space-3) var(--ux-space-4);
+  border-color: var(--ux-border-2);
+  background: var(--ux-bg-2);
+  backdrop-filter: var(--ux-shadow-none);
+}
+
+body.ui-simple-mode .topbar-tools {
+  gap: var(--ux-space-2);
+}
+
+body.ui-simple-mode .topbar-tools > .ghost-button,
+body.ui-simple-mode .topbar-tools > .system-pill {
+  min-height: var(--ux-control-height);
+  padding: var(--ux-space-0) var(--ux-control-padding-x);
+  border-color: var(--ux-border-2);
+  border-radius: var(--ux-radius-control);
+  background: var(--ux-fill-2);
+  box-shadow: var(--ux-shadow-none);
+  color: var(--ux-text-2);
+  font-family: var(--ux-font-family);
+  font-size: var(--ux-font-size-body);
+  font-weight: var(--ux-font-weight-medium);
+  line-height: var(--ux-line-height-body);
+  transition: var(--ux-transition-control);
+}
+
+body.ui-simple-mode .topbar-tools > .ghost-button:hover:not(:disabled),
+body.ui-simple-mode .topbar-tools > button.system-pill:hover:not(:disabled) {
+  border-color: var(--ux-border-3);
+  background: var(--ux-fill-3);
+  color: var(--ux-text-1);
+}
+
+body.ui-simple-mode .topbar-tools > .ghost-button:active:not(:disabled),
+body.ui-simple-mode .topbar-tools > button.system-pill:active:not(:disabled) {
+  border-color: var(--ux-border-3);
+  background: var(--ux-fill-4);
+  color: var(--ux-text-1);
+  transition: var(--ux-shadow-none);
+}
+
+body.ui-simple-mode .topbar-tools > .ghost-button:focus-visible,
+body.ui-simple-mode .topbar-tools > button.system-pill:focus-visible {
+  outline: var(--ux-shadow-none);
+  box-shadow: var(--ux-focus-ring-primary);
+}
+
+body.ui-simple-mode .topbar-tools > .system-pill:last-child {
+  border-color: var(--ux-primary-2);
+  border-radius: var(--ux-radius-small);
+  background: var(--ux-success-light);
+  color: var(--ux-success-text);
+}
+
+body.ui-simple-mode .live-dot {
+  width: var(--ux-space-2);
+  height: var(--ux-space-2);
+  border-radius: var(--ux-radius-circle);
+  background: var(--ux-success);
+  box-shadow: var(--ux-badge-edge);
+}
+
+body.ui-simple-mode .team-chat-button.has-unread {
+  border-color: var(--ux-primary-3);
+  background: var(--ux-primary-1);
+  color: var(--ux-primary-8);
+  animation: var(--ux-shadow-none);
+}
+
+body.ui-simple-mode #resultPanel {
+  padding: var(--ux-space-0);
+  border-color: var(--ux-color-transparent);
+  border-radius: var(--ux-radius-none);
+  background: var(--ux-color-transparent);
+  box-shadow: var(--ux-shadow-none);
+}
+
+body.ui-simple-mode #resultPanel .canvas-header {
+  padding: var(--ux-space-2) var(--ux-space-0) var(--ux-space-4);
+}
+
+body.ui-simple-mode .status-badge {
+  min-height: var(--ux-control-height-small);
+  padding: var(--ux-space-0) var(--ux-space-2);
+  border: var(--ux-border-width) var(--ux-border-style) var(--ux-primary-2);
+  border-radius: var(--ux-radius-small);
+  background: var(--ux-success-light);
+  color: var(--ux-success-text);
+  font-size: var(--ux-font-size-body-small);
+  font-weight: var(--ux-font-weight-medium);
+  line-height: var(--ux-line-height-body-small);
+}
+
+body.ui-simple-mode .status-badge.working {
+  border-color: var(--ux-warning-hover);
+  background: var(--ux-warning-light);
+  color: var(--ux-warning-text);
+  animation: var(--ux-shadow-none);
+}
+
+body.ui-simple-mode .preview-card {
+  border-color: var(--ux-border-2);
+  border-radius: var(--ux-radius-card);
+  background: var(--ux-bg-2);
+  box-shadow: var(--ux-shadow-card-rest);
+}
+
+body.ui-simple-mode .preview-label {
+  border-radius: var(--ux-radius-small);
+  background: var(--ux-text-2);
+  color: var(--ux-color-white);
+  font-weight: var(--ux-font-weight-medium);
+}
+
+body.ui-simple-mode .preview-frame {
+  background: var(--ux-fill-1);
+}
+
+body.ui-simple-mode .preview-frame:focus-visible {
+  outline: var(--ux-shadow-none);
+  box-shadow: var(--ux-focus-ring-primary);
+}
+
+body.ui-simple-mode .system-footer {
+  gap: var(--ux-space-6);
+  padding: var(--ux-space-0) var(--ux-space-4);
+  border-color: var(--ux-border-2);
+  background: var(--ux-bg-2);
+  color: var(--ux-text-3);
+  font-family: var(--ux-font-family);
+  font-size: var(--ux-font-size-caption);
+  line-height: var(--ux-line-height-caption);
+}
+
+body.ui-simple-mode .system-footer strong {
+  color: var(--ux-text-2);
+  font-weight: var(--ux-font-weight-medium);
+}
+/* C6 simple shell: end */

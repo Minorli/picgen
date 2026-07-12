@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import math
@@ -41,6 +42,22 @@ def valid_png_b64(width: int, height: int, color: tuple[int, int, int] = (60, 12
     output = BytesIO()
     Image.new("RGB", (width, height), color).save(output, format="PNG")
     return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _record_itinerary_render_event_loop_calls(monkeypatch) -> list[bool]:
+    rendered_on_event_loop: list[bool] = []
+
+    def render(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            rendered_on_event_loop.append(False)
+        else:
+            rendered_on_event_loop.append(True)
+        return render_itinerary_map_svg(*args, **kwargs)
+
+    monkeypatch.setattr("picgen.routes.render_itinerary_map_svg", render)
+    return rendered_on_event_loop
 
 
 def test_health_endpoint_reports_ok(make_client):
@@ -1037,13 +1054,16 @@ def test_itinerary_map_plan_requires_coordinates_before_rendering(make_client, s
     assert "缺少坐标" in payload["warnings"][0]
 
 
-def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(make_client, settings_factory):
+def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
+    make_client, settings_factory, monkeypatch
+):
     settings = settings_factory(
         auth_enabled=True,
         admin_password="correct horse battery admin",
         default_api_key="sk-test",
     )
     client, fake, resolved = make_client(settings=settings)
+    rendered_on_event_loop = _record_itinerary_render_event_loop_calls(monkeypatch)
     (resolved.static_dir / "6renyou.png").write_bytes(base64.b64decode(TINY_PNG_B64))
     fake.run_responses.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
     fake.run_file_upload.return_value = {"id": "file_itinerary_control"}
@@ -1144,6 +1164,7 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     file_response = client.get(payload["saved_image_url"])
     assert file_response.status_code == 200
     assert file_response.text.startswith("<svg")
+    assert rendered_on_event_loop == [False]
 
 
 def test_itinerary_map_render_reports_error_when_artwork_returns_text_without_image(make_client, settings_factory):
@@ -1360,9 +1381,12 @@ def test_itinerary_map_render_inlines_style_reference_when_file_upload_fallbacks
     assert content[2]["image_url"].startswith("data:image/png;base64,")
 
 
-def test_itinerary_map_render_succeeds_without_ai_background(make_client, settings_factory):
+def test_itinerary_map_render_succeeds_without_ai_background(
+    make_client, settings_factory, monkeypatch
+):
     settings = settings_factory(auth_enabled=True, admin_password="correct horse battery admin", default_api_key="")
     client, fake, _ = make_client(settings=settings)
+    rendered_on_event_loop = _record_itinerary_render_event_loop_calls(monkeypatch)
     register_response = client.post(
         "/api/auth/register",
         json={"username": "routeplanner", "password": "correct horse battery"},
@@ -1386,6 +1410,7 @@ def test_itinerary_map_render_succeeds_without_ai_background(make_client, settin
     assert payload["saved_image_mime"] == "image/svg+xml"
     assert payload["background_image"]["generated"] is False
     fake.run_json.assert_not_awaited()
+    assert rendered_on_event_loop == [False]
 
 
 def test_itinerary_map_render_fails_when_artwork_payload_is_invalid(make_client, settings_factory):
@@ -2056,6 +2081,71 @@ def test_generate_does_not_retry_ambiguous_502(make_client, settings_factory):
     )
 
     assert response.status_code == 502
+    assert fake.run_json.await_count == 1
+
+
+def test_generate_retries_plaintext_n_rejection_when_structured_param_is_empty(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    fake.run_json.side_effect = [
+        APIError(
+            400,
+            "Upstream request failed",
+            "上游错误：Unknown parameter: 'n'.\n\n"
+            '{"code":"unknown_parameter","param":""}',
+            code="upstream_error",
+        ),
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 1},
+        {"data": [{"b64_json": TINY_PNG_B64}], "created": 2},
+    ]
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成两张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_count"] == 2
+    assert fake.run_json.await_count == 3
+    assert fake.run_json.await_args_list[0].args[2]["n"] == 2
+    assert all("n" not in call.args[2] for call in fake.run_json.await_args_list[1:])
+
+
+def test_generate_preserves_upstream_400_for_deeply_nested_error_body(
+    make_client, settings_factory
+):
+    settings = settings_factory(default_api_key="sk-test")
+    client, fake, _ = make_client(settings=settings)
+    depth = 600
+    details = '{"child":' * depth + '{"param":"prompt"}' + "}" * depth
+    fake.run_json.side_effect = APIError(
+        400,
+        "Upstream request failed",
+        details,
+        code="upstream_error",
+    )
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "api_key": "sk-test",
+            "endpoint_url": "https://api.openai.com/v1/images/generations",
+            "prompt": "生成两张旅行海报",
+            "model": "gpt-image-2",
+            "sample_count": 2,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "upstream_error"
     assert fake.run_json.await_count == 1
 
 
@@ -2759,6 +2849,45 @@ def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
     assert "max_tool_calls" not in upstream_payload
     assert upstream_payload["tool_choice"] == {"type": "image_generation"}
     assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
+
+
+def test_responses_reasoning_follows_configured_default_model_only(
+    make_client, settings_factory
+):
+    settings = settings_factory(
+        default_api_key="sk-test",
+        default_responses_model="provider-default-model",
+        default_responses_reasoning_effort="high",
+        default_size="20x40",
+    )
+    client, fake, _ = make_client(settings=settings)
+    fake.run_responses.return_value = {
+        "data": [{"b64_json": valid_png_b64(20, 40)}],
+        "created": 1,
+    }
+
+    default_response = client.post(
+        "/api/responses-image",
+        json={"prompt": "使用默认模型生成", "mode": "generate"},
+    )
+    default_payload = fake.run_responses.await_args.args[2]
+
+    explicit_response = client.post(
+        "/api/responses-image",
+        json={
+            "prompt": "使用其它模型生成",
+            "mode": "generate",
+            "model": "explicit-other-model",
+        },
+    )
+    explicit_payload = fake.run_responses.await_args.args[2]
+
+    assert default_response.status_code == 200
+    assert default_payload["model"] == "provider-default-model"
+    assert default_payload["reasoning"] == {"effort": "high"}
+    assert explicit_response.status_code == 200
+    assert explicit_payload["model"] == "explicit-other-model"
+    assert "reasoning" not in explicit_payload
 
 
 def test_responses_image_caps_unexpected_extra_upstream_candidates(make_client, settings_factory):

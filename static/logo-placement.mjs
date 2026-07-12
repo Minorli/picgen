@@ -16,6 +16,53 @@ function toPositiveInteger(value) {
   return Math.max(1, Math.floor(Number(value) || 0))
 }
 
+function finitePositiveNumber(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : 0
+}
+
+export function scaleLogoDetectionPlacements(placements, sourceCanvas, resultCanvas) {
+  const rows = Array.isArray(placements) ? placements : []
+  const sourceWidth = finitePositiveNumber(sourceCanvas?.width)
+  const resultWidth = finitePositiveNumber(resultCanvas?.width)
+  if (!sourceWidth || !resultWidth) {
+    return rows.map((placement) => ({ ...placement }))
+  }
+
+  const scale = resultWidth / sourceWidth
+  return rows.map((placement) => ({
+    x: Math.round((Number(placement?.x) || 0) * scale),
+    y: Math.round((Number(placement?.y) || 0) * scale),
+    width: Math.max(1, Math.round((Number(placement?.width) || 0) * scale)),
+    height: Math.max(1, Math.round((Number(placement?.height) || 0) * scale)),
+  }))
+}
+
+export function createLogoPreservationDiagnostic(match, threshold, context = {}) {
+  const score = Math.min(1, Math.max(0, Number(match?.score) || 0))
+  const generatedImageId = Math.max(0, Math.floor(Number(context?.generatedImageId) || 0))
+  const rawCandidateIndex = Number(context?.candidateIndex)
+  const savedImagePath = String(context?.savedImagePath || "").trim().slice(0, 1024)
+  const diagnostic = {
+    decision: "preserve",
+    match_rate: Number(score.toFixed(4)),
+    matched_pixels: Math.max(0, Math.floor(Number(match?.matchedPixels) || 0)),
+    compared_pixels: Math.max(0, Math.floor(Number(match?.comparedPixels) || 0)),
+    threshold: Math.min(1, Math.max(0, Number(threshold) || 0)),
+    basis: "official_logo_pixel_match",
+  }
+  if (generatedImageId > 0) {
+    diagnostic.generated_image_id = generatedImageId
+  }
+  if (Number.isFinite(rawCandidateIndex) && rawCandidateIndex >= 0) {
+    diagnostic.candidate_index = Math.floor(rawCandidateIndex)
+  }
+  if (savedImagePath) {
+    diagnostic.saved_image_path = savedImagePath
+  }
+  return diagnostic
+}
+
 function normalizeRegion(ctx, region) {
   const canvasWidth = toPositiveInteger(ctx.canvas.width)
   const canvasHeight = toPositiveInteger(ctx.canvas.height)

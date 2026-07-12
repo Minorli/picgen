@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.65**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.66**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,14 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.65 主要特性
+## 0.1.66 主要特性
+
+- **简洁模式壳层统一**：顶栏、状态、预览和页脚使用既有 Arco token 重做；专业模式除模式按钮和“我的收藏”需求文案外保持原像素。
+- **编辑 Logo 缩放检测闭环**：检测坐标按源画布到结果画布的宽度比例缩放，缺失尺寸会先补齐；保留判定记录匹配率、像素数、阈值和候选关联，便于追查误判。
+- **蒙版与错误边界加固**：PNG-8 `tRNS` 蒙版恢复逐像素保留；空 `param` 可继续触发候选数降级；深层错误体和 Pillow 解压炸弹异常均受控处理。
+- **收藏与聊天状态诚实**：“团队灵感流”改为“我的收藏”，可见共享图片支持各自收藏；取消筛选会同步隐藏说明，聊天轮询不重绘未变化消息且隔离跨房间和乱序状态。
+- **行程图稳定性提升**：字体子集失败会继续尝试候选目录，SVG 渲染移出事件循环，长标题和副标题分档缩小并安全截断。
+- **多图结果数量透明**：Responses 请求多张但上游少返回时，结果区明确显示请求数和返回数。
 
 - **模式切换更醒目**：简洁模式和专业模式的切换按钮使用主绿色与白色图文，在桌面和移动端都更容易识别。
 
@@ -129,10 +136,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.65 .
+docker build -t minorli/picgen:0.1.66 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.65
+  minorli/picgen:0.1.66
 ```
 
 或：
@@ -147,10 +154,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.65`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.66`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.65 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.66 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
@@ -263,7 +270,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.65 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.66 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

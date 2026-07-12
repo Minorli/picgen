@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
+
+from PIL import Image
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
@@ -15,7 +18,9 @@ import {{
   calculateRegionComplexity,
   calculateRegionTextEdgePenalty,
   chooseLogoPlacement,
+  createLogoPreservationDiagnostic,
   expandLogoSafetyRegion,
+  scaleLogoDetectionPlacements,
 }} from './static/logo-placement.mjs'
 console.log(JSON.stringify({expression}))
 """
@@ -86,6 +91,91 @@ def test_official_logo_pixel_match_accepts_small_resampling_shift() -> None:
     )
 
     assert result == {"score": 1, "matchedPixels": 9, "comparedPixels": 9}
+
+
+def test_logo_detection_scales_real_official_logo_with_result_canvas() -> None:
+    source_size = (1536, 2048)
+    result_size = (1024, 1365)
+    source_placement = {"x": 42, "y": 42, "width": 220, "height": 68}
+    expected_placement = {"x": 28, "y": 28, "width": 147, "height": 45}
+
+    with Image.open(ROOT_DIR / "static" / "6renyou.png") as source_logo:
+        logo = source_logo.convert("RGBA")
+        alpha_bounds = logo.getchannel("A").getbbox()
+        assert alpha_bounds is not None
+        logo = logo.crop(alpha_bounds)
+        scaled_source_logo = logo.resize(
+            (source_placement["width"], source_placement["height"]),
+            Image.Resampling.LANCZOS,
+        )
+        source_canvas = Image.new("RGBA", source_size, (232, 236, 234, 255))
+        source_canvas.alpha_composite(scaled_source_logo, (source_placement["x"], source_placement["y"]))
+        result_canvas = source_canvas.resize(result_size, Image.Resampling.LANCZOS)
+        result_region = result_canvas.crop(
+            (
+                expected_placement["x"],
+                expected_placement["y"],
+                expected_placement["x"] + expected_placement["width"],
+                expected_placement["y"] + expected_placement["height"],
+            )
+        )
+        expected_logo = logo.resize(
+            (expected_placement["width"], expected_placement["height"]),
+            Image.Resampling.LANCZOS,
+        )
+
+    result_region_b64 = base64.b64encode(result_region.tobytes()).decode("ascii")
+    expected_logo_b64 = base64.b64encode(expected_logo.tobytes()).decode("ascii")
+    result = _run_logo_policy(
+        "(() => {"
+        f"const placements = scaleLogoDetectionPlacements([{json.dumps(source_placement)}], "
+        f"{{ width: {source_size[0]}, height: {source_size[1]} }}, "
+        f"{{ width: {result_size[0]}, height: {result_size[1]} }});"
+        "const placement = placements[0];"
+        f"const base = Uint8ClampedArray.from(Buffer.from('{result_region_b64}', 'base64'));"
+        f"const logo = Uint8ClampedArray.from(Buffer.from('{expected_logo_b64}', 'base64'));"
+        "return { placement, match: calculateOfficialLogoPixelMatch("
+        "{ data: base, width: placement.width, height: placement.height },"
+        "{ data: logo, width: placement.width, height: placement.height },"
+        ") };"
+        "})()"
+    )
+
+    assert result["placement"] == expected_placement
+    assert result["match"]["comparedPixels"] >= 128
+    assert result["match"]["score"] >= 0.9
+
+
+def test_logo_detection_uses_width_ratio_for_nonuniform_canvas_drift() -> None:
+    result = _run_logo_policy(
+        "scaleLogoDetectionPlacements("
+        "[{ x: 42, y: 42, width: 220, height: 68 }], "
+        "{ width: 1536, height: 2048 }, "
+        "{ width: 1024, height: 1200 })"
+    )
+
+    assert result == [{"x": 28, "y": 28, "width": 147, "height": 45}]
+
+
+def test_logo_preservation_diagnostic_contains_only_safe_decision_evidence() -> None:
+    result = _run_logo_policy(
+        "createLogoPreservationDiagnostic("
+        "{ score: 0.934567, matchedPixels: 842, comparedPixels: 901 }, 0.9, "
+        "{ generatedImageId: 42, candidateIndex: 2, savedImagePath: 'outputs/20260712/result.png' })"
+    )
+
+    assert result == {
+        "decision": "preserve",
+        "match_rate": 0.9346,
+        "matched_pixels": 842,
+        "compared_pixels": 901,
+        "threshold": 0.9,
+        "basis": "official_logo_pixel_match",
+        "generated_image_id": 42,
+        "candidate_index": 2,
+        "saved_image_path": "outputs/20260712/result.png",
+    }
+    assert not {"api_key", "token", "password", "image_data"}.intersection(result)
 
 
 def test_official_logo_pixel_match_rejects_matching_colors_outside_local_radius() -> None:

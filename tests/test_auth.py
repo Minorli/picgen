@@ -2216,6 +2216,97 @@ def test_gallery_lists_searches_favorites_and_tags_own_images_only(make_client, 
     assert {item["id"] for item in admin_all.json()["items"]} == {alice_image_id, bob_image_id}
 
 
+def test_gallery_update_uses_viewer_visibility_and_keeps_metadata_per_user(
+    make_client,
+    settings_factory,
+):
+    settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
+    client, fake, resolved_settings = make_client(settings=settings)
+    fake.run_json.return_value = {"data": [{"b64_json": TINY_PNG_B64}], "created": 1}
+
+    alice_client = TestClient(client.app)
+    alice = alice_client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": USER_PASSWORD},
+    ).json()["user"]
+    generated = alice_client.post(
+        "/api/generate",
+        json={"prompt": "可分享的海岛海报", "model": "gpt-image-2"},
+    ).json()
+    image_id = generated["generated_image_id"]
+
+    bob_client = TestClient(client.app)
+    bob = bob_client.post(
+        "/api/auth/register",
+        json={"username": "bob", "password": USER_PASSWORD},
+    ).json()["user"]
+    carol_client = TestClient(client.app)
+    carol = carol_client.post(
+        "/api/auth/register",
+        json={"username": "carol", "password": USER_PASSWORD},
+    ).json()["user"]
+
+    share = alice_client.post(
+        "/api/shares",
+        json={
+            "recipient_ids": [bob["id"]],
+            "generated_image_id": image_id,
+            "saved_image_path": generated["saved_image_path"],
+            "saved_image_url": generated["saved_image_url"],
+        },
+    )
+    assert share.status_code == 200
+    assert bob_client.get(f"/{generated['saved_image_url']}").status_code == 200
+    assert carol_client.get(f"/{generated['saved_image_url']}").status_code == 404
+    assert bob_client.get(f"/api/generated-images/{image_id}").status_code == 404
+
+    owner_update = alice_client.put(
+        f"/api/gallery/{image_id}",
+        json={"is_favorite": True, "tags": ["owner-tag"]},
+    )
+    assert owner_update.status_code == 200
+
+    visible_viewer_update = bob_client.put(
+        f"/api/gallery/{image_id}",
+        json={"is_favorite": False, "tags": ["viewer-tag"]},
+    )
+    assert visible_viewer_update.status_code == 200
+    assert visible_viewer_update.json()["item"]["user_id"] == alice["id"]
+    assert visible_viewer_update.json()["item"]["is_favorite"] is False
+    assert visible_viewer_update.json()["item"]["tags"] == ["viewer-tag"]
+
+    hidden_viewer_update = carol_client.put(
+        f"/api/gallery/{image_id}",
+        json={"is_favorite": True, "tags": ["hidden-tag"]},
+    )
+    assert hidden_viewer_update.status_code == 403
+    assert hidden_viewer_update.json()["code"] == "forbidden"
+
+    with sqlite3.connect(resolved_settings.resolved_auth_db_path) as conn:
+        metadata_rows = conn.execute(
+            """
+            SELECT user_id, is_favorite
+            FROM gallery_image_metadata
+            WHERE generated_image_id = ?
+            ORDER BY user_id
+            """,
+            (image_id,),
+        ).fetchall()
+        tag_rows = conn.execute(
+            """
+            SELECT user_id, tag
+            FROM gallery_image_tags
+            WHERE generated_image_id = ?
+            ORDER BY user_id, id
+            """,
+            (image_id,),
+        ).fetchall()
+
+    assert metadata_rows == [(alice["id"], 1), (bob["id"], 0)]
+    assert tag_rows == [(alice["id"], "owner-tag"), (bob["id"], "viewer-tag")]
+    assert carol["id"] not in {row[0] for row in metadata_rows}
+
+
 def test_user_cannot_share_or_finalize_another_users_generated_image(make_client, settings_factory):
     settings = settings_factory(
         auth_enabled=True,

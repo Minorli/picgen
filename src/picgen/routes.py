@@ -213,8 +213,11 @@ def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
 def _responses_reasoning_options(
     model: str,
     reasoning_effort: str,
+    *,
+    default_model: str = DEFAULT_RESPONSES_MODEL,
 ) -> dict[str, dict[str, str]]:
-    if model.strip() != DEFAULT_RESPONSES_MODEL:
+    supported_models = {DEFAULT_RESPONSES_MODEL, default_model.strip()}
+    if model.strip() not in supported_models:
         return {}
     return {"reasoning": {"effort": reasoning_effort}}
 
@@ -440,7 +443,11 @@ def _resolve_image_execution_plan(
     )
     reasoning_effort = (
         requested_reasoning_effort
-        if _responses_reasoning_options(model, requested_reasoning_effort)
+        if _responses_reasoning_options(
+            model,
+            requested_reasoning_effort,
+            default_model=settings.default_responses_model,
+        )
         else ""
     )
     return ImageExecutionPlan(
@@ -921,6 +928,8 @@ def _decode_trailing_error_json(details: str) -> object | None:
     for start in dict.fromkeys(starts):
         try:
             return json.loads(details[start:])
+        except RecursionError:
+            return None
         except (TypeError, ValueError):
             continue
     return None
@@ -933,17 +942,27 @@ def _structured_error_parameters(details: str | None) -> tuple[str, ...]:
     if payload is None:
         return ()
 
-    def _walk(value: object) -> tuple[str, ...]:
+    def _walk(value: object, depth: int = 0) -> tuple[str, ...]:
+        if depth > 8:
+            return ()
         if isinstance(value, dict):
             direct = tuple(
                 child
                 for key, child in value.items()
-                if key.lower() in {"param", "parameter"} and isinstance(child, str)
+                if key.lower() in {"param", "parameter"}
+                and isinstance(child, str)
+                and child.strip()
             )
-            nested = tuple(parameter for child in value.values() for parameter in _walk(child))
+            nested = tuple(
+                parameter
+                for child in value.values()
+                for parameter in _walk(child, depth + 1)
+            )
             return (*direct, *nested)
         if isinstance(value, list):
-            return tuple(parameter for child in value for parameter in _walk(child))
+            return tuple(
+                parameter for child in value for parameter in _walk(child, depth + 1)
+            )
         return ()
 
     return _walk(payload)
@@ -1375,7 +1394,11 @@ async def _generate_itinerary_artwork(
     upstream_payload: dict[str, Any] = {
         "model": model,
         "instructions": ITINERARY_ARTWORK_INSTRUCTIONS,
-        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
+        **_responses_reasoning_options(
+            model,
+            settings.default_responses_reasoning_effort,
+            default_model=settings.default_responses_model,
+        ),
         "stream": True,
         "parallel_tool_calls": False,
         "tool_choice": {"type": "image_generation"},
@@ -1467,13 +1490,15 @@ async def _generate_itinerary_artwork(
             code="upstream_error",
         )
 
-    svg_text = render_itinerary_map_svg(
-        plan,
-        width=width,
-        height=height,
-        background_image_url=background_data_url,
-        logo_href="",
-        reserve_logo_area=parsed.logo_requested,
+    svg_text = await anyio.to_thread.run_sync(
+        lambda: render_itinerary_map_svg(
+            plan,
+            width=width,
+            height=height,
+            background_image_url=background_data_url,
+            logo_href="",
+            reserve_logo_area=parsed.logo_requested,
+        )
     )
     overlay = await anyio.to_thread.run_sync(
         lambda: save_itinerary_map_svg(
@@ -1641,7 +1666,11 @@ async def _complete_itinerary_plan_with_ai_coordinates(
     upstream_payload = {
         "model": model,
         "instructions": ITINERARY_COORDINATE_INSTRUCTIONS,
-        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
+        **_responses_reasoning_options(
+            model,
+            settings.default_responses_reasoning_effort,
+            default_model=settings.default_responses_model,
+        ),
         "input": [
             {
                 "role": "user",
@@ -1815,13 +1844,15 @@ async def handle_itinerary_map_render(
             }
 
     try:
-        svg_text = render_itinerary_map_svg(
-            plan,
-            width=width,
-            height=height,
-            background_image_url=parsed.background_image_url,
-            logo_href="",
-            reserve_logo_area=parsed.logo_requested,
+        svg_text = await anyio.to_thread.run_sync(
+            lambda: render_itinerary_map_svg(
+                plan,
+                width=width,
+                height=height,
+                background_image_url=parsed.background_image_url,
+                logo_href="",
+                reserve_logo_area=parsed.logo_requested,
+            )
         )
         saved = await anyio.to_thread.run_sync(
             lambda: save_itinerary_map_svg(
@@ -3620,7 +3651,11 @@ async def _create_team_chat_bot_reply(
     upstream_payload = {
         "model": model,
         "instructions": TEAM_CHAT_BOT_INSTRUCTIONS,
-        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
+        **_responses_reasoning_options(
+            model,
+            settings.default_responses_reasoning_effort,
+            default_model=settings.default_responses_model,
+        ),
         "input": [
             {
                 "role": "user",
@@ -3781,7 +3816,11 @@ async def handle_copyright_risk(
     upstream_payload = {
         "model": model,
         "instructions": COPYRIGHT_RISK_INSTRUCTIONS,
-        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
+        **_responses_reasoning_options(
+            model,
+            settings.default_responses_reasoning_effort,
+            default_model=settings.default_responses_model,
+        ),
         "input": [
             {
                 "role": "user",
@@ -3844,7 +3883,9 @@ async def handle_text_fidelity(
                     "model": model,
                     "instructions": TEXT_FIDELITY_INSTRUCTIONS,
                     **_responses_reasoning_options(
-                        model, settings.default_responses_reasoning_effort
+                        model,
+                        settings.default_responses_reasoning_effort,
+                        default_model=settings.default_responses_model,
                     ),
                     "input": [
                         {
@@ -3878,7 +3919,11 @@ async def handle_text_fidelity(
     upstream_payload = {
         "model": model,
         "instructions": TEXT_FIDELITY_INSTRUCTIONS,
-        **_responses_reasoning_options(model, settings.default_responses_reasoning_effort),
+        **_responses_reasoning_options(
+            model,
+            settings.default_responses_reasoning_effort,
+            default_model=settings.default_responses_model,
+        ),
         "input": [
             {
                 "role": "user",
@@ -4135,7 +4180,11 @@ def _job_metadata(path: str, body: Any, user: AuthUser, settings: Settings) -> d
         requested_reasoning_effort = settings.default_responses_reasoning_effort
     default_reasoning_effort = (
         requested_reasoning_effort
-        if _responses_reasoning_options(effective_model, requested_reasoning_effort)
+        if _responses_reasoning_options(
+            effective_model,
+            requested_reasoning_effort,
+            default_model=settings.default_responses_model,
+        )
         else ""
     )
     default_size = {
@@ -4946,7 +4995,11 @@ async def handle_responses_image(
     requested_reasoning_effort = (
         parsed.reasoning_effort or settings.default_responses_reasoning_effort
     )
-    reasoning_options = _responses_reasoning_options(model, requested_reasoning_effort)
+    reasoning_options = _responses_reasoning_options(
+        model,
+        requested_reasoning_effort,
+        default_model=settings.default_responses_model,
+    )
     reasoning_effort = requested_reasoning_effort if reasoning_options else ""
 
     _ensure_no_restricted_destination_text(parsed.prompt)

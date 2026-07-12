@@ -36,6 +36,8 @@ NOMINATIM_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 LOGO_HREF = "6renyou.png"
 TITLE_FONT_FAMILY = "PicGenRouteTitle"
 TITLE_FONT_RELATIVE_PATH = Path("fonts/zcool-xiaowei/ZCOOLXiaoWei-Regular.ttf")
+TITLE_TEXT_TIERS = ((8, 80), (10, 64), (12, 52))
+SUBTITLE_TEXT_TIERS = ((20, 32), (24, 26), (30, 21))
 logger = logging.getLogger(__name__)
 logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
 INSTRUCTION_STOP_PREFIXES = (
@@ -62,6 +64,10 @@ INSTRUCTION_STOP_PHRASES = (
 RGBColor = tuple[int, int, int]
 _LAST_NOMINATIM_REQUEST_AT = 0.0
 _NOMINATIM_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+class _TitleFontUnavailable(Exception):
+    pass
 
 
 def _candidate_static_dirs() -> list[Path]:
@@ -109,7 +115,7 @@ def _embedded_title_font_face_css_cached(glyphs: str) -> str:
             continue
         except Exception as exc:
             logger.warning("itinerary_title_font_subset_failed", extra={"error_type": type(exc).__name__})
-            return ""
+            continue
         encoded = base64.b64encode(font_bytes).decode("ascii")
         return (
             "/* ZCOOL XiaoWei, SIL Open Font License 1.1 */"
@@ -117,7 +123,7 @@ def _embedded_title_font_face_css_cached(glyphs: str) -> str:
             "src:url(data:font/ttf;base64,"
             f"{encoded}) format('truetype');font-weight:400;font-style:normal;font-display:block}}"
         )
-    return ""
+    raise _TitleFontUnavailable
 
 
 def _embedded_title_font_face_css(text: str) -> str:
@@ -127,10 +133,11 @@ def _embedded_title_font_face_css(text: str) -> str:
     glyphs = "".join(sorted(set(text)))
     if not glyphs:
         return ""
-    css = _embedded_title_font_face_css_cached(glyphs)
-    if not css:
-        _embedded_title_font_face_css_cached.cache_clear()
-    return css
+    try:
+        return _embedded_title_font_face_css_cached(glyphs)
+    except _TitleFontUnavailable:
+        return ""
+
 
 COUNTRY_LABEL_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("意大利", ("意大利", "italy", "italia")),
@@ -1374,6 +1381,14 @@ def _short_text(value: Any, *, limit: int) -> str:
     return f"{text[: max(1, limit - 1)]}…"
 
 
+def _fit_heading_text(text: str, tiers: tuple[tuple[int, int], ...]) -> tuple[str, int]:
+    for character_limit, font_size in tiers:
+        if len(text) <= character_limit:
+            return text, font_size
+    character_limit, font_size = tiers[-1]
+    return f"{text[: character_limit - 1]}…", font_size
+
+
 def _overlap_area(box: tuple[float, float, float, float], other: tuple[float, float, float, float]) -> float:
     left = max(box[0], other[0])
     top = max(box[1], other[1])
@@ -1382,58 +1397,6 @@ def _overlap_area(box: tuple[float, float, float, float], other: tuple[float, fl
     if right <= left or bottom <= top:
         return 0.0
     return (right - left) * (bottom - top)
-
-
-def _dense_index_labels(points: list[dict[str, Any]], *, width: int, height: int) -> list[str]:
-    occupied: list[tuple[float, float, float, float]] = []
-    nodes: list[str] = []
-    candidates = (
-        (-34.0, -34.0),
-        (34.0, -34.0),
-        (-34.0, 34.0),
-        (34.0, 34.0),
-        (0.0, -44.0),
-        (0.0, 44.0),
-        (-50.0, 0.0),
-        (50.0, 0.0),
-        (-58.0, -18.0),
-        (58.0, -18.0),
-        (-58.0, 18.0),
-        (58.0, 18.0),
-    )
-    badge_w = 34.0
-    badge_h = 28.0
-    for index, point in enumerate(points):
-        x = float(point["x"])
-        y = float(point["y"])
-        best: tuple[float, float, tuple[float, float, float, float]] | None = None
-        best_score = float("inf")
-        for dx, dy in candidates:
-            cx = min(max(x + dx, 40.0), width - 480.0)
-            cy = min(max(y + dy, 184.0), height - 60.0)
-            box = (cx - badge_w / 2, cy - badge_h / 2, cx + badge_w / 2, cy + badge_h / 2)
-            overlap = sum(_overlap_area(box, item) for item in occupied)
-            distance = abs(dx) + abs(dy)
-            score = overlap * 100.0 + distance
-            if score < best_score:
-                best_score = score
-                best = (cx, cy, box)
-        if best is None:
-            continue
-        cx, cy, box = best
-        occupied.append(box)
-        leader = ""
-        if abs(cx - x) + abs(cy - y) > 34:
-            leader = f'<line x1="{x - cx:.1f}" y1="{y - cy:.1f}" x2="0" y2="0" class="map-index-leader"/>'
-        nodes.append(
-            f'<g class="map-index-badge" transform="translate({cx:.1f} {cy:.1f})">'
-            f"{leader}"
-            '<circle cx="0" cy="0" r="15" fill="#fff7c7" opacity="0.96"/>'
-            '<circle cx="0" cy="0" r="13" fill="none" stroke="#7f5f45" stroke-width="1.35"/>'
-            f'<text x="0" y="6" text-anchor="middle" class="map-index">{index + 1}</text>'
-            "</g>"
-        )
-    return nodes
 
 
 def _label_candidate_centers(
@@ -1767,8 +1730,8 @@ def render_itinerary_map_svg(
         f'<path d="{segment["path"]}" class="route-line{" transfer" if segment["transfer"] else ""}"/>'
         for segment in route_segments
     ]
-    title_text = str(plan.get("title") or "定制旅行路线图")
-    subtitle_text = str(plan.get("subtitle") or "")
+    title_text, title_font_size = _fit_heading_text(str(plan.get("title") or "定制旅行路线图"), TITLE_TEXT_TIERS)
+    subtitle_text, subtitle_font_size = _fit_heading_text(str(plan.get("subtitle") or ""), SUBTITLE_TEXT_TIERS)
     title = _svg_text(title_text)
     subtitle = _svg_text(subtitle_text)
     safe_background_url = (
@@ -1840,11 +1803,6 @@ def render_itinerary_map_svg(
         has_logo=reserve_logo,
         avoid_boxes=callout_boxes,
     )
-    index_nodes = (
-        _dense_index_labels(points, width=width, height=height)
-        if dense_layout and len(points) > len(label_nodes)
-        else []
-    )
     doodle_nodes = [] if safe_background_url else _decorative_doodles(points, width=width, height=height)
 
     logo_group = (
@@ -1907,17 +1865,22 @@ def render_itinerary_map_svg(
             f"font-family:'{TITLE_FONT_FAMILY}','ZCOOL XiaoWei','Noto Serif CJK SC',"
             "'Source Han Serif SC','Songti SC',serif;"
             "letter-spacing:0}",
-            ".title-shadow{font-size:80px;font-weight:900;fill:#4b2d16;opacity:.18;filter:url(#titleCast)}",
+            f".title-shadow{{font-size:{title_font_size}px;font-weight:900;fill:#4b2d16;"
+            "opacity:.18;filter:url(#titleCast)}",
             ".title-wash{fill:#f0d49a;fill-opacity:.34;stroke:#b9823f;stroke-width:1.1;opacity:.62}",
-            ".title-brush{font-size:80px;font-weight:900;fill:none;stroke:#fff4d7;stroke-width:8.5;"
+            f".title-brush{{font-size:{title_font_size}px;font-weight:900;fill:none;stroke:#fff4d7;stroke-width:8.5;"
             "stroke-linejoin:round;stroke-linecap:round;paint-order:stroke;opacity:.92;filter:url(#titleBrushRough)}",
-            ".title-gold-edge{font-size:80px;font-weight:900;fill:none;stroke:url(#titleGold);stroke-width:2.4;"
+            f".title-gold-edge{{font-size:{title_font_size}px;font-weight:900;fill:none;stroke:url(#titleGold);"
+            "stroke-width:2.4;"
             "stroke-linejoin:round;stroke-linecap:round;opacity:.82;filter:url(#titleBrushRough)}",
-            ".title{font-size:80px;font-weight:900;fill:url(#titleInk);paint-order:stroke;stroke:#2a1609;"
+            f".title{{font-size:{title_font_size}px;font-weight:900;fill:url(#titleInk);paint-order:stroke;"
+            "stroke:#2a1609;"
             "stroke-width:.55;stroke-linejoin:round;filter:url(#titleBrushRough)}",
-            ".subtitle-glow{font-size:32px;font-weight:700;fill:none;stroke:#fff2d7;stroke-width:5;"
+            f".subtitle-glow{{font-size:{subtitle_font_size}px;font-weight:700;fill:none;stroke:#fff2d7;"
+            "stroke-width:5;"
             "stroke-linejoin:round;opacity:.88}",
-            ".subtitle{font-size:32px;font-weight:700;fill:#7a4c22;paint-order:stroke;stroke:#fff8e6;"
+            f".subtitle{{font-size:{subtitle_font_size}px;font-weight:700;fill:#7a4c22;paint-order:stroke;"
+            "stroke:#fff8e6;"
             "stroke-width:.9;stroke-linejoin:round}",
             ".title-ornament{fill:none;stroke:#9b6b35;stroke-width:1.7;stroke-linecap:round;opacity:.44}",
             ".country-label{font:760 46px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#735b3e;"
@@ -1925,8 +1888,6 @@ def render_itinerary_map_svg(
             "stroke-opacity:.72}",
             ".country-label.small{font-size:36px;opacity:.50}",
             ".route-dot-index{font:800 10px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#ffffff}",
-            ".map-index{font:800 15px system-ui,'PingFang SC','Microsoft YaHei',sans-serif;fill:#7f5f45}",
-            ".map-index-leader{stroke:#7f5f45;stroke-width:1.05;stroke-linecap:round;opacity:.26}",
             ".callout-scroll{fill:#fff4df;fill-opacity:.60;stroke:#b99662;stroke-width:.85;opacity:.92}",
             ".callout-leader{fill:none;stroke:#735a42;stroke-width:.9;stroke-linecap:round;opacity:.24}",
             ".callout-chip{fill:#7f5f45;stroke:#fff7e7;stroke-width:2.2}",
@@ -1982,9 +1943,7 @@ def render_itinerary_map_svg(
             '<g data-layer="program-country-labels">',
             *country_nodes,
             "</g>",
-            '<g data-layer="program-index-labels">',
-            *index_nodes,
-            "</g>",
+            '<g data-layer="program-index-labels"></g>',
             '<g data-layer="program-labels">',
             *label_nodes,
             "</g>",
