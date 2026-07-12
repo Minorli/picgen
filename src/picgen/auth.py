@@ -1705,7 +1705,13 @@ class AuthStore:
             ).fetchone()
         return int(row["id"]) if row is not None else None
 
-    def generated_image_detail_for_user(self, *, generated_image_id: int, user_id: int) -> dict[str, Any] | None:
+    def generated_image_detail_for_user(
+        self,
+        *,
+        generated_image_id: int,
+        user_id: int,
+        allow_viewer_access: bool = False,
+    ) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
@@ -1749,12 +1755,27 @@ class AuthStore:
                 FROM generated_images gi
                 JOIN generation_jobs j ON j.id = gi.job_id
                 LEFT JOIN generated_image_metadata gim ON gim.generated_image_id = gi.id
-                WHERE gi.id = ? AND gi.user_id = ?
+                WHERE gi.id = ? AND (gi.user_id = ? OR ? = 1)
                 """,
-                (generated_image_id, user_id),
+                (generated_image_id, user_id, 1 if allow_viewer_access else 0),
             ).fetchone()
+            viewer_is_admin = False
+            if row is not None and int(row["user_id"]) != user_id:
+                viewer = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+                viewer_is_admin = viewer is not None and str(viewer["role"] or "") == "admin"
         if row is None:
             return None
+        if int(row["user_id"]) != user_id:
+            saved_url = str(row["saved_image_url"] or "").strip().lstrip("/")
+            relative_path = saved_url.removeprefix("files/")
+            absolute_path = Path(str(row["saved_image_path"] or relative_path))
+            if not self.can_user_access_output(
+                user_id=user_id,
+                is_admin=viewer_is_admin,
+                relative_path=relative_path,
+                absolute_path=absolute_path,
+            ):
+                return None
         item = _generated_image_row_to_dict(row)
         metadata: dict[str, Any] = {}
         try:
@@ -2143,15 +2164,14 @@ class AuthStore:
         cleaned_tags = normalize_gallery_tags(tags)
         now = _now_text()
         with self._lock, self._connect() as conn:
-            image = conn.execute(
-                """
-                SELECT id
-                FROM generated_images
-                WHERE id = ? AND user_id = ?
-                """,
-                (generated_image_id, user_id),
-            ).fetchone()
-            if image is None:
+            if (
+                self.generated_image_detail_for_user(
+                    generated_image_id=generated_image_id,
+                    user_id=user_id,
+                    allow_viewer_access=True,
+                )
+                is None
+            ):
                 raise PermissionError("无权整理这张图片")
             conn.execute(
                 """

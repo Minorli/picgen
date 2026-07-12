@@ -8,6 +8,7 @@ import stat
 import tempfile
 import uuid
 import warnings
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from io import BytesIO
@@ -279,19 +280,40 @@ def composite_masked_edit_image(
     if output_format is None:
         raise ValueError(f"unsupported image mime for masked edit: {generated_image_mime}")
 
-    with (
-        Image.open(BytesIO(source_image_bytes)) as source_file,
-        Image.open(BytesIO(mask_image_bytes)) as mask_file,
-        Image.open(BytesIO(generated_image_bytes)) as generated_file,
+    for image_label, image_bytes in (
+        ("source", source_image_bytes),
+        ("mask", mask_image_bytes),
+        ("generated", generated_image_bytes),
     ):
+        dimensions = detect_image_dimensions(image_bytes)
+        if dimensions and dimensions[0] * dimensions[1] > MAX_EXACT_IMAGE_PIXELS:
+            raise ValueError(f"{image_label} image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
+
+    with ExitStack() as stack:
+        image_files: list[tuple[str, Image.Image]] = []
+        for image_label, image_bytes in (
+            ("source", source_image_bytes),
+            ("mask", mask_image_bytes),
+            ("generated", generated_image_bytes),
+        ):
+            try:
+                image_file = stack.enter_context(Image.open(BytesIO(image_bytes)))
+            except Image.DecompressionBombError as exc:
+                raise ValueError(
+                    f"{image_label} image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels"
+                ) from exc
+            width, height = image_file.size
+            if width * height > MAX_EXACT_IMAGE_PIXELS:
+                raise ValueError(f"{image_label} image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
+            image_files.append((image_label, image_file))
+        source_file, mask_file, generated_file = (image_file for _, image_file in image_files)
         source = ImageOps.exif_transpose(source_file).convert("RGBA")
-        mask = ImageOps.exif_transpose(mask_file)
+        mask_source = ImageOps.exif_transpose(mask_file)
+        mask = mask_source.convert("RGBA")
         generated = ImageOps.exif_transpose(generated_file).convert("RGBA")
-        if source.width * source.height > MAX_EXACT_IMAGE_PIXELS:
-            raise ValueError(f"source image exceeds {MAX_EXACT_IMAGE_PIXELS} pixels")
         if mask.size != source.size:
             raise ValueError("mask dimensions must match source image dimensions")
-        if "A" not in mask.getbands():
+        if "A" not in mask_source.getbands() and "transparency" not in mask_source.info:
             raise ValueError("mask image must contain an alpha channel")
         if generated.size != source.size:
             generated = ImageOps.fit(

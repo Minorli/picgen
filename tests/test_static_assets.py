@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.65"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.66"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,13 +38,20 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.65"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.66"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "calculateOfficialLogoPixelMatch" in app_js
+    assert "scaleLogoDetectionPlacements" in app_js
+    assert "createLogoPreservationDiagnostic" in app_js
     assert "findExistingOfficialLogo" in app_js
     assert "composed.preserved" in app_js
     assert "已有官方 LOGO，保留原位置且不重复贴入" in app_js
+    assert "logo_preservation" in app_js
+    assert "match_rate" in app_js
+    assert 'basis: "official_logo_pixel_match"' in (ROOT_DIR / "static" / "logo-placement.mjs").read_text(
+        encoding="utf-8"
+    )
     compose = app_js[
         app_js.index("async function composeLogoOverlayForCandidates") :
         app_js.index("async function downscaleDataUrlForRisk")
@@ -631,7 +638,7 @@ def test_reference_generation_keeps_source_lineage_when_reference_is_generated_a
 
     submit_start = app_js.index("async function submitGenerate")
     reference_start = app_js.index("const requestParts = referenceParts", submit_start)
-    reference_end = app_js.index('await setResult({ ...result, mode: "reference"', reference_start)
+    reference_end = app_js.index("      await setResult({", reference_start)
     reference_block = app_js[reference_start:reference_end]
     assert "const referenceLineageSource = requestSources.at(-1)" in reference_block
     assert "const sourceGeneratedImageId = referenceLineageSource?.generatedImageId || null" in reference_block
@@ -658,7 +665,7 @@ def test_image_centric_workspace_actions_and_brand_download_gateway_are_present(
     assert ".result-frame:hover .result-hover-actions" in styles_css
 
 
-def test_progress_overlay_and_team_inspiration_feed_are_visible_workflows() -> None:
+def test_progress_overlay_and_my_favorites_are_visible_workflows() -> None:
     app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
     index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
     styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
@@ -671,10 +678,44 @@ def test_progress_overlay_and_team_inspiration_feed_are_visible_workflows() -> N
     assert "updateGenerationOverlay" in app_js
     assert "后台如遇临时错误会自动重试" in app_js
     assert 'id="teamInspirationFeedButton"' in index_html
-    assert "团队灵感流" in index_html
+    assert "我的收藏" in index_html
+    assert "团队灵感流" not in index_html
     assert "openTeamInspirationFeed" in app_js
     assert ".generation-overlay-steps" in styles_css
     assert ".team-feed-entry" in styles_css
+
+
+def test_my_favorites_summary_tracks_the_favorite_only_filter() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function syncMyFavoritesSummary") : app_js.index("function openTeamInspirationFeed")
+    ]
+    script = f"""
+let hidden = null;
+const refs = {{
+  galleryFavoriteOnlyInput: {{ checked: true }},
+  teamInspirationFeed: {{ classList: {{ toggle: (name, value) => {{ hidden = value; }} }} }},
+}};
+{function_source}
+syncMyFavoritesSummary();
+const favoriteOnlyHidden = hidden;
+refs.galleryFavoriteOnlyInput.checked = false;
+syncMyFavoritesSummary();
+console.log(JSON.stringify({{ favoriteOnlyHidden, allWorksHidden: hidden }}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "favoriteOnlyHidden": False,
+        "allWorksHidden": True,
+    }
+    assert "syncMyFavoritesSummary()\n    void refreshGallery()" in app_js
 
 
 def test_mobile_rail_sections_are_collapsible() -> None:
@@ -757,7 +798,7 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
 
     assert 'itineraryPanel: document.querySelector("#itineraryPanel")' in app_js
     assert 'itineraryDescriptionInput: document.querySelector("#itineraryDescriptionInput")' in app_js
-    assert "buildAIItineraryMapPrompt" in app_js
+    assert "buildAIItineraryMapPrompt" not in app_js
     assert "parseItineraryCoordinateStops" in app_js
     assert "parseItineraryTextStops" in app_js
     assert "isItineraryInstructionSection" in app_js
@@ -765,12 +806,10 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "cleanItineraryStopName" in app_js
     assert 'postJSON("api/itinerary-map/render"' in app_js
     assert "itinerary_coordinates_required" in app_js
-    assert "isCompleteItineraryPrompt" in app_js
-    assert "normalizeCompleteItineraryPrompt" in app_js
-    assert "ITINERARY_GEOGRAPHY_GUARD" in app_js
-    assert "完整行程地图 prompt" in app_js
-    assert "return normalizeCompleteItineraryPrompt(normalizedDescription" in app_js
-    assert "stripCodeFence" in app_js
+    assert "isCompleteItineraryPrompt" not in app_js
+    assert "normalizeCompleteItineraryPrompt" not in app_js
+    assert "ITINERARY_GEOGRAPHY_GUARD" not in app_js
+    assert "stripCodeFence" not in app_js
     assert "submitAIItineraryMap" in app_js
     assert "AI_ITINERARY_EXAMPLE" in app_js
     assert "DETAILED_ITINERARY_TEMPLATE" in app_js
@@ -798,13 +837,8 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "applyDetailedItineraryTemplate" in app_js
     assert "shouldUseXinjiangRouteGuard" not in app_js
     assert "xinjiangRouteGuardPrompt" not in app_js
-    assert "drawItineraryLogoSafeArea" in app_js
+    assert "drawItineraryLogoSafeArea" not in app_js
     assert "withLogoLayoutPrompt(aiPrompt, logoRequested)" not in app_js
-    assert "地理正确性硬性要求" in app_js
-    assert "不能为了画面好看而调整地点相对位置" in app_js
-    assert "不要凭想象补地图" in app_js
-    assert "测绘式真实地图" in app_js
-    assert "跨大区或跨国家转场必须使用总览图、局部放大框或飞行连接" in app_js
     assert "库尔德宁" not in app_js
     assert "喀拉峻" not in app_js
     assert "伊宁" not in app_js
@@ -812,9 +846,6 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "赛里木湖" not in app_js
     assert "喀什" not in app_js
     assert "日期必须逐日出现" in app_js
-    assert "5/18" in app_js
-    assert "每两个连续地点之间必须有路线连接" in app_js
-    assert "必须标注大致距离或飞行/转场说明" in app_js
     assert "交通工具图标" in app_js
     assert "水彩漫画路线图" in app_js
     assert "红色粗路线" in app_js
@@ -845,7 +876,6 @@ def test_itinerary_map_mode_renders_real_route_map_with_logo_safe_area() -> None
     assert "if (!routeStops.length)" in itinerary_submit_block
     assert "请填写副标题日期" in itinerary_submit_block
     assert "行程描述不能为空" in app_js
-    assert "不要让 AI 绘制或改造 6 人游 LOGO" in app_js
     assert "不要画 LOGO 占位框" in app_js
     assert "不要画边框" in app_js
     assert "不要画白底底板" in app_js
@@ -951,6 +981,8 @@ def test_prompt_confirmation_modal_blocks_generation_until_checked() -> None:
     assert "await confirmPromptBeforeRun" in app_js
     assert "生成海报前确认提示词" in app_js
     assert "生成路线图前确认提示词" in app_js
+    assert "请核对标题、日期和每天的地点顺序。" in app_js
+    assert "请逐字检查行程日期、地点、酒店、交通和每日说明。" not in app_js
     assert "开始编辑前确认提示词" in app_js
     assert ".prompt-confirm-modal" in styles_css
     assert ".prompt-confirm-dialog" in styles_css
@@ -1057,14 +1089,385 @@ def test_frontend_guards_async_logo_and_team_chat_room_races() -> None:
         app_js.index("async function refreshTeamChatMessages") : app_js.index("async function markCurrentTeamChatRead")
     ]
     logout_block = app_js[app_js.index("async function logout") : app_js.index("async function loadWorkspaceSnapshot")]
+    reset_chat_block = app_js[
+        app_js.index("function resetTeamChatState") : app_js.index("function renderTeamChatMemberAvatar")
+    ]
 
     assert "resultGenerationSeq !== state.resultGenerationSeq" in logo_block
     assert "const resultGenerationSeq = state.resultGenerationSeq + 1" in app_js
     assert "const requestedRoomKey = currentTeamChatRoomKey()" in chat_block
-    assert "requestedRoomKey !== currentTeamChatRoomKey()" in chat_block
+    assert "requestedRoomKey === currentTeamChatRoomKey()" in chat_block
+    assert "requestSeq === state.teamChatMessageRequestSeq" in chat_block
     assert "message.room_key === requestedRoomKey" in chat_block
     assert "window.clearTimeout(state.persistTimer)" in logout_block
     assert "state.persistTimer = null" in logout_block
+    assert "renderTeamChatMessages()" in reset_chat_block
+
+
+def test_responses_shortfall_notice_reports_requested_and_returned_counts() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    function_source = app_js[
+        app_js.index("function resolveResultCountNotice") : app_js.index("function setResultCountNotice")
+    ]
+    expression = """
+console.log(JSON.stringify({
+  short: resolveResultCountNotice({ transport: "responses-image", requested_sample_count: 3 }, 1),
+  complete: resolveResultCountNotice({ transport: "responses-image", requested_sample_count: 3 }, 3),
+  imagesApi: resolveResultCountNotice({ transport: "images-generate", requested_sample_count: 3 }, 1),
+}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", f"{function_source}\n{expression}"],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "short": "本次请求 3 张，上游返回 1 张",
+        "complete": "",
+        "imagesApi": "",
+    }
+    assert 'id="resultCountNotice"' in index_html
+    assert 'id="resultCountNoticeText"' in index_html
+    assert "setResultCountNotice(resolveResultCountNotice(payload, enrichedCandidates.length))" in app_js
+
+
+def test_team_chat_poll_renders_only_when_messages_change() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    room_params_source = app_js[
+        app_js.index("function teamChatRoomParams") : app_js.index("function teamChatReadPayload")
+    ]
+    merge_source = app_js[
+        app_js.index("function updateTeamChatLastMessageId") : app_js.index("function isOwnTeamChatMessage")
+    ]
+    room_key_source = app_js[
+        app_js.index("function currentTeamChatRoomKey") : app_js.index("function scheduleTeamChatFastPolling")
+    ]
+    refresh_source = app_js[
+        app_js.index("async function refreshTeamChatMessages") : app_js.index("async function markCurrentTeamChatRead")
+    ]
+    script = f"""
+const firstMessage = {{ id: 1, room_key: "team:ops", content: "hello", created_at: "2026-07-12T00:00:00Z" }};
+const secondMessage = {{ id: 2, room_key: "team:ops", content: "new", created_at: "2026-07-12T00:00:01Z" }};
+const state = {{
+  currentUser: {{ id: 7 }},
+  teamChatRoom: {{ type: "team", recipientUserId: null }},
+  teamChatGroup: {{ roomKey: "team:ops" }},
+  teamChatMessages: [firstMessage],
+  teamChatLastMessageId: 1,
+}};
+const refs = {{
+  teamChatMessages: {{}},
+  teamChatModal: {{ classList: {{ contains: () => true }} }},
+}};
+let renderCalls = 0;
+let responseIndex = 0;
+const responses = [[], [secondMessage]];
+async function fetchJSON() {{
+  return {{ response: {{ ok: true }}, data: {{ messages: responses[responseIndex++] }} }};
+}}
+function renderTeamChatMessages() {{ renderCalls += 1; }}
+function setTeamChatStatus() {{}}
+async function markCurrentTeamChatRead() {{}}
+{room_params_source}
+{merge_source}
+{room_key_source}
+{refresh_source}
+const originalMessages = state.teamChatMessages;
+const firstSuccess = await refreshTeamChatMessages({{ append: true }});
+const firstRenderCalls = renderCalls;
+const preservedReference = state.teamChatMessages === originalMessages;
+const secondSuccess = await refreshTeamChatMessages({{ append: true }});
+console.log(JSON.stringify({{
+  firstSuccess,
+  secondSuccess,
+  firstRenderCalls,
+  totalRenderCalls: renderCalls,
+  preservedReference,
+  lastMessageId: state.teamChatLastMessageId,
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "firstSuccess": True,
+        "secondSuccess": True,
+        "firstRenderCalls": 0,
+        "totalRenderCalls": 1,
+        "preservedReference": True,
+        "lastMessageId": 2,
+    }
+
+
+def test_team_chat_ignores_an_older_full_refresh_after_a_newer_incremental_response() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    room_params_source = app_js[
+        app_js.index("function teamChatRoomParams") : app_js.index("function teamChatReadPayload")
+    ]
+    merge_source = app_js[
+        app_js.index("function updateTeamChatLastMessageId") : app_js.index("function isOwnTeamChatMessage")
+    ]
+    room_key_source = app_js[
+        app_js.index("function currentTeamChatRoomKey") : app_js.index("function scheduleTeamChatFastPolling")
+    ]
+    refresh_source = app_js[
+        app_js.index("async function refreshTeamChatMessages") : app_js.index("async function markCurrentTeamChatRead")
+    ]
+    script = f"""
+const first = {{ id: 1, room_key: "team:ops", content: "first", created_at: "2026-07-12T00:00:00Z" }};
+const second = {{ id: 2, room_key: "team:ops", content: "second", created_at: "2026-07-12T00:00:01Z" }};
+const state = {{
+  currentUser: {{ id: 7 }},
+  teamChatRoom: {{ type: "team", recipientUserId: null }},
+  teamChatGroup: {{ roomKey: "team:ops" }},
+  teamChatMessages: [first],
+  teamChatLastMessageId: 1,
+  teamChatMessageRequestSeq: 0,
+}};
+const refs = {{
+  teamChatMessages: {{}},
+  teamChatModal: {{ classList: {{ contains: () => true }} }},
+}};
+let resolveFull;
+let resolveAppend;
+let renderCalls = 0;
+async function fetchJSON(url) {{
+  return await new Promise((resolve) => {{
+    if (url.includes("after_id=")) resolveAppend = resolve;
+    else resolveFull = resolve;
+  }});
+}}
+function renderTeamChatMessages() {{ renderCalls += 1; }}
+function setTeamChatStatus() {{}}
+async function markCurrentTeamChatRead() {{}}
+{room_params_source}
+{merge_source}
+{room_key_source}
+{refresh_source}
+const olderFull = refreshTeamChatMessages();
+const newerAppend = refreshTeamChatMessages({{ append: true }});
+resolveAppend({{ response: {{ ok: true }}, data: {{ messages: [second] }} }});
+const appendResult = await newerAppend;
+resolveFull({{ response: {{ ok: true }}, data: {{ messages: [first] }} }});
+const fullResult = await olderFull;
+console.log(JSON.stringify({{
+  appendResult,
+  fullResult,
+  ids: state.teamChatMessages.map((message) => message.id),
+  renderCalls,
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "appendResult": True,
+        "fullResult": False,
+        "ids": [1, 2],
+        "renderCalls": 1,
+    }
+
+
+def test_team_chat_old_read_completion_cannot_clear_a_newer_request_error() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    refresh_source = app_js[
+        app_js.index("async function refreshTeamChatMessages") : app_js.index("async function markCurrentTeamChatRead")
+    ]
+    script = f"""
+const state = {{
+  currentUser: {{ id: 7 }},
+  teamChatMessageRequestSeq: 0,
+  teamChatLastMessageId: 1,
+}};
+const refs = {{
+  teamChatMessages: {{}},
+  teamChatModal: {{ classList: {{ contains: () => false }} }},
+}};
+let requestCount = 0;
+let releaseRead;
+let notifyReadStarted;
+const readStarted = new Promise((resolve) => {{ notifyReadStarted = resolve; }});
+const readGate = new Promise((resolve) => {{ releaseRead = resolve; }});
+let status = "";
+function currentTeamChatRoomKey() {{ return "team:ops"; }}
+function teamChatRoomParams() {{ return new URLSearchParams(); }}
+function mergeTeamChatMessages() {{ return false; }}
+function renderTeamChatMessages() {{}}
+function setTeamChatStatus(message) {{ status = message; }}
+async function fetchJSON() {{
+  requestCount += 1;
+  if (requestCount === 1) return {{ response: {{ ok: true }}, data: {{ messages: [] }} }};
+  return {{ response: {{ ok: false }}, data: {{ error: "new request failed" }} }};
+}}
+async function markCurrentTeamChatRead() {{
+  notifyReadStarted();
+  await readGate;
+}}
+{refresh_source}
+const older = refreshTeamChatMessages().then((success) => {{
+  if (success) setTeamChatStatus("");
+  return success;
+}});
+await readStarted;
+const newerResult = await refreshTeamChatMessages();
+releaseRead();
+const olderResult = await older;
+console.log(JSON.stringify({{ olderResult, newerResult, status }}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "olderResult": False,
+        "newerResult": False,
+        "status": "new request failed",
+    }
+
+
+def test_asset_data_url_hydrates_missing_dimensions_for_logo_detection() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    dimension_source = app_js[
+        app_js.index("async function ensureAssetDimensions") : app_js.index("function validateClientImageFile")
+    ]
+    script = f"""
+async function loadImageElement() {{ return {{ naturalWidth: 1536, naturalHeight: 2048 }}; }}
+function imageAssetDimensions() {{ return null; }}
+{dimension_source}
+const asset = {{ dataUrl: "data:image/png;base64,AAAA" }};
+await ensureAssetDataUrl(asset);
+console.log(JSON.stringify(asset));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "dataUrl": "data:image/png;base64,AAAA",
+        "width": 1536,
+        "height": 2048,
+    }
+
+
+def test_team_chat_send_completion_is_bound_to_the_send_time_room() -> None:
+    app_js = (ROOT_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    send_payload_source = app_js[
+        app_js.index("function teamChatSendPayload") : app_js.index("function teamChatDisplayName")
+    ]
+    submit_source = app_js[
+        app_js.index("async function submitTeamChatMessage") : app_js.index("async function submitChangePassword")
+    ]
+    script = f"""
+const state = {{
+  currentUser: {{ id: 7, username: "alice" }},
+  teamChatGroup: {{ roomKey: "team:ops" }},
+  teamChatRoom: {{ type: "team", recipientUserId: null }},
+  teamChatMessages: [],
+  teamChatSending: false,
+  teamChatQuotedMessage: null,
+}};
+const refs = {{
+  teamChatMessageInput: {{ value: "hello", focus: () => {{}} }},
+  sendTeamChatButton: {{ disabled: false, textContent: "发送" }},
+}};
+let resolveFetch;
+let notifyFetchStarted;
+const fetchStarted = new Promise((resolve) => {{ notifyFetchStarted = resolve; }});
+let sentPayload = null;
+let replaceCalls = 0;
+let renderCalls = 0;
+let markReadCalls = 0;
+async function fetchJSON(_url, options) {{
+  sentPayload = JSON.parse(options.body);
+  notifyFetchStarted();
+  return await new Promise((resolve) => {{ resolveFetch = resolve; }});
+}}
+function currentTeamChatRoomKey() {{
+  if (state.teamChatRoom.type === "team") return state.teamChatGroup.roomKey;
+  return `dm:7:${{state.teamChatRoom.recipientUserId}}`;
+}}
+function formatTeamChatOutgoingContent(content) {{ return content; }}
+function clearTeamChatQuote() {{ state.teamChatQuotedMessage = null; }}
+function createOptimisticTeamChatMessage(content) {{
+  return {{ id: -1, client_id: "local-1", room_key: currentTeamChatRoomKey(), content, pending: true }};
+}}
+function mergeTeamChatMessages(messages) {{ state.teamChatMessages = [...state.teamChatMessages, ...messages]; }}
+function renderTeamChatMessages() {{ renderCalls += 1; }}
+function setTeamChatSending(value) {{ state.teamChatSending = Boolean(value); }}
+function setTeamChatStatus() {{}}
+function restoreTeamChatDraft() {{}}
+function replaceOptimisticTeamChatMessage(_clientId, messages) {{
+  replaceCalls += 1;
+  state.teamChatMessages = messages;
+}}
+async function markCurrentTeamChatRead() {{ markReadCalls += 1; }}
+function scheduleTeamChatFastPolling() {{}}
+async function refreshTeamChatMessages() {{}}
+{send_payload_source}
+{submit_source}
+const pending = submitTeamChatMessage({{ preventDefault: () => {{}} }});
+await fetchStarted;
+state.teamChatRoom = {{ type: "dm", recipientUserId: 9 }};
+state.teamChatMessages = [];
+resolveFetch({{
+  response: {{ ok: true }},
+  data: {{
+    messages: [{{ id: 11, room_key: "team:ops", content: "hello" }}],
+    bot_reply_pending: false,
+  }},
+}});
+await pending;
+console.log(JSON.stringify({{
+  sentPayload,
+  replaceCalls,
+  renderCalls,
+  markReadCalls,
+  currentMessages: state.teamChatMessages,
+  sending: state.teamChatSending,
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["sentPayload"] == {
+        "room_type": "team",
+        "recipient_user_id": None,
+        "content": "hello",
+    }
+    assert result["replaceCalls"] == 0
+    assert result["renderCalls"] == 1
+    assert result["markReadCalls"] == 0
+    assert result["currentMessages"] == []
+    assert result["sending"] is False
 
 
 def test_user_profile_ui_supports_avatar_and_editable_login_username() -> None:

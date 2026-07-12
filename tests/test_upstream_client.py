@@ -48,6 +48,20 @@ async def test_run_json_raises_after_max_retries() -> None:
         await client.aclose()
 
 
+async def test_run_json_preserves_deep_upstream_400_without_recursion_error() -> None:
+    depth = 1100
+    body = '{"error":' * depth + '{"message":"deep rejection"}' + "}" * depth
+    transport = httpx.MockTransport(lambda request: httpx.Response(400, text=body))
+    client = await _build_client(transport, max_retries=0)
+    try:
+        with pytest.raises(APIError) as info:
+            await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
+        assert info.value.status == 400
+        assert info.value.code == "upstream_error"
+    finally:
+        await client.aclose()
+
+
 async def test_run_json_reports_retry_exhaustion_to_user() -> None:
     transport = httpx.MockTransport(
         lambda req: httpx.Response(

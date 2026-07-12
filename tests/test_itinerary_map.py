@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from picgen import itinerary_map as im
 
 
@@ -7,6 +11,108 @@ def _project(stops, *, width=1792, height=1792):
     return im._project_stops(
         [{**s, "status": "ok"} for s in stops], width=width, height=height
     )
+
+
+def _render_heading(*, title: str, subtitle: str = "") -> str:
+    return im.render_itinerary_map_svg(
+        {
+            "title": title,
+            "subtitle": subtitle,
+            "stops": [
+                {"name": "巴黎", "lat": 48.8566, "lng": 2.3522, "status": "ok"},
+                {"name": "罗马", "lat": 41.9028, "lng": 12.4964, "status": "ok"},
+            ],
+        }
+    )
+
+
+def test_title_font_subsetting_continues_after_non_oserror(monkeypatch) -> None:
+    broken_dir = Path("/broken-static")
+    working_dir = Path("/working-static")
+    calls: list[Path] = []
+
+    def subset(font_path: Path, _glyphs: str) -> bytes:
+        calls.append(font_path)
+        if font_path.is_relative_to(broken_dir):
+            raise ValueError("invalid font")
+        return b"fallback-font"
+
+    im._embedded_title_font_face_css_cached.cache_clear()
+    monkeypatch.setattr(im, "_candidate_static_dirs", lambda: [broken_dir, working_dir])
+    monkeypatch.setattr(im, "_subset_title_font_bytes", subset)
+
+    try:
+        css = im._embedded_title_font_face_css("欧洲行程")
+    finally:
+        im._embedded_title_font_face_css_cached.cache_clear()
+
+    assert "data:font/ttf;base64," in css
+    assert calls == [
+        broken_dir / im.TITLE_FONT_RELATIVE_PATH,
+        working_dir / im.TITLE_FONT_RELATIVE_PATH,
+    ]
+
+
+def test_failed_title_subset_does_not_evict_other_cached_titles(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def subset(_font_path: Path, glyphs: str) -> bytes:
+        calls.append(glyphs)
+        if glyphs == "乙":
+            raise OSError("temporarily unavailable")
+        return f"font-{glyphs}".encode()
+
+    im._embedded_title_font_face_css_cached.cache_clear()
+    monkeypatch.setattr(im, "_candidate_static_dirs", lambda: [Path("/static")])
+    monkeypatch.setattr(im, "_subset_title_font_bytes", subset)
+
+    try:
+        first_css = im._embedded_title_font_face_css("甲")
+        assert im._embedded_title_font_face_css("乙") == ""
+        assert im._embedded_title_font_face_css("乙") == ""
+        assert im._embedded_title_font_face_css("甲") == first_css
+    finally:
+        im._embedded_title_font_face_css_cached.cache_clear()
+
+    assert calls.count("甲") == 1
+    assert calls.count("乙") == 2
+
+
+@pytest.mark.parametrize(
+    ("title", "font_size"),
+    [
+        ("甲" * 8, 80),
+        ("甲" * 9, 64),
+        ("甲" * 11, 52),
+    ],
+)
+def test_itinerary_title_font_size_uses_character_tiers(title: str, font_size: int) -> None:
+    svg = _render_heading(title=title)
+
+    assert f".title{{font-size:{font_size}px" in svg
+
+
+@pytest.mark.parametrize(
+    ("subtitle", "font_size"),
+    [
+        ("乙" * 20, 32),
+        ("乙" * 21, 26),
+        ("乙" * 25, 21),
+    ],
+)
+def test_itinerary_subtitle_font_size_uses_character_tiers(subtitle: str, font_size: int) -> None:
+    svg = _render_heading(title="欧洲旅行", subtitle=subtitle)
+
+    assert f".subtitle{{font-size:{font_size}px" in svg
+
+
+def test_itinerary_heading_truncates_after_smallest_font_tier() -> None:
+    svg = _render_heading(title="甲" * 13, subtitle="乙" * 31)
+
+    assert f">{'甲' * 11}…</text>" in svg
+    assert f">{'乙' * 29}…</text>" in svg
+    assert "甲" * 13 not in svg
+    assert "乙" * 31 not in svg
 
 
 def test_country_label_resolves_border_cities_by_nearest_box_center():

@@ -2,14 +2,16 @@ import {
   calculateLogoPlacementScore,
   calculateOfficialLogoPixelMatch,
   chooseLogoPlacement,
-} from "./logo-placement.mjs?v=0.1.65"
+  createLogoPreservationDiagnostic,
+  scaleLogoDetectionPlacements,
+} from "./logo-placement.mjs?v=0.1.66"
 import {
   DEFAULT_RESPONSES_MODEL,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.65"
+} from "./responses-settings.mjs?v=0.1.66"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -119,15 +121,6 @@ const DETAILED_ITINERARY_TEMPLATE = [
   "- 左上角预留自然干净的 6 人游 LOGO 留白；不要让 AI 绘制 LOGO，不要画 LOGO 占位框，不要画边框，不要画白底底板，程序会用官方透明 PNG 原样贴入。",
   "- 风格：水彩漫画路线图，使用柔和水彩底色、红色粗路线、圆点站位、地标小插画、手写感标题和清晰日期标签。",
   "- 漫画风格不能牺牲地理真实性；日期、距离、交通方式、酒店和核心景区不能省略，信息丰富但不拥挤。",
-].join("\n")
-
-const ITINERARY_GEOGRAPHY_GUARD = [
-  "地图准确性保护：路线图必须优先服从真实地图坐标、用户提供的地图参考和明确的地理关系，不能只按画面美观重排地点。",
-  "- 如果用户提供了经纬度、导航距离、地点清单里的东西南北关系或转场方式，以这些资料为硬约束。",
-  "- 不要凭想象补地图；不确定地点准确落位时，不要把它画到看起来顺眼的位置，改用编号点、局部放大框、侧边行程表或“待核对位置”备注。",
-  "- 使用测绘式真实地图框架：默认北上南下、西左东右，城市、景区、湖泊、山脉、海岸、岛屿和边境的相对方位不能为了构图改变。",
-  "- 跨大区或跨国家转场必须使用总览图、局部放大框或飞行连接；不要把远距离城市压缩成相邻景点，也不要把南北或东西关系画反。",
-  "- 地点名相近或景区层级复杂时，先按用户给出的地理校验逐项落位，再画路线；缺少把握时保守表达为示意路线，不得伪装成精确地图。",
 ].join("\n")
 
 const SIZE_PRESETS = [
@@ -265,6 +258,7 @@ const state = {
   },
   teamChatGroupContextExpanded: false,
   teamChatLastMessageId: 0,
+  teamChatMessageRequestSeq: 0,
   teamChatLocalMessageSeq: 0,
   teamChatUnreadTotal: 0,
   teamChatPollTimer: null,
@@ -535,6 +529,8 @@ const refs = {
   resultHoverActions: document.querySelector("#resultHoverActions"),
   resultActions: document.querySelector("#resultActions"),
   resultCandidateStrip: document.querySelector("#resultCandidateStrip"),
+  resultCountNotice: document.querySelector("#resultCountNotice"),
+  resultCountNoticeText: document.querySelector("#resultCountNoticeText"),
   resultSizeWarning: document.querySelector("#resultSizeWarning"),
   resultSizeWarningText: document.querySelector("#resultSizeWarningText"),
   generationOverlay: document.querySelector("#generationOverlay"),
@@ -3162,6 +3158,28 @@ function setResultSizeWarning(message = "") {
   refs.resultSizeWarning?.classList.toggle("hidden", !text)
 }
 
+function resolveResultCountNotice(payload, returnedCount) {
+  if (payload?.transport !== "responses-image") {
+    return ""
+  }
+  const requestedCount = Math.max(
+    0,
+    Math.floor(Number(payload?.requested_sample_count ?? payload?.sample_count) || 0),
+  )
+  const actualCount = Math.max(0, Math.floor(Number(returnedCount) || 0))
+  return requestedCount > 1 && actualCount < requestedCount
+    ? `本次请求 ${requestedCount} 张，上游返回 ${actualCount} 张`
+    : ""
+}
+
+function setResultCountNotice(message = "") {
+  const text = String(message || "").trim()
+  if (refs.resultCountNoticeText) {
+    refs.resultCountNoticeText.textContent = text
+  }
+  refs.resultCountNotice?.classList.toggle("hidden", !text)
+}
+
 function normalizeUiMode(value) {
   return UI_MODES.has(value) ? value : ""
 }
@@ -3427,89 +3445,6 @@ function parseItinerarySize() {
     throw new Error("行程地图尺寸的宽高都必须是 16 的倍数。")
   }
   return formatSizeValue(width, height)
-}
-
-function itineraryThemePrompt() {
-  const theme = refs.itineraryThemeSelect?.value || "comic"
-  if (theme === "comic") {
-    return "水彩漫画路线图：柔和浅蓝/浅黄水彩底、清晰地图轮廓、红色粗路线、白心红点或圆点站位、手写感中文标题、地标小插画、车辆/飞机/火车/脚印小图标；画面亲切有旅行手帐感，但漫画风格不能牺牲地理真实性，地点相对位置、路线顺序、日期、距离、交通方式、酒店和核心景区不能省略。"
-  }
-  if (theme === "dark") {
-    return "深色高级手绘地形地图，午夜蓝与暖金路线，低饱和、高对比，适合高端旅行海报；保留真实山脉、湖泊、沙漠和城市层级，路线像精品旅行地图而不是导航截图。"
-  }
-  if (theme === "classic") {
-    return "复古高级手绘地形地图，羊皮纸、金色路线、轻微等高线和克制指南针元素，保持现代高级旅行质感；不要生成路线图例或线型说明框，地点落位仍必须服从真实地理。"
-  }
-  return "高级水彩漫画路线图，保留旅行定制海报的高级感，色彩克制、山野度假质感、路线清楚但画面不拥挤；使用红色粗路线、圆点站位和地标小插画；真实地貌、山脉、湖泊、海岸、岛屿、沙漠、城市和边境层级必须准确。"
-}
-
-function drawItineraryLogoSafeArea() {
-  return "左上角预留自然干净的 LOGO 留白；不要让 AI 绘制或改造 6 人游 LOGO，不要画 LOGO 占位框，不要画边框，不要画白底底板，不要画贴纸底座或任何临时标识；最终由程序使用官方透明 PNG 原样贴入。"
-}
-
-function stripCodeFence(value) {
-  const text = String(value || "").trim()
-  const match = text.match(/^```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)\s*```$/)
-  return (match ? match[1] : text).trim()
-}
-
-function isCompleteItineraryPrompt(value) {
-  const text = stripCodeFence(value)
-  // 用户粘贴完整行程地图 prompt 时不再二次包裹，避免重复标题和要求。
-  return text.includes("客户行程原文如下")
-    && text.includes("画面与信息要求")
-    && text.includes("地理正确性硬性要求")
-}
-
-function normalizeCompleteItineraryPrompt(value) {
-  let text = stripCodeFence(value)
-  const legacyLogoSafeArea = ["左上角预留干净白底", "LOGO 安全区"].join(" ")
-  text = text
-    .replaceAll(`${legacyLogoSafeArea}；不要让 AI 绘制或改造 6 人游 LOGO，最终由程序使用官方透明 PNG 原样贴入。`, drawItineraryLogoSafeArea())
-    .replaceAll(legacyLogoSafeArea, "左上角预留自然干净的 LOGO 留白")
-    .replaceAll(
-      "LOGO 位置附近保留干净留白，背景尽量简单，避免图片元素和 LOGO 少量重合。",
-      "LOGO 位置附近保留自然干净背景，背景尽量简单；不要绘制 LOGO 占位框、边框、描边、白色底板、贴纸底座或任何临时标识。",
-    )
-  if (!text.includes("地图准确性保护")) {
-    text = `${text}\n\n${ITINERARY_GEOGRAPHY_GUARD}`
-  }
-  if (!text.includes("不要画 LOGO 占位框")) {
-    text = `${text}\n\n- ${drawItineraryLogoSafeArea()}`
-  }
-  return text
-}
-
-function buildAIItineraryMapPrompt({ title, subtitle, description, theme }) {
-  const normalizedTitle = String(title || "").trim() || "定制旅行行程地图"
-  const normalizedSubtitle = String(subtitle || "").trim() || "准确路线图"
-  const normalizedDescription = stripCodeFence(description)
-  if (isCompleteItineraryPrompt(normalizedDescription)) {
-    return normalizeCompleteItineraryPrompt(normalizedDescription)
-  }
-  return [
-    "请生成一张漫画风格的高级定制旅行行程路线图海报，不是普通导航截图，也不是纯信息表格。",
-    `标题：${normalizedTitle}`,
-    `副标题：${normalizedSubtitle}`,
-    "",
-    "客户行程原文如下，请先理解日期、城市、景区、酒店、交通和活动关系，再转化为清晰的路线地图视觉：",
-    normalizedDescription,
-    "",
-    "画面与信息要求：",
-    "- 地理正确性硬性要求：所有地点落位、东西南北关系、前后路线顺序必须以真实地图为准；不能为了画面好看而调整地点相对位置，也不要把城市、景区顺序画反。",
-    "- 对任何目的地都要先按真实世界地图理解相对位置：城市、国家/地区边界、山脉、湖泊、海岸线、岛屿、沙漠、峡谷和主要交通走廊不能乱画。",
-    ITINERARY_GEOGRAPHY_GUARD,
-    "- 必须展示行程原文里的每一个日期，不要漏掉中间日期；日期必须逐日出现，像 5/18 这样的中间日期也必须单独标出；日期标签用小金色日期牌或清晰日程标签呈现。",
-    "- 地点层级要有主次；酒店可作为小字备注，不要把所有酒店全文挤满画面，但不能删掉用户明确给出的核心城市、景区、日期和活动。",
-    "- 每两个连续地点之间必须有路线连接，并必须标注大致距离或飞行/转场说明；若无法确定精确距离，用“约 xx km”或“飞行转场”这类合理估算，不要空着。",
-    "- 自驾/包车路线用实线或柔和路线带，飞机/长距离转场用虚线或飞行弧线，避免路线互相缠绕。",
-    "- 在每段连接线中间放一个很小的交通工具图标：自驾/包车用小车图标，飞机转场用飞机图标，步行/活动可用小脚印或点线；图标要小而精致，不遮挡地点和日期。",
-    "- 画面需要像高级旅行定制海报，适合发给客户预览；采用水彩漫画路线图表达，地图轮廓清晰、地貌层次准确、地标小插画精致；不要像低质 PPT、不要像手机地图截图。",
-    "- 漫画路线图视觉语言：柔和水彩铺底、红色粗路线、圆点站位、手写感标题、地标小插画、海/湖/山地用轻松但清晰的插画表达；但信息密度和真实地理不能下降。",
-    `- 视觉风格：${theme || itineraryThemePrompt()}`,
-    `- ${drawItineraryLogoSafeArea()}`,
-    "- 不要出现 OpenAI、API、debug、水印、二维码、虚构品牌 LOGO。",
-  ].join("\n")
 }
 
 function parseItineraryCoordinateStops(description) {
@@ -4146,6 +4081,7 @@ function resetReviewStateForExternalResult() {
   state.lastReviewPayload = null
   state.lastFeedbackPayload = null
   state.lastFeedbackRating = null
+  setResultCountNotice("")
   setResultSizeWarning("")
   setError("")
   setRiskPanel("未检查", "这张图片尚未在当前工作区进行版权风险检查。")
@@ -4391,13 +4327,18 @@ function toggleRailSection(sectionName, forceExpanded = null) {
   toggle.setAttribute("aria-expanded", String(shouldExpand))
 }
 
+function syncMyFavoritesSummary() {
+  const favoriteOnly = Boolean(refs.galleryFavoriteOnlyInput?.checked)
+  refs.teamInspirationFeed?.classList.toggle("hidden", !favoriteOnly)
+}
+
 function openTeamInspirationFeed() {
   toggleRailSection("gallery", true)
-  refs.teamInspirationFeed?.classList.remove("hidden")
   if (refs.galleryFavoriteOnlyInput) {
     refs.galleryFavoriteOnlyInput.checked = true
   }
   state.galleryFavoriteOnly = true
+  syncMyFavoritesSummary()
   void refreshGallery()
   refs.gallerySearchInput?.focus()
 }
@@ -5028,10 +4969,10 @@ function teamChatReadPayload(room = state.teamChatRoom, messageId = state.teamCh
   }
 }
 
-function teamChatSendPayload(content) {
+function teamChatSendPayload(content, room = state.teamChatRoom) {
   return {
-    room_type: state.teamChatRoom.type || "team",
-    recipient_user_id: state.teamChatRoom.recipientUserId || null,
+    room_type: room.type || "team",
+    recipient_user_id: room.recipientUserId || null,
     content,
   }
 }
@@ -5154,6 +5095,8 @@ function resetTeamChatState() {
     meta: "部门群",
   }
   state.teamChatLastMessageId = 0
+  state.teamChatMessageRequestSeq += 1
+  renderTeamChatMessages()
   clearTeamChatQuote()
   state.teamChatOpenMenuId = null
   updateTeamChatUnreadBadge(0)
@@ -5424,6 +5367,21 @@ function updateTeamChatLastMessageId() {
   }, 0)
 }
 
+function teamChatMessageRenderSignature(message = {}) {
+  const messageId = Number(message.id || 0)
+  const identity = messageId > 0 ? `id:${messageId}` : `client:${message.client_id || ""}`
+  return JSON.stringify([
+    identity,
+    message.room_key || "",
+    Number(message.sender_user_id || 0),
+    message.sender_type || "",
+    message.sender_name || "",
+    message.content || "",
+    message.created_at || "",
+    Boolean(message.pending),
+  ])
+}
+
 function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) {
   const source = replace ? [] : state.teamChatMessages
   const byId = new Map()
@@ -5447,7 +5405,7 @@ function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) 
       byClientId.set(message.client_id, message)
     }
   })
-  state.teamChatMessages = [...Array.from(byId.values()), ...Array.from(byClientId.values())].sort((left, right) => {
+  const nextMessages = [...Array.from(byId.values()), ...Array.from(byClientId.values())].sort((left, right) => {
     const leftId = Number(left.id || 0)
     const rightId = Number(right.id || 0)
     if (leftId > 0 && rightId > 0) {
@@ -5455,7 +5413,17 @@ function mergeTeamChatMessages(incomingMessages = [], { replace = false } = {}) 
     }
     return String(left.created_at || "").localeCompare(String(right.created_at || ""))
   })
+  const changed = nextMessages.length !== state.teamChatMessages.length
+    || nextMessages.some((message, index) => (
+      teamChatMessageRenderSignature(message)
+      !== teamChatMessageRenderSignature(state.teamChatMessages[index])
+    ))
+  if (!changed) {
+    return false
+  }
+  state.teamChatMessages = nextMessages
   updateTeamChatLastMessageId()
+  return true
 }
 
 function isOwnTeamChatMessage(message) {
@@ -5826,14 +5794,20 @@ async function refreshTeamChatMessages({ append = false } = {}) {
     return false
   }
   const requestedRoomKey = currentTeamChatRoomKey()
+  const requestSeq = Number(state.teamChatMessageRequestSeq || 0) + 1
+  state.teamChatMessageRequestSeq = requestSeq
+  const requestIsCurrent = () => (
+    requestSeq === state.teamChatMessageRequestSeq
+    && requestedRoomKey === currentTeamChatRoomKey()
+  )
   const params = teamChatRoomParams()
   if (append && state.teamChatLastMessageId) {
     params.set("after_id", String(state.teamChatLastMessageId))
   }
   try {
     const { response, data } = await fetchJSON(`/api/team-chat/messages?${params.toString()}`, { cache: "no-store" })
-    if (requestedRoomKey !== currentTeamChatRoomKey()) {
-      return true
+    if (!requestIsCurrent()) {
+      return false
     }
     if (!response.ok) {
       setTeamChatStatus(data.error || "消息读取失败", true)
@@ -5842,14 +5816,18 @@ async function refreshTeamChatMessages({ append = false } = {}) {
     const messages = Array.isArray(data.messages)
       ? data.messages.filter((message) => !message.room_key || message.room_key === requestedRoomKey)
       : []
-    mergeTeamChatMessages(messages, { replace: !append })
-    renderTeamChatMessages({ scrollToBottom: messages.length > 0 || !append })
+    const messagesChanged = mergeTeamChatMessages(messages, { replace: !append })
+    if (messagesChanged) {
+      renderTeamChatMessages({ scrollToBottom: messages.length > 0 || !append })
+    }
     if (!refs.teamChatModal?.classList.contains("hidden")) {
       await markCurrentTeamChatRead()
     }
-    return true
+    return requestIsCurrent()
   } catch {
-    setTeamChatStatus("消息读取失败", true)
+    if (requestIsCurrent()) {
+      setTeamChatStatus("消息读取失败", true)
+    }
     return false
   }
 }
@@ -5915,6 +5893,7 @@ function stopTeamChatPolling() {
 }
 
 async function switchTeamChatRoom(nextRoom) {
+  state.teamChatMessageRequestSeq += 1
   state.teamChatRoom = {
     type: nextRoom.type || "team",
     recipientUserId: nextRoom.recipientUserId || null,
@@ -5986,6 +5965,9 @@ async function submitTeamChatMessage(event) {
     return
   }
   const outgoingContent = formatTeamChatOutgoingContent(content)
+  const outgoingRoom = { ...state.teamChatRoom }
+  const outgoingRoomKey = currentTeamChatRoomKey()
+  const outgoingRoomIsCurrent = () => outgoingRoomKey === currentTeamChatRoomKey()
   const draftContent = refs.teamChatMessageInput?.value || ""
   const draftQuote = state.teamChatQuotedMessage
   if (refs.teamChatMessageInput) {
@@ -6000,19 +5982,30 @@ async function submitTeamChatMessage(event) {
   try {
     const { response, data } = await fetchJSON("/api/team-chat/messages", {
       method: "POST",
-      body: JSON.stringify(teamChatSendPayload(outgoingContent)),
+      body: JSON.stringify(teamChatSendPayload(outgoingContent, outgoingRoom)),
     })
     if (!response.ok) {
+      if (!outgoingRoomIsCurrent()) {
+        return
+      }
       state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
       renderTeamChatMessages()
       restoreTeamChatDraft(draftContent, draftQuote)
       setTeamChatStatus(data.error || "发送失败", true)
       return
     }
-    const messages = Array.isArray(data.messages) ? data.messages : []
+    if (!outgoingRoomIsCurrent()) {
+      return
+    }
+    const messages = Array.isArray(data.messages)
+      ? data.messages.filter((message) => !message.room_key || message.room_key === outgoingRoomKey)
+      : []
     replaceOptimisticTeamChatMessage(optimistic.client_id, messages)
     renderTeamChatMessages()
     await markCurrentTeamChatRead()
+    if (!outgoingRoomIsCurrent()) {
+      return
+    }
     if (data.bot_reply_pending) {
       scheduleTeamChatFastPolling()
       void refreshTeamChatMessages({ append: true })
@@ -6021,6 +6014,9 @@ async function submitTeamChatMessage(event) {
       setTeamChatStatus("已发送")
     }
   } catch {
+    if (!outgoingRoomIsCurrent()) {
+      return
+    }
     state.teamChatMessages = state.teamChatMessages.filter((message) => message.client_id !== optimistic.client_id)
     renderTeamChatMessages()
     restoreTeamChatDraft(draftContent, draftQuote)
@@ -6633,6 +6629,7 @@ function createWorkspaceSnapshot() {
       metaText: refs.resultMeta.textContent,
       timingText: refs.resultTiming.textContent,
       storageText: refs.resultStorage.textContent,
+      countNoticeText: refs.resultCountNoticeText?.textContent || "",
       sizeWarningText: refs.resultSizeWarningText?.textContent || "",
       labelText: refs.resultPreviewLabel.textContent,
       imageSrc: state.resultPreview?.src || refs.resultImage.getAttribute("src") || "",
@@ -6849,6 +6846,7 @@ async function restoreWorkspaceState() {
     refs.resultMeta.textContent = result.metaText || ""
     refs.resultTiming.textContent = result.timingText || ""
     refs.resultStorage.textContent = result.storageText || ""
+    setResultCountNotice(result.countNoticeText || "")
     setResultSizeWarning(result.sizeWarningText || "")
     setDownloadAvailable(
       state.resultPreview.src,
@@ -6909,6 +6907,12 @@ function cloneImageAsset(asset, overrides = {}) {
     return null
   }
   return { ...asset, ...overrides }
+}
+
+function imageAssetDimensions(asset) {
+  const width = Math.round(Number(asset?.width || asset?.saved_image_width || 0))
+  const height = Math.round(Number(asset?.height || asset?.saved_image_height || 0))
+  return width > 0 && height > 0 ? { width, height } : null
 }
 
 function modelInputAssetForLogoWorkflow(asset) {
@@ -7549,7 +7553,7 @@ async function confirmPromptBeforeRun(kind, text) {
     },
     itinerary: {
       title: "生成路线图前确认提示词",
-      description: "请逐字检查行程日期、地点、酒店、交通和每日说明。",
+      description: "请核对标题、日期和每天的地点顺序。",
     },
     edit: {
       title: "开始编辑前确认提示词",
@@ -8897,6 +8901,7 @@ function clearResult() {
   refs.resultMeta.textContent = ""
   refs.resultTiming.textContent = ""
   refs.resultStorage.textContent = ""
+  setResultCountNotice("")
   setResultSizeWarning("")
   refs.logoComposeStatus.textContent = refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用"
   refs.rawResponseOutput.textContent = "{}"
@@ -8956,6 +8961,7 @@ function snapshotCurrentResultState() {
     meta: refs.resultMeta.textContent,
     timing: refs.resultTiming.textContent,
     storage: refs.resultStorage.textContent,
+    countNoticeText: refs.resultCountNoticeText?.textContent || "",
     sizeWarningText: refs.resultSizeWarningText?.textContent || "",
     logoStatus: refs.logoComposeStatus.textContent,
     rawResponse: state.rawResponsePreview,
@@ -9010,6 +9016,7 @@ function restoreResultStateSnapshot(snapshot) {
   refs.resultMeta.textContent = snapshot.meta || ""
   refs.resultTiming.textContent = snapshot.timing || ""
   refs.resultStorage.textContent = snapshot.storage || ""
+  setResultCountNotice(snapshot.countNoticeText || "")
   setResultSizeWarning(snapshot.sizeWarningText || "")
   refs.logoComposeStatus.textContent = snapshot.logoStatus || (refs.logoOverlayEnabled?.checked ? "本地贴图" : "未启用")
 
@@ -9118,6 +9125,7 @@ function previewPendingResult({ mode, prompt, model, size, sourceName = "" }) {
   refs.resultMeta.textContent = metaParts.filter(Boolean).join(" · ")
   refs.resultTiming.textContent = "请求进行中 0.0s"
   refs.resultStorage.textContent = ""
+  setResultCountNotice("")
   setResultSizeWarning("")
   setDownloadDisabled()
   refs.shareResultPanel?.classList.add("hidden")
@@ -9146,6 +9154,8 @@ function candidateAsset(candidate, payload, index) {
   return {
     name: candidate.saved_image_name || `picgen-${payload.mode}-${index + 1}-${Date.now()}.png`,
     type: candidate.saved_image_mime || (candidate.image_data_url ? inferMimeFromDataUrl(candidate.image_data_url) : ""),
+    width: candidate.saved_image_width || candidate.width || payload.saved_image_width || null,
+    height: candidate.saved_image_height || candidate.height || payload.saved_image_height || null,
     dataUrl: candidate.image_data_url || "",
     savedUrl: candidate.saved_image_url || "",
     savedPath: candidate.saved_image_path || "",
@@ -9435,9 +9445,13 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
   )
 }
 
-async function composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq) {
+async function composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq, sourceCanvasSize = null) {
   try {
-    const composedCandidates = await composeLogoOverlayForCandidates(state.resultCandidates, true)
+    const composedCandidates = await composeLogoOverlayForCandidates(
+      state.resultCandidates,
+      true,
+      sourceCanvasSize,
+    )
     if (!composedCandidates.length || state.activeRequestController || resultGenerationSeq !== state.resultGenerationSeq) {
       return
     }
@@ -9502,6 +9516,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   setTextFidelityPanel("等待检查", "正在准备当前结果的文字一致性检查。", { candidateIndex: 0 })
   setError("")
   const isTransformMode = ["edit", "variant", "reference"].includes(payload.mode)
+  const logoDetectionSourceSize = isTransformMode ? imageAssetDimensions(requestSource) : null
   refs.resultPreviewLabel.textContent = payload.mode === "variant"
     ? "延展后"
     : payload.mode === "edit"
@@ -9612,6 +9627,7 @@ async function setResult(payload, durationMs, requestSource = null) {
     setStatusMessage(compositionMessage)
   }
   const sizeMismatchMessage = resolveSizeMismatchWarning(payload, actualSize)
+  setResultCountNotice(resolveResultCountNotice(payload, enrichedCandidates.length))
   setResultSizeWarning(sizeMismatchMessage)
   state.rawResponsePreview = sanitizeRawResponse(payload.raw_response || {})
   renderRawResponsePreview()
@@ -9628,7 +9644,7 @@ async function setResult(payload, durationMs, requestSource = null) {
   refs.logoComposeStatus.textContent = payload.logo_requested ? "原图已显示，正在贴 LOGO" : "未启用"
   if (payload.logo_requested) {
     setDownloadPendingLogo()
-    void composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq)
+    void composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerationSeq, logoDetectionSourceSize)
   }
   const checks = [
     checkCopyrightRisk(payload),
@@ -10304,6 +10320,14 @@ function companyLogoCandidatePlacements(canvas, logoCanvas) {
   return candidates
 }
 
+function companyLogoDetectionPlacements(canvas, logoCanvas, sourceCanvasSize = null) {
+  if (!sourceCanvasSize) {
+    return companyLogoCandidatePlacements(canvas, logoCanvas)
+  }
+  const sourcePlacements = companyLogoCandidatePlacements(sourceCanvasSize, logoCanvas)
+  return scaleLogoDetectionPlacements(sourcePlacements, sourceCanvasSize, canvas)
+}
+
 function calculateLogoPlacement(canvas, logoCanvas) {
   const candidates = companyLogoCandidatePlacements(canvas, logoCanvas)
 
@@ -10356,13 +10380,13 @@ function resizeCanvasHighQuality(sourceCanvas, targetWidth, targetHeight) {
   return finalCanvas
 }
 
-function findExistingOfficialLogo(canvas, logoCanvas) {
+function findExistingOfficialLogo(canvas, logoCanvas, sourceCanvasSize = null) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true })
   if (!ctx) {
     return null
   }
   let bestMatch = null
-  for (const placement of companyLogoCandidatePlacements(canvas, logoCanvas)) {
+  for (const placement of companyLogoDetectionPlacements(canvas, logoCanvas, sourceCanvasSize)) {
     const scaledLogoCanvas = resizeCanvasHighQuality(logoCanvas, placement.width, placement.height)
     const scaledLogoCtx = scaledLogoCanvas.getContext("2d", { willReadFrequently: true })
     if (!scaledLogoCtx) {
@@ -10386,7 +10410,7 @@ function findExistingOfficialLogo(canvas, logoCanvas) {
   return bestMatch
 }
 
-async function applyLogoOverlayToDataUrl(dataUrl) {
+async function applyLogoOverlayToDataUrl(dataUrl, sourceCanvasSize = null) {
   if (!dataUrl) {
     return null
   }
@@ -10406,7 +10430,7 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
   }
 
   ctx.drawImage(baseImage, 0, 0, width, height)
-  const existingLogo = findExistingOfficialLogo(canvas, logoCanvas)
+  const existingLogo = findExistingOfficialLogo(canvas, logoCanvas, sourceCanvasSize)
   if (existingLogo) {
     return {
       dataUrl,
@@ -10418,6 +10442,8 @@ async function applyLogoOverlayToDataUrl(dataUrl) {
       },
       preserved: true,
       matchScore: existingLogo.score,
+      matchedPixels: existingLogo.matchedPixels,
+      comparedPixels: existingLogo.comparedPixels,
     }
   }
   const placement = calculateLogoPlacement(canvas, logoCanvas)
@@ -10455,7 +10481,7 @@ async function persistFinalLogoImage(candidate, asset, composed, composedName) {
   return response.image || null
 }
 
-async function composeLogoOverlayForCandidates(candidates, logoRequested) {
+async function composeLogoOverlayForCandidates(candidates, logoRequested, sourceCanvasSize = null) {
   if (!logoRequested) {
     refs.logoComposeStatus.textContent = "未启用"
     return candidates
@@ -10470,22 +10496,41 @@ async function composeLogoOverlayForCandidates(candidates, logoRequested) {
   })
 
   const composedCandidates = []
-  for (const candidate of candidates) {
+  for (const [candidateIndex, candidate] of candidates.entries()) {
     const asset = candidate.asset
     if (!asset) {
       composedCandidates.push(candidate)
       continue
     }
     const sourceDataUrl = asset.dataUrl || await ensureAssetDataUrl(asset)
-    const composed = await applyLogoOverlayToDataUrl(sourceDataUrl)
+    const composed = await applyLogoOverlayToDataUrl(sourceDataUrl, sourceCanvasSize)
     if (!composed) {
       composedCandidates.push(candidate)
       continue
     }
     if (composed.preserved) {
+      const logoPreservation = createLogoPreservationDiagnostic(
+        {
+          score: composed.matchScore,
+          matchedPixels: composed.matchedPixels,
+          comparedPixels: composed.comparedPixels,
+        },
+        COMPANY_LOGO_EXISTING_MATCH_THRESHOLD,
+        {
+          generatedImageId: candidate.generated_image_id || asset.generatedImageId,
+          candidateIndex,
+          savedImagePath: candidate.saved_image_path || asset.savedPath,
+        },
+      )
       appendDebugLine("已有官方 LOGO，保留原位置且不重复贴入", {
-        placement: composed.placement,
-        matchScore: composed.matchScore,
+        generatedImageId: logoPreservation.generated_image_id || null,
+        candidateIndex: logoPreservation.candidate_index,
+        savedImagePath: logoPreservation.saved_image_path || "",
+        placement: `${composed.placement.x},${composed.placement.y},${composed.placement.width}x${composed.placement.height}`,
+        matchRate: logoPreservation.match_rate,
+        matchedPixels: logoPreservation.matched_pixels,
+        comparedPixels: logoPreservation.compared_pixels,
+        basis: logoPreservation.basis,
       })
       const preservedAsset = {
         ...asset,
@@ -10501,6 +10546,10 @@ async function composeLogoOverlayForCandidates(candidates, logoRequested) {
         logo_overlay_source: COMPANY_LOGO_NAME,
         logo_text_color: composed.placement.textColor || "original",
         logo_final_persisted: Boolean(candidate.saved_image_url || asset.savedUrl),
+        metadata: {
+          ...(candidate.metadata && typeof candidate.metadata === "object" ? candidate.metadata : {}),
+          logo_preservation: logoPreservation,
+        },
         asset: preservedAsset,
       })
       continue
@@ -10588,8 +10637,18 @@ async function downscaleDataUrlForRisk(dataUrl, maxSide = 768, quality = 0.82) {
   return canvas.toDataURL("image/jpeg", quality)
 }
 
+async function ensureAssetDimensions(asset, dataUrl) {
+  if (!asset || imageAssetDimensions(asset) || !dataUrl) {
+    return
+  }
+  const image = await loadImageElement(dataUrl, "无法读取输入图片尺寸。")
+  asset.width = image.naturalWidth || image.width
+  asset.height = image.naturalHeight || image.height
+}
+
 async function ensureAssetDataUrl(asset) {
   if (asset?.dataUrl) {
+    await ensureAssetDimensions(asset, asset.dataUrl)
     return asset.dataUrl
   }
 
@@ -10607,6 +10666,7 @@ async function ensureAssetDataUrl(asset) {
   const dataUrl = await blobToDataURL(blob)
   asset.dataUrl = dataUrl
   asset.type = asset.type || blob.type || inferMimeFromDataUrl(dataUrl)
+  await ensureAssetDimensions(asset, dataUrl)
   return dataUrl
 }
 
@@ -10990,7 +11050,15 @@ async function submitGenerate() {
         userContextEpoch,
       })
       ensureUserContextCurrent(userContextEpoch)
-      await setResult({ ...result, mode: "reference", prompt, size, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt, requestSources.at(-1))
+      await setResult({
+        ...result,
+        mode: "reference",
+        prompt,
+        size,
+        logo_requested: logoRequested,
+        requested_sample_count: referenceSampleCount,
+        text_contract: textContract,
+      }, performance.now() - startedAt, requestSources.at(-1))
       rememberRegenerationRequest("generate", requestSnapshot)
       pushHistory({
         mode: "reference",
@@ -11032,7 +11100,12 @@ async function submitGenerate() {
       userContextEpoch,
     })
     ensureUserContextCurrent(userContextEpoch)
-    await setResult({ ...result, logo_requested: logoRequested, text_contract: textContract }, performance.now() - startedAt)
+    await setResult({
+      ...result,
+      logo_requested: logoRequested,
+      requested_sample_count: sampleCount,
+      text_contract: textContract,
+    }, performance.now() - startedAt)
     rememberRegenerationRequest("generate", requestSnapshot)
     pushHistory({
       mode: "generate",
@@ -11719,7 +11792,10 @@ function bindEvents() {
     window.clearTimeout(state.gallerySearchTimer)
     state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
   })
-  refs.galleryFavoriteOnlyInput?.addEventListener("change", refreshGallery)
+  refs.galleryFavoriteOnlyInput?.addEventListener("change", () => {
+    syncMyFavoritesSummary()
+    void refreshGallery()
+  })
   refs.clearGalleryFiltersButton?.addEventListener("click", () => {
     if (refs.gallerySearchInput) {
       refs.gallerySearchInput.value = ""
@@ -11729,6 +11805,7 @@ function bindEvents() {
     }
     state.gallerySearch = ""
     state.galleryFavoriteOnly = false
+    syncMyFavoritesSummary()
     void refreshGallery()
   })
   refs.saveGalleryMetaButton?.addEventListener("click", saveGalleryMeta)

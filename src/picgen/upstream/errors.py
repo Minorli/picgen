@@ -14,13 +14,20 @@ def compact_log_text(value: str, limit: int = 300) -> str:
     return f"{cleaned[:limit]}..."
 
 
+def _serialize_error_details(value: Any, fallback: str) -> str | None:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    except (RecursionError, TypeError, ValueError):
+        return fallback.strip() or None
+
+
 def extract_error_message(response_body: str) -> tuple[str, str | None]:
     message = response_body.strip() or "上游接口返回了错误"
     details: str | None = None
 
     try:
         parsed_body = json.loads(response_body)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return message, response_body.strip() or None
 
     if isinstance(parsed_body, dict):
@@ -47,11 +54,11 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
         error_block = parsed_body.get("error")
         if isinstance(error_block, dict):
             message = str(error_block.get("message") or message)
-            details = json.dumps(error_block, ensure_ascii=False, indent=2)
+            details = _serialize_error_details(error_block, response_body)
         else:
-            details = json.dumps(parsed_body, ensure_ascii=False, indent=2)
+            details = _serialize_error_details(parsed_body, response_body)
     else:
-        details = json.dumps(parsed_body, ensure_ascii=False, indent=2)
+        details = _serialize_error_details(parsed_body, response_body)
 
     return redact_sensitive_text(message, limit=1000), redact_sensitive_text(details, limit=4000)
 
@@ -104,7 +111,7 @@ def _error_values(details: str | None) -> set[str]:
         return set()
     try:
         parsed = json.loads(details)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return set()
     if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
         parsed = parsed["error"]
@@ -147,7 +154,8 @@ def upstream_api_error(
 
 def coerce_error_payload(payload: Any, context: str) -> APIError:
     if isinstance(payload, dict):
-        message, details = extract_error_message(json.dumps(payload, ensure_ascii=False))
+        serialized = _serialize_error_details(payload, "")
+        message, details = extract_error_message(serialized or "上游错误载荷无法序列化")
     else:
         message, details = extract_error_message(str(payload))
     return APIError(502, f"{context}: {message}", details, code="upstream_error")

@@ -69,6 +69,79 @@ def test_masked_edit_composite_preserves_every_pixel_outside_transparent_mask() 
     }
 
 
+def test_masked_edit_composite_uses_png8_palette_transparency_as_alpha() -> None:
+    source = Image.new("RGBA", (4, 4), (220, 30, 30, 255))
+    generated = Image.new("RGBA", (4, 4), (20, 80, 220, 255))
+    mask = Image.new("P", (4, 4), 1)
+    mask.putpalette([0, 0, 0, 255, 255, 255] + [0, 0, 0] * 254)
+    mask.putpixel((1, 1), 0)
+    mask.putpixel((2, 2), 0)
+    mask.info["transparency"] = bytes([0, 255])
+
+    def encode(image: Image.Image) -> bytes:
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    mask_bytes = encode(mask)
+    assert b"tRNS" in mask_bytes
+    with Image.open(BytesIO(mask_bytes)) as persisted_mask:
+        assert persisted_mask.mode == "P"
+        assert persisted_mask.getbands() == ("P",)
+        assert "transparency" in persisted_mask.info
+
+    result_bytes, result_mime, metadata = composite_masked_edit_image(
+        source_image_bytes=encode(source),
+        mask_image_bytes=mask_bytes,
+        generated_image_bytes=encode(generated),
+        generated_image_mime="image/png",
+    )
+
+    with Image.open(BytesIO(result_bytes)) as result:
+        rgba = result.convert("RGBA")
+        assert rgba.getpixel((0, 0)) == (220, 30, 30, 255)
+        assert rgba.getpixel((3, 3)) == (220, 30, 30, 255)
+        assert rgba.getpixel((1, 1)) == (20, 80, 220, 255)
+        assert rgba.getpixel((2, 2)) == (20, 80, 220, 255)
+    assert result_mime == "image/png"
+    assert metadata["mask_composited"] is True
+
+
+@pytest.mark.parametrize("oversized_part", ["source", "mask", "generated"])
+def test_masked_edit_composite_rejects_oversized_inputs_before_decode(oversized_part: str) -> None:
+    images = {
+        "source": bytearray(_png_bytes(1, 1)),
+        "mask": bytearray(_png_bytes(1, 1)),
+        "generated": bytearray(_png_bytes(1, 1)),
+    }
+    images[oversized_part][16:20] = (4096).to_bytes(4, "big")
+    images[oversized_part][20:24] = (4096).to_bytes(4, "big")
+
+    with pytest.raises(ValueError, match=rf"{oversized_part} image exceeds"):
+        composite_masked_edit_image(
+            source_image_bytes=bytes(images["source"]),
+            mask_image_bytes=bytes(images["mask"]),
+            generated_image_bytes=bytes(images["generated"]),
+            generated_image_mime="image/png",
+        )
+
+
+def test_masked_edit_composite_converts_pillow_decompression_bomb_to_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_output = BytesIO()
+    Image.new("RGB", (3, 1), (220, 30, 30)).save(source_output, format="TIFF")
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+
+    with pytest.raises(ValueError, match=r"source image exceeds"):
+        composite_masked_edit_image(
+            source_image_bytes=source_output.getvalue(),
+            mask_image_bytes=_png_bytes(1, 1),
+            generated_image_bytes=_png_bytes(1, 1),
+            generated_image_mime="image/png",
+        )
+
+
 def test_masked_edit_composite_returns_to_source_dimensions_before_preserving_pixels() -> None:
     source = Image.new("RGBA", (4, 6), (220, 30, 30, 255))
     generated = Image.new("RGBA", (2, 2), (20, 80, 220, 255))
