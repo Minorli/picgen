@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.64"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.65"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.64"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.65"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "calculateOfficialLogoPixelMatch" in app_js
@@ -1838,6 +1838,37 @@ console.log(JSON.stringify(parseItineraryTextStops(prompt)));
 
     assert [stop["name"] for stop in stops] == ["乌鲁木齐", "布尔津", "喀纳斯"]
     assert all(stop["name"] != "9/12" for stop in stops)
+
+
+def test_ui_mode_toggle_uses_the_primary_accent_palette() -> None:
+    styles_css = (ROOT_DIR / "static" / "styles.css").read_text(encoding="utf-8")
+
+    def declarations(selector: str) -> str:
+        start = styles_css.index(f"{selector} {{")
+        return styles_css[start : styles_css.index("\n}", start)]
+
+    base = declarations(".ui-mode-toggle")
+    assert "border-color: var(--ux-primary-8);" in base
+    assert "background: var(--ux-primary-8);" in base
+    assert "color: var(--ux-color-white);" in base
+    assert "font-weight: var(--ux-font-weight-semibold);" in base
+
+    hover = declarations(
+        '.ux-button-secondary.ui-mode-toggle:hover:not(:disabled):not([aria-disabled="true"])'
+        ':not([aria-busy="true"]):not(.is-loading)'
+    )
+    assert "background: var(--ux-primary-7);" in hover
+    assert "color: var(--ux-color-white);" in hover
+
+    active = declarations(
+        '.ux-button-secondary.ui-mode-toggle:active:not(:disabled):not([aria-disabled="true"])'
+        ':not([aria-busy="true"]):not(.is-loading)'
+    )
+    assert "background: var(--ux-primary-9);" in active
+    assert "color: var(--ux-color-white);" in active
+
+    focus = declarations(".ux-button-secondary.ui-mode-toggle:focus-visible")
+    assert "box-shadow: var(--ux-focus-ring-primary);" in focus
 
 
 def test_simple_mode_dom_and_existing_submit_path_contract() -> None:

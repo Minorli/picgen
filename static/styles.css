@@ -4345,7 +4345,28 @@ button:disabled {
   top: 50%;
   right: calc(100% + var(--ux-space-2));
   flex: 0 0 auto;
+  border-color: var(--ux-primary-8);
+  background: var(--ux-primary-8);
+  color: var(--ux-color-white);
+  font-weight: var(--ux-font-weight-semibold);
+  box-shadow: var(--ux-shadow-1);
   transform: translateY(-50%);
+}
+
+.ux-button-secondary.ui-mode-toggle:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.is-loading) {
+  border-color: var(--ux-primary-7);
+  background: var(--ux-primary-7);
+  color: var(--ux-color-white);
+}
+
+.ux-button-secondary.ui-mode-toggle:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.is-loading) {
+  border-color: var(--ux-primary-9);
+  background: var(--ux-primary-9);
+  color: var(--ux-color-white);
+}
+
+.ux-button-secondary.ui-mode-toggle:focus-visible {
+  box-shadow: var(--ux-focus-ring-primary);
 }
 
 body.ui-simple-mode {
