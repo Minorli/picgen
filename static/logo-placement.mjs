@@ -2,6 +2,8 @@ const MIN_ABSOLUTE_SCORE_IMPROVEMENT = 2
 const MIN_RELATIVE_SCORE_IMPROVEMENT = 0.25
 const OFFICIAL_LOGO_MATCH_MIN_ALPHA = 245
 const OFFICIAL_LOGO_MATCH_MAX_CHANNEL_DELTA = 24
+// Upstream down/upscaling can shift intact logo edges by a few pixels.
+const OFFICIAL_LOGO_MATCH_RADIUS = 3
 
 const SAFETY_PADDING = Object.freeze({
   left: 0.12,
@@ -31,12 +33,47 @@ function pixelLuminance(data, index) {
   return 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2]
 }
 
+function imageDataDimensions(imageData, pixelCount) {
+  const width = Math.floor(Number(imageData?.width) || 0)
+  const height = Math.floor(Number(imageData?.height) || 0)
+  return width > 0 && height > 0 && width * height === pixelCount
+    ? { width, height }
+    : { width: pixelCount, height: 1 }
+}
+
+function hasNearbyLogoPixelMatch(base, logo, logoIndex, x, y, width, height) {
+  for (let offsetY = -OFFICIAL_LOGO_MATCH_RADIUS; offsetY <= OFFICIAL_LOGO_MATCH_RADIUS; offsetY += 1) {
+    const candidateY = y + offsetY
+    if (candidateY < 0 || candidateY >= height) {
+      continue
+    }
+    for (let offsetX = -OFFICIAL_LOGO_MATCH_RADIUS; offsetX <= OFFICIAL_LOGO_MATCH_RADIUS; offsetX += 1) {
+      const candidateX = x + offsetX
+      if (candidateX < 0 || candidateX >= width) {
+        continue
+      }
+      const baseIndex = (candidateY * width + candidateX) * 4
+      const largestChannelDelta = Math.max(
+        Math.abs(base[baseIndex] - logo[logoIndex]),
+        Math.abs(base[baseIndex + 1] - logo[logoIndex + 1]),
+        Math.abs(base[baseIndex + 2] - logo[logoIndex + 2]),
+      )
+      if (largestChannelDelta <= OFFICIAL_LOGO_MATCH_MAX_CHANNEL_DELTA) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
 export function calculateOfficialLogoPixelMatch(baseImageData, logoImageData) {
   const base = baseImageData?.data
   const logo = logoImageData?.data
   if (!base || !logo || base.length !== logo.length || base.length % 4 !== 0) {
     return { score: 0, matchedPixels: 0, comparedPixels: 0 }
   }
+  const pixelCount = logo.length / 4
+  const { width, height } = imageDataDimensions(logoImageData, pixelCount)
 
   let matchedPixels = 0
   let comparedPixels = 0
@@ -45,12 +82,10 @@ export function calculateOfficialLogoPixelMatch(baseImageData, logoImageData) {
       continue
     }
     comparedPixels += 1
-    const largestChannelDelta = Math.max(
-      Math.abs(base[index] - logo[index]),
-      Math.abs(base[index + 1] - logo[index + 1]),
-      Math.abs(base[index + 2] - logo[index + 2]),
-    )
-    if (largestChannelDelta <= OFFICIAL_LOGO_MATCH_MAX_CHANNEL_DELTA) {
+    const pixel = index / 4
+    const x = pixel % width
+    const y = Math.floor(pixel / width)
+    if (hasNearbyLogoPixelMatch(base, logo, index, x, y, width, height)) {
       matchedPixels += 1
     }
   }
