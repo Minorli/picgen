@@ -67,8 +67,22 @@ def test_health_endpoint_reports_ok(make_client):
     assert response.json() == {"ok": True}
 
 
-def test_ready_endpoint_reports_dependencies(make_client):
+def test_health_endpoint_does_not_probe_storage_or_database(make_client, monkeypatch):
+    from picgen.auth import AuthStore
+
+    def fail_probe(*_args):
+        raise AssertionError("liveness must not probe dependencies")
+
+    monkeypatch.setattr("picgen.readiness.storage_is_writable", fail_probe)
+    monkeypatch.setattr(AuthStore, "is_ready", fail_probe)
     client, _, _ = make_client()
+
+    assert client.get("/api/health").json() == {"ok": True}
+
+
+def test_ready_endpoint_reports_dependencies(make_client):
+    client, _, settings = make_client()
+    settings.outputs_dir.mkdir(parents=True)
     response = client.get("/api/ready")
     assert response.status_code == 200
     payload = response.json()
@@ -77,8 +91,63 @@ def test_ready_endpoint_reports_dependencies(make_client):
     expected_version = version_line.split('"', 2)[1]
     assert payload["ok"] is True
     assert payload["storage_writable"] is True
+    assert payload["database_writable"] is True
     assert payload["upstream_client_ready"] is True
     assert payload["version"] == expected_version
+
+
+def test_ready_endpoint_checks_enabled_database(make_client, settings_factory):
+    client, _, _ = make_client(settings=settings_factory(auth_enabled=True))
+
+    with client:
+        response = client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json()["database_writable"] is True
+
+
+def test_ready_endpoint_returns_503_when_database_storage_is_unwritable(
+    make_client, settings_factory, monkeypatch
+):
+    from picgen.auth import AuthStore
+
+    monkeypatch.setattr(AuthStore, "is_ready", lambda _self: False, raising=False)
+    client, _, settings = make_client(settings=settings_factory(auth_enabled=True))
+    settings.outputs_dir.mkdir(parents=True)
+
+    response = client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert response.json()["ok"] is False
+    assert response.json()["database_writable"] is False
+
+
+def test_ready_endpoint_returns_503_when_output_storage_is_full(make_client, monkeypatch):
+    monkeypatch.setattr("picgen.readiness.storage_is_writable", lambda _path: False)
+    client, _, _ = make_client()
+
+    response = client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert response.json()["ok"] is False
+    assert response.json()["storage_writable"] is False
+
+
+def test_ready_endpoint_caches_storage_probe(make_client, monkeypatch):
+    probe_calls = 0
+
+    def probe(_path):
+        nonlocal probe_calls
+        probe_calls += 1
+        return True
+
+    monkeypatch.setattr("picgen.readiness.storage_is_writable", probe)
+    client, _, _ = make_client()
+
+    assert client.get("/api/ready").status_code == 200
+    assert client.get("/api/ready").status_code == 200
+    assert probe_calls == 1
+    assert client.app.state.readiness_limiter.total_tokens == 1
 
 
 def test_config_reports_api_key_presence_without_leaking_value(make_client, settings_factory):

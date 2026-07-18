@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.66**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.67**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,10 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.66 主要特性
+## 0.1.67 主要特性
+
+- **数据库故障不再假健康**：`/api/ready` 会用短超时 `quick_check` 验证 SQLite，并对数据库与输出目录所在文件系统执行相邻临时文件的 write、fsync 和清理；任一依赖异常时返回 HTTP 503。完整性结果最长缓存 5 分钟，文件身份、大小或修改时间变化会立即重检。
+- **容器健康检查覆盖 SQLite**：Dockerfile 与 Compose 改探测 `/api/ready`；`/api/health` 继续只表示进程存活。就绪结果缓存 5 秒，限制高频请求造成的探针写放大。
 
 - **简洁模式壳层统一**：顶栏、状态、预览和页脚使用既有 Arco token 重做；专业模式除模式按钮和“我的收藏”需求文案外保持原像素。
 - **编辑 Logo 缩放检测闭环**：检测坐标按源画布到结果画布的宽度比例缩放，缺失尺寸会先补齐；保留判定记录匹配率、像素数、阈值和候选关联，便于追查误判。
@@ -90,7 +93,7 @@
   - `CORSMiddleware` — 配置化跨域
 - **原子化落盘**：图片与 sidecar JSON 用临时文件 + rename 写入，崩溃不留半截文件；核心生成、
   反馈、分享和取图送达数据会进入 SQLite，便于管理员后续审计。
-- **健康分级**：`/api/health` 仅看进程存活；`/api/ready` 联动客户端、磁盘可写性、版本号。
+- **健康分级**：`/api/health` 仅看进程存活；`/api/ready` 联动客户端、输出存储、SQLite 与数据库文件系统、版本号。
 - **Telegram 统一通知**：可配置 Telegram Bot 接收后台/上游异常、成功生图、Bug 反馈和找回密码申请；
   消息以 `【PicGen｜分类】` 开头，Telegram 列表里可直接区分事件类型和关键标题。
 - **旅行提示词标签**：生成提示词下方的快捷标签改为“高级旅行 / 精致海报 / 酒店质感 /
@@ -136,10 +139,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.66 .
+docker build -t minorli/picgen:0.1.67 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.66
+  minorli/picgen:0.1.67
 ```
 
 或：
@@ -154,13 +157,13 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.66`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.67`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.66 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.67 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
-镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/health`，以非 root
+镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/ready`，以非 root
 用户 `picgen` 运行。`docker-compose.yml` 使用 `picgen-data` volume 保存 `/app/data`，因此注册用户、
 用量统计和落盘结果会在容器重启后继续保留。
 
@@ -270,7 +273,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.66 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.67 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |
@@ -290,7 +293,7 @@ Responses，并覆盖模型、接口和 reasoning effort。非 Images 原生精�
 | --- | --- | --- |
 | `/api/config` | GET | 返回前端用的配置（不含 key 明文） |
 | `/api/health` | GET | 进程健康 |
-| `/api/ready` | GET | 联动健康（磁盘、HTTP 客户端、版本） |
+| `/api/ready` | GET | 联动健康（输出存储、SQLite、数据库存储、HTTP 客户端、版本） |
 | `/api/image-jobs` | POST | 统一生成、参考图、延展和编辑入口，由服务端选择实际通道 |
 | `/api/generate` | POST | 调上游 Images 生成接口（默认通道） |
 | `/api/edit` | POST | 调上游 Images 编辑接口（默认通道，含参考图 / 延展 / 编辑） |
@@ -403,7 +406,7 @@ uv run picgen --prune-now
   - 按需配置 `PICGEN_CORS_ALLOW_ORIGINS`。
   - 收紧 `PICGEN_MAX_REQUEST_BODY_BYTES` / `PICGEN_MAX_IMAGE_BYTES` 以降低 DoS 面积。
 
-`/api/health` 与 `/api/ready` 默认绕过鉴权与限流，便于探针。
+`/api/health` 与 `/api/ready` 默认绕过鉴权与限流，便于容器探针；就绪结果会短时缓存。
 
 ## 可观测性
 

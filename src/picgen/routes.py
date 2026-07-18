@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
@@ -63,6 +63,7 @@ from .notifications import (
     send_password_reset_request_notification,
     smtp_notifications_enabled,
 )
+from .readiness import ReadinessProbe
 from .recipes import list_prompt_recipes, recipe_public_dict
 from .redaction import redact_sensitive_text
 from .restricted_destinations import (
@@ -1954,20 +1955,29 @@ def create_router() -> APIRouter:
 
     @router.get("/api/ready", response_model=ReadinessResponse)
     async def ready(
+        request: Request,
+        response: Response,
         settings: Settings = Depends(get_settings),
         client: UpstreamClient = Depends(get_client),
+        auth_store: AuthStore = Depends(get_auth_store),
     ) -> ReadinessResponse:
-        storage_ok = True
-        try:
-            settings.outputs_dir.mkdir(parents=True, exist_ok=True)
-            probe = settings.outputs_dir / ".ready"
-            probe.write_text("ok")
-            probe.unlink(missing_ok=True)
-        except Exception:
-            storage_ok = False
+        readiness_probe: ReadinessProbe = request.app.state.readiness_probe
+        readiness_limiter: anyio.CapacityLimiter = request.app.state.readiness_limiter
+        storage = await anyio.to_thread.run_sync(
+            lambda: readiness_probe.check(
+                outputs_dir=settings.outputs_dir,
+                auth_enabled=settings.auth_enabled,
+                auth_store=auth_store,
+            ),
+            limiter=readiness_limiter,
+        )
+        ready_ok = storage.storage_writable and storage.database_writable and client is not None
+        if not ready_ok:
+            response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
         return ReadinessResponse(
-            ok=storage_ok and client is not None,
-            storage_writable=storage_ok,
+            ok=ready_ok,
+            storage_writable=storage.storage_writable,
+            database_writable=storage.database_writable,
             upstream_client_ready=client is not None,
             version=__version__,
         )

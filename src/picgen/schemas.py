@@ -681,6 +681,7 @@ class HealthResponse(BaseModel):
 class ReadinessResponse(BaseModel):
     ok: bool
     storage_writable: bool
+    database_writable: bool
     upstream_client_ready: bool
     version: str
 

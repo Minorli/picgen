@@ -39,6 +39,38 @@ _MIME_TO_PIL_FORMAT: dict[str, str] = {
     "image/webp": "WEBP",
 }
 MAX_EXACT_IMAGE_PIXELS = 8_294_400
+_READINESS_MIN_FREE_BYTES = 16 * 1024 * 1024
+_READINESS_PROBE_BYTES = 4 * 1024
+
+
+def storage_is_writable(path: Path) -> bool:
+    """Verify free-space headroom and a durable adjacent temporary write."""
+
+    probe_path: Path | None = None
+    write_succeeded = False
+    try:
+        if not path.is_dir() or not os.access(path, os.W_OK | os.X_OK):
+            return False
+        filesystem = os.statvfs(path)
+        block_size = filesystem.f_frsize or filesystem.f_bsize
+        if filesystem.f_blocks > 0 and filesystem.f_bavail * block_size < _READINESS_MIN_FREE_BYTES:
+            return False
+        if filesystem.f_files > 0 and filesystem.f_favail < 1:
+            return False
+        with tempfile.NamedTemporaryFile(prefix=".picgen-ready-", dir=path, delete=False) as probe:
+            probe_path = Path(probe.name)
+            probe.write(b"\0" * _READINESS_PROBE_BYTES)
+            probe.flush()
+            os.fsync(probe.fileno())
+        write_succeeded = True
+    except OSError:
+        write_succeeded = False
+    if probe_path is not None:
+        try:
+            probe_path.unlink()
+        except OSError:
+            return False
+    return write_succeeded
 
 
 def extension_for_mime(image_mime: str) -> str:

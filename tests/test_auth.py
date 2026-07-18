@@ -15,6 +15,95 @@ ADMIN_PASSWORD = "correct horse battery admin"
 USER_PASSWORD = "correct horse battery"
 
 
+def test_auth_store_readiness_checks_sqlite_without_changing_database(tmp_path: Path):
+    from picgen.auth import AuthStore
+
+    db_path = tmp_path / "auth.sqlite3"
+    store = AuthStore(db_path)
+    store.initialize()
+    before = db_path.read_bytes()
+
+    assert store.is_ready() is True
+    assert db_path.read_bytes() == before
+    assert list(tmp_path.glob(".picgen-ready-*")) == []
+
+
+def test_auth_store_readiness_fails_when_database_directory_cannot_be_written(tmp_path: Path, monkeypatch):
+    from picgen.auth import AuthStore
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    store.initialize()
+
+    monkeypatch.setattr("picgen.auth.storage_is_writable", lambda _path: False)
+
+    assert store.is_ready() is False
+
+
+def test_auth_store_readiness_rejects_corrupt_database(tmp_path: Path):
+    from picgen.auth import AuthStore
+
+    db_path = tmp_path / "auth.sqlite3"
+    db_path.write_bytes(b"not a sqlite database")
+
+    assert AuthStore(db_path).is_ready() is False
+
+
+def test_auth_store_readiness_rejects_uninitialized_sqlite_database(tmp_path: Path):
+    from picgen.auth import AuthStore
+
+    db_path = tmp_path / "auth.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+
+    assert AuthStore(db_path).is_ready() is False
+
+
+def test_auth_store_readiness_rejects_corrupt_business_table_page(tmp_path: Path):
+    from picgen.auth import AuthStore
+
+    db_path = tmp_path / "auth.sqlite3"
+    store = AuthStore(db_path)
+    store.initialize()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE readiness_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO readiness_data VALUES ('ok')")
+        root_page = int(
+            connection.execute(
+                "SELECT rootpage FROM sqlite_schema WHERE name = 'readiness_data'"
+            ).fetchone()[0]
+        )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    page_size_raw = int.from_bytes(db_path.read_bytes()[16:18], "big")
+    page_size = 65_536 if page_size_raw == 1 else page_size_raw
+    assert root_page > 1
+    with db_path.open("r+b") as database:
+        database.seek((root_page - 1) * page_size)
+        database.write(b"\0")
+
+    assert store.is_ready() is False
+
+
+def test_auth_store_readiness_caches_unchanged_database_integrity(tmp_path: Path, monkeypatch):
+    from picgen.auth import AuthStore
+
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    store.initialize()
+    real_connect = sqlite3.connect
+    connection_count = 0
+
+    def tracked_connect(*args, **kwargs):
+        nonlocal connection_count
+        connection_count += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr("picgen.auth.sqlite3.connect", tracked_connect)
+
+    assert store.is_ready() is True
+    assert store.is_ready() is True
+    assert connection_count == 1
+
+
 def test_auth_required_blocks_generation(make_client, settings_factory):
     settings = settings_factory(auth_enabled=True, default_api_key="sk-test")
     client, fake, _ = make_client(settings=settings)
