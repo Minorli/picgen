@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.66"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.67"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 4" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.66"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.67"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "calculateOfficialLogoPixelMatch" in app_js
@@ -1808,6 +1808,10 @@ def test_docker_packaging_excludes_local_env_and_persists_container_data() -> No
     assert "apt-get" not in dockerfile
     assert "curl" not in dockerfile
     assert "urllib.request.urlopen" in dockerfile
+    assert "/api/ready" in dockerfile
+    assert "/api/ready" in compose
+    assert "urlopen('http://127.0.0.1:%s/api/health'" not in dockerfile
+    assert "urlopen('http://127.0.0.1:%s/api/health'" not in compose
     assert "uv sync --frozen --no-dev" in dockerfile
     assert '"--workers", "1"' in dockerfile
     assert '"--workers", "2"' not in dockerfile

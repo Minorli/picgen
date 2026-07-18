@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_RESPONSES_MODEL, LEGACY_DEFAULT_RESPONSES_MODEL
+from .storage import storage_is_writable
 
 _HASH_NAME = "pbkdf2_sha256"
 _HASH_ITERATIONS = 600_000
@@ -23,6 +26,7 @@ _SCHEMA_VERSION = 15
 _SHARED_RESULT_OWNERSHIP_SCHEMA_VERSION = 15
 _MAX_FAILED_LOGIN_ATTEMPTS = 5
 _ACCOUNT_LOCK_MINUTES = 15
+_DATABASE_INTEGRITY_CACHE_SECONDS = 5 * 60.0
 _PASSWORD_RESET_REQUEST_THROTTLE_MINUTES = 10
 TEAM_CHAT_BOT_ID = "gpt-bot"
 TEAM_CHAT_BOT_NAME = "GPT-BOT"
@@ -104,6 +108,65 @@ class AuthStore:
         self.db_path = db_path
         self._lock = threading.RLock()
         self._initialized = False
+        self._integrity_lock = threading.Lock()
+        self._integrity_checked_at = 0.0
+        self._integrity_ready = False
+        self._integrity_signature: tuple[int, int, int, int] | None = None
+
+    def is_ready(self) -> bool:
+        """Check SQLite integrity and write headroom without mutating business data."""
+
+        try:
+            if not self.db_path.is_file():
+                return False
+            if not os.access(self.db_path, os.R_OK | os.W_OK):
+                return False
+            if not storage_is_writable(self.db_path.parent):
+                return False
+            file_stat = self.db_path.stat()
+            with self.db_path.open("rb") as database:
+                if database.read(16) != b"SQLite format 3\0":
+                    return False
+            signature = (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+            return self._integrity_check_is_ready(signature)
+        except (OSError, sqlite3.Error):
+            return False
+
+    def _integrity_check_is_ready(self, signature: tuple[int, int, int, int]) -> bool:
+        now = time.monotonic()
+        with self._integrity_lock:
+            if (
+                self._integrity_ready
+                and self._integrity_signature == signature
+                and now - self._integrity_checked_at < _DATABASE_INTEGRITY_CACHE_SECONDS
+            ):
+                return True
+            connection: sqlite3.Connection | None = None
+            try:
+                database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+                connection = sqlite3.connect(database_uri, uri=True, timeout=0.25)
+                connection.execute("PRAGMA query_only=ON")
+                result = connection.execute("PRAGMA quick_check(1)").fetchone()
+                current_schema = connection.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ? LIMIT 1",
+                    (_SCHEMA_VERSION,),
+                ).fetchone()
+                connection.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+                ready = (
+                    result is not None
+                    and str(result[0]).lower() == "ok"
+                    and current_schema is not None
+                )
+            except (OSError, sqlite3.Error):
+                ready = False
+            finally:
+                if connection is not None:
+                    with suppress(sqlite3.Error):
+                        connection.close()
+            self._integrity_ready = ready
+            self._integrity_signature = signature
+            self._integrity_checked_at = time.monotonic()
+            return ready
 
     def initialize(self) -> None:
         with self._lock:

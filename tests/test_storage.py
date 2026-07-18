@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -20,6 +21,7 @@ from picgen.storage import (
     resolve_storage_path,
     sanitize_filename,
     save_output_image,
+    storage_is_writable,
 )
 
 
@@ -35,6 +37,45 @@ def _oriented_jpeg_bytes(width: int, height: int, orientation: int) -> bytes:
     exif[274] = orientation
     Image.new("RGB", (width, height), (20, 120, 200)).save(output, format="JPEG", exif=exif)
     return output.getvalue()
+
+
+def test_storage_is_writable_fsyncs_and_cleans_up_probe(tmp_path: Path) -> None:
+    assert storage_is_writable(tmp_path) is True
+    assert list(tmp_path.glob(".picgen-ready-*")) == []
+
+
+@pytest.mark.parametrize(
+    ("blocks_available", "inodes_available"),
+    ((0, 1), (4096, 0)),
+)
+def test_storage_is_writable_rejects_exhausted_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocks_available: int,
+    inodes_available: int,
+) -> None:
+    filesystem = SimpleNamespace(
+        f_blocks=1,
+        f_bavail=blocks_available,
+        f_frsize=4096,
+        f_bsize=4096,
+        f_files=1,
+        f_favail=inodes_available,
+    )
+    monkeypatch.setattr("picgen.storage.os.statvfs", lambda _path: filesystem)
+
+    assert storage_is_writable(tmp_path) is False
+    assert list(tmp_path.glob(".picgen-ready-*")) == []
+
+
+def test_storage_is_writable_cleans_up_after_fsync_failure(tmp_path: Path, monkeypatch) -> None:
+    def fail_fsync(_file_descriptor: int) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr("picgen.storage.os.fsync", fail_fsync)
+
+    assert storage_is_writable(tmp_path) is False
+    assert list(tmp_path.glob(".picgen-ready-*")) == []
 
 
 def test_masked_edit_composite_preserves_every_pixel_outside_transparent_mask() -> None:

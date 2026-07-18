@@ -31,6 +31,7 @@ from .notifications import (
     error_alert_notifications_enabled,
     send_error_alert_notification,
 )
+from .readiness import ReadinessProbe
 from .redaction import redact_sensitive_text
 from .routes import create_router, drain_notification_tasks
 from .storage import prune_old_outputs
@@ -166,6 +167,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.auth_store = auth_store
+    app.state.readiness_probe = ReadinessProbe()
+    app.state.readiness_limiter = anyio.CapacityLimiter(1)
 
     # add_middleware() prepends, so the LAST addition runs OUTERMOST. Runtime
     # order (outer → inner): CORS → RequestId → SecurityHeaders → RateLimit →
