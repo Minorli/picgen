@@ -229,3 +229,33 @@
 2. 上游可能返回低于请求尺寸的同比例图片。PicGen 会用 Lanczos 归一化到严格画布，尺寸契约可满足，但放大不能补回原生细节；A3 编辑的真实上游尺寸为 874x1799。
 3. A3 使用关闭登录的隔离实例，因无数据库图片 ID，官方 Logo 最终层只在浏览器生成；生产鉴权实例仍通过既有 final-image API 持久化。
 4. 专业模式像素不变存在两个需求明确例外：模式切换按钮配色，以及 C1 的“我的收藏”可见文案；其它区域差分为零。
+
+## 0.1.67 数据库存储就绪与发布记录
+
+记录时间：2026-07-18T08:48:37Z
+
+### 故障与修复
+
+- 2026-07-18T06:06:50Z，同盘 PostgreSQL 临时写入把 `/vol1` 推到 ENOSPC，生产 PicGen 随后出现 `sqlite3.OperationalError: database or disk is full`；不是 PicGen SQLite 自身异常膨胀。旧容器仍以 `/api/health` 判定为 healthy，形成数据库不可写但容器假健康的窗口。处置后 `/vol1` 恢复到约 99 GB 可用、77% 使用率，生产数据库 `quick_check=ok`，没有损坏证据。
+- `/api/health` 继续只表示进程存活；`/api/ready` 新增输出盘与 SQLite 所在盘的相邻临时文件 write、flush、fsync、unlink 探针，并以 HTTP 503 表示任一依赖未就绪。
+- SQLite 探针使用 0.25 秒只读连接、`quick_check(1)`、schema v15 与 `users` 表校验；完整性成功结果按数据库文件签名缓存最长 5 分钟，存储组合结果缓存 5 秒。
+- readiness 使用独立 `CapacityLimiter(1)`，并发探针等待不占业务共享 worker；Dockerfile 与示例 Compose 的健康检查均改为 `/api/ready`。
+- 包版本、锁文件、镜像/Compose、README、静态页脚和四个静态资源缓存戳统一为 `0.1.67`；没有新增运行时依赖。
+
+### 自动化与评审
+
+- 最终提交快照执行 `./scripts/check.sh`：457 passed，Ruff 通过，Mypy 23 个源文件通过；唯一警告为既有 Starlette TestClient 弃用提示。
+- `node --check` 对 `static/app.js`、`static/logo-placement.mjs`、`static/responses-settings.mjs` 全部通过；`uv lock --check`、`git diff --check` 通过；`uvx pip-audit` 未发现已知漏洞。
+- 回归覆盖正常/损坏/未初始化 SQLite、业务表页损坏、数据库与输出盘不可写、fsync 失败清理、探针缓存、auth-enabled 健康路径、liveness 不触盘、HTTP 503 与 Docker 契约。
+- 独立 correctness/security 终审在修正真实写入证明、WAL/完整性语义和并发 worker 风险后复查通过，最终无阻断发布的 HIGH/MEDIUM。
+
+### 发版与部署
+
+- 发布 PR [#41](https://github.com/Minorli/picgen/pull/41) 的 `validate` 检查通过（2 分 14 秒），2026-07-18T08:29:22Z squash 合并；合并提交为 `034f27ec8ac1575969461c8ab04e43d3966a3ac4`。
+- 合并时仅临时摘除 `enforce_admins`；合并后立即恢复并复核：strict checks=true、必需检查 `validate`、审批数 1、enforce_admins=true、required conversation resolution=true。
+- 从合并后的 `main` 构建并推送 `minorli/picgen:0.1.67`。OCI 索引 digest 为 `sha256:9658389acaf8493c80df68bc7acb5c5b32d2df4bf09079399b17426abbcf0eb4`，amd64 manifest 为 `sha256:f7100730dd4f070743c3b1e1cbbb3bf9a1ca20adacb8025e8815830dda5ab5a3`。
+- 部署前使用运行中容器内的 SQLite backup API 做在线备份：`/vol1/data1/picgen/backups/auth-20260718-pre-0.1.67.sqlite3`，3,956,736 bytes，权限 600，`quick_check=ok`、schema 15、用户 15，SHA256 `18d5e5bc42287b1117924e0ebb61034125967ea80f03cce4c549bc949926f781`。
+- 原 Compose 备份为 `/vol1/data1/picgen/docker-compose.yml.bak-0.1.66`，SHA256 `a6f4c956c2f8ae92a72d6dab4314bfc57812e31d8f5b85ee68d00aa77c7fd4ba`。生产 Compose 最终只变更镜像 `0.1.66 -> 0.1.67` 与显式 healthcheck `/api/health -> /api/ready` 两行，新 SHA256 为 `799d46b64b05d2185050457cf8f113c268be81b7fd30509c70017408392f6f89`。
+- 最终容器于 2026-07-18T08:42:42Z 启动；持续观察至 08:48:37Z（355 秒），状态始终 running/healthy、重启数 0。Docker 每 30 秒实际请求 `/api/ready` 且全部 HTTP 200；最终响应为 `ok=true`、输出存储可写、数据库可写、上游客户端就绪、版本 0.1.67。
+- 首页 CSS/App、App 内两个模块与页脚缓存戳均为 0.1.67；生产数据库保持 `quick_check=ok`、schema 15、用户 15；两个挂载点没有遗留 readiness 临时文件。观察期日志无 ERROR/CRITICAL、Traceback 或 HTTP 5xx。
+- 本次修复不改变生图业务路径，部署验证没有调用付费上游；观察期内真实登录用户的配置、偏好、图库、任务、分享、聊天和历史图片读取均正常。
