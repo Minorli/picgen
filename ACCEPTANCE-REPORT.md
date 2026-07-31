@@ -259,3 +259,36 @@
 - 最终容器于 2026-07-18T08:42:42Z 启动；持续观察至 08:48:37Z（355 秒），状态始终 running/healthy、重启数 0。Docker 每 30 秒实际请求 `/api/ready` 且全部 HTTP 200；最终响应为 `ok=true`、输出存储可写、数据库可写、上游客户端就绪、版本 0.1.67。
 - 首页 CSS/App、App 内两个模块与页脚缓存戳均为 0.1.67；生产数据库保持 `quick_check=ok`、schema 15、用户 15；两个挂载点没有遗留 readiness 临时文件。观察期日志无 ERROR/CRITICAL、Traceback 或 HTTP 5xx。
 - 本次修复不改变生图业务路径，部署验证没有调用付费上游；观察期内真实登录用户的配置、偏好、图库、任务、分享、聊天和历史图片读取均正常。
+
+## 0.1.68 空结果提示与诊断发布记录
+
+记录时间：2026-07-31T14:56:46Z
+
+### 故障与修复
+
+- 生产 job 449（request ID `de557b9d3dd7`）的 Responses 流在约 148 秒后结束，共解析 13 个事件，但没有图片或文字，PicGen 按预期记录为 HTTP 502 / `upstream_no_image`；容器没有崩溃、重启或 OOM，磁盘与数据库均正常。
+- 全局错误映射此前把所有 `upstream_no_image` 都改写为“路线图 AI 底图这次没有生成成功”，导致普通 `/api/image-jobs` 海报任务收到误导文案。0.1.68 改为通用的“图片生成服务这次没有返回图片”，继续保留错误码和 request ID。
+- Responses 流日志新增最多 20 个去重事件类型、终态与上游错误码；三个上游可控字段先遮蔽 Key、token、组织 ID 等敏感内容再限长。只有真正没有图片和文字的流记为 WARNING，失败的 image tool 对象不再误判为文字输出。
+- 非幂等付费生图仍保持单次请求，不对空结果、HTTP 502、网络错误或超时自动重发，避免用户未确认时重复计费。
+- 版本、锁文件、镜像/Compose、README、静态页脚和四个静态资源缓存戳统一为 `0.1.68`；没有新增运行时依赖或数据库迁移。
+
+### 自动化与评审
+
+- 最终代码快照执行 `./scripts/check.sh`：459 passed，Ruff 通过，Mypy 23 个源文件通过；唯一警告为既有 Starlette TestClient 弃用提示。
+- `coverage` 对 `src/picgen` 的全量 459 项测试覆盖率为 88%，高于 80% 门槛；`responses.py` 覆盖率为 87%。
+- `node --check` 对 `static/app.js`、`static/logo-placement.mjs`、`static/responses-settings.mjs` 全部通过；`uv lock --check`、`git diff --check` 通过；`uvx pip-audit` 未发现已知漏洞。
+- 新增回归覆盖普通海报空结果的通用文案、request ID、单次上游调用、失败 job 与零图片记录，以及 SSE 终态、空流 WARNING、失败 tool 非文字判定和结构化 JSON 日志脱敏。
+- 独立代码审查发现并推动修正两个边界：结构化字段原先只截断未脱敏，以及失败 `image_generation_call` 可能误记 `has_text=true`；修正后无阻断 correctness/security 问题。
+- 本地正式镜像构建成功，以非 root `picgen` 用户启动；`/api/ready` 返回存储、数据库与上游客户端就绪，版本为 0.1.68，首页 CSS/App 缓存戳为 0.1.68。
+
+### 发版与部署
+
+- 发布 PR [#43](https://github.com/Minorli/picgen/pull/43) 的 `validate` 检查通过（2 分 12 秒），2026-07-31T14:46:06Z squash 合并；合并提交为 `729786270eee620a2976466cd4282e227406061c`。
+- 合并时仅临时关闭 `enforce_admins`；合并后立即恢复并复核：strict checks=true、必需检查 `validate`、审批数 1、enforce_admins=true、required conversation resolution=true。
+- 从合并后的 `main` 构建并推送 `minorli/picgen:0.1.68`。OCI 索引 digest 为 `sha256:b8999323010fdd81c205bacf39b8618de17b7f5fdbfb5cee36709a6a71cd9e08`，amd64 manifest 为 `sha256:355de2b1acb84ad84ddf8e7cc30f3dd61d7207c2c114b07f3cc7a86f3ebc42f8`。
+- 部署前使用 SQLite backup API 创建在线一致性备份 `/vol1/data1/picgen/backups/auth-20260731-pre-0.1.68.sqlite3`，4,198,400 bytes，权限 600，SHA256 为 `95eb2385cd7b342541e24a660ebad647653c41ebcb759967bd1f0cffe9f63f83`；`quick_check=ok`、schema 15、用户 15、任务 368、图片 359，与源库一致。
+- 原 Compose 备份为 `/vol1/data1/picgen/docker-compose.yml.bak-0.1.67`，SHA256 为 `799d46b64b05d2185050457cf8f113c268be81b7fd30509c70017408392f6f89`。生产 Compose 仅把镜像标签 `0.1.67 -> 0.1.68`，新 SHA256 为 `fb9fd2224245ef4bda5675eacaff85ecdada8bb59139033896a4ae7a1209bbf6`。
+- fnfarm 两次从 Docker Hub 拉取新镜像均在分层 image configuration 阶段因 EOF 失败，旧容器在此期间持续 healthy。改用已验收 amd64 镜像导出 tar 后经内网传输，源端与目标端 tar SHA256 均为 `fbdb15cf91897e2b99ec46d4a86b438e844ce35d94bfc66f5082f3ee20864824`；`docker load` 成功后才切换 Compose，临时 tar 已从两端清理。
+- 生产容器于 2026-07-31T14:53:39Z 启动，观察至 14:56:46Z（约 187 秒）：始终 running/healthy，重启数 0、OOM=false；Docker 每 30 秒请求 `/api/ready` 均为 HTTP 200，最终响应版本 0.1.68，输出存储、数据库写入与上游客户端全部就绪。
+- 生产数据库部署后仍为 `quick_check=ok`、schema 15、用户 15、任务 368、图片 359；日志无 ERROR/CRITICAL、Traceback 或 HTTP 5xx，`/vol1` 剩余约 72 GB，`/vol2` 剩余约 333 GB。
+- 生产无付费生图冒烟：本次修复覆盖错误提示与诊断日志，自动化、容器内函数验收和 readiness 足以验证交付；为避免无业务价值的额外扣费，没有重放 job 449，也没有创建临时用户或业务数据。
