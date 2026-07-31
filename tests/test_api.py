@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -19,6 +20,7 @@ from starlette.types import Scope
 
 from picgen.errors import APIError
 from picgen.itinerary_map import build_itinerary_map_plan, project_itinerary_points, render_itinerary_map_svg
+from picgen.logging_config import JsonFormatter
 from picgen.main import create_app
 from picgen.middleware import BodySizeLimitMiddleware
 from picgen.notifications import NotificationResult
@@ -1271,7 +1273,7 @@ def test_itinerary_map_render_reports_error_when_artwork_returns_text_without_im
     assert response.status_code == 502
     payload = response.json()
     assert payload["code"] == "upstream_no_image"
-    assert "路线图 AI 底图这次没有生成成功" in payload["error"]
+    assert "图片生成服务这次没有返回图片" in payload["error"]
     assert "I cannot generate" not in response.text
     assert fake.run_responses.await_count == 1
     assert not list(resolved.outputs_dir.rglob("*.svg"))
@@ -1512,7 +1514,7 @@ def test_itinerary_map_render_fails_when_artwork_payload_is_invalid(make_client,
     assert response.status_code == 502
     payload = response.json()
     assert payload["code"] == "upstream_no_image"
-    assert "没有生成成功" in payload["error"]
+    assert "图片生成服务这次没有返回图片" in payload["error"]
 
 
 @pytest.mark.parametrize(
@@ -3832,6 +3834,40 @@ def test_responses_sse_parser_keeps_partial_image() -> None:
 
     assert len(events) == 1
     assert payload["data"][0]["b64_json"] == TINY_PNG_B64
+
+
+def test_responses_empty_stream_logs_terminal_summary_without_error_message(caplog) -> None:
+    leaked_key = "sk-1234567890"
+    events = [
+        {"type": "response.created", "response": {"id": "resp_empty", "status": "in_progress"}},
+        {
+            "type": f"response.failed.{leaked_key}",
+            "response": {
+                "id": "resp_empty",
+                "status": f"failed {leaked_key}",
+                "error": {"code": f"server-error:{leaked_key}", "message": "sensitive upstream detail"},
+                "output": [{"type": "image_generation_call", "status": "failed"}],
+            },
+        },
+    ]
+
+    with caplog.at_level(logging.INFO, logger="picgen.upstream.responses"):
+        payload = stream_events_to_image_payload(
+            events,
+            url="https://api.openai.com/v1/responses",
+            started_at=0,
+        )
+
+    record = next(record for record in caplog.records if record.getMessage() == "upstream_responses_stream_ok")
+    formatted = JsonFormatter().format(record)
+    assert record.fields["event_types"] == ["response.created", "response.failed.sk-***"]
+    assert record.fields["response_status"] == "failed sk-***"
+    assert record.fields["response_error_code"] == "server-error:sk-***"
+    assert record.fields["has_text"] is False
+    assert record.levelno == logging.WARNING
+    assert leaked_key not in formatted
+    assert "sensitive upstream detail" not in record.getMessage()
+    assert payload["status"] == f"failed {leaked_key}"
 
 
 @pytest.mark.parametrize(

@@ -161,6 +161,56 @@ def test_image_job_routes_six_person_reference_to_responses(make_client, setting
     fake.run_multipart.assert_not_awaited()
 
 
+def test_image_job_empty_responses_result_uses_generic_error_and_records_one_failed_attempt(
+    make_client, settings_factory
+) -> None:
+    settings = settings_factory(
+        auth_enabled=True,
+        admin_password="correct horse battery admin",
+        default_api_key="sk-server",
+    )
+    client, fake, resolved = make_client(settings=settings)
+    assert client.post(
+        "/api/auth/register",
+        json={"username": "alice", "password": "correct horse battery"},
+    ).status_code == 200
+    fake.run_responses.return_value = {
+        "status": "completed",
+        "data": [],
+        "stream_events": [
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_empty", "status": "completed", "output": []},
+            }
+        ],
+    }
+
+    response = client.post(
+        "/api/image-jobs",
+        headers={"X-Request-ID": "rid-empty-poster"},
+        json={"prompt": "生成六人游长海报", "mode": "generate", "size": "1088x2240"},
+    )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["code"] == "upstream_no_image"
+    assert "图片生成服务这次没有返回图片" in payload["error"]
+    assert "路线图" not in payload["error"]
+    assert payload["request_id"] == "rid-empty-poster"
+    fake.run_responses.assert_awaited_once()
+    assert not list(resolved.outputs_dir.rglob("*"))
+
+    job = client.get("/api/jobs?limit=1").json()["jobs"][0]
+    assert job["status"] == "failed"
+    assert job["error_code"] == "upstream_no_image"
+    with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
+        image_count = conn.execute(
+            "SELECT COUNT(*) FROM generated_images WHERE job_id = ?",
+            (job["id"],),
+        ).fetchone()[0]
+    assert image_count == 0
+
+
 def test_responses_masked_edit_preserves_pixels_outside_mask(make_client, settings_factory) -> None:
     settings = settings_factory(default_api_key="sk-server", default_size="16x16")
     client, fake, _ = make_client(settings=settings)
