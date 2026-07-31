@@ -326,7 +326,7 @@ def _base_operational_message(exc: APIError) -> str:
     if exc.code == "upstream_image_too_large":
         return "上游返回的图片超过了大小限制，请降低尺寸或质量后重试。"
     if exc.code == "upstream_no_image":
-        return "路线图 AI 底图这次没有生成成功，请稍后再试。"
+        return "图片生成服务这次没有返回图片，请稍后再试。"
     if exc.code == "upstream_blocked":
         return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
     if exc.code == "upstream_error":
