@@ -217,9 +217,11 @@ def _responses_reasoning_options(
     *,
     default_model: str = DEFAULT_RESPONSES_MODEL,
 ) -> dict[str, dict[str, str]]:
-    supported_models = {DEFAULT_RESPONSES_MODEL, default_model.strip()}
+    supported_models = {DEFAULT_RESPONSES_MODEL, "gpt-5.6-sol", default_model.strip()}
     if model.strip() not in supported_models:
         return {}
+    if model.strip() == "gpt-6-astra" and reasoning_effort == "ultra":
+        reasoning_effort = "max"
     return {"reasoning": {"effort": reasoning_effort}}
 
 
@@ -1390,7 +1392,7 @@ async def _generate_itinerary_artwork(
     )
     content = [{"type": "input_text", "text": append_restricted_destination_guard(prompt)}, *image_content]
 
-    tool: dict[str, Any] = {"type": "image_generation"}
+    tool: dict[str, Any] = {"type": "image_generation", "model": settings.default_model}
     tool["size"] = output_size
     upstream_payload: dict[str, Any] = {
         "model": model,
@@ -5010,7 +5012,7 @@ async def handle_responses_image(
         requested_reasoning_effort,
         default_model=settings.default_responses_model,
     )
-    reasoning_effort = requested_reasoning_effort if reasoning_options else ""
+    reasoning_effort = reasoning_options.get("reasoning", {}).get("effort", "")
 
     _ensure_no_restricted_destination_text(parsed.prompt)
     itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
@@ -5058,7 +5060,7 @@ async def handle_responses_image(
                 )
                 break
 
-    tool: dict[str, Any] = {"type": "image_generation"}
+    tool: dict[str, Any] = {"type": "image_generation", "model": settings.default_model}
     if size and size != "auto":
         tool["size"] = size
     for key in ("quality", "background", "output_format", "output_compression", "moderation"):

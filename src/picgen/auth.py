@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_RESPONSES_MODEL, LEGACY_DEFAULT_RESPONSES_MODEL
+from .config import LEGACY_DEFAULT_RESPONSES_MODEL
 from .storage import storage_is_writable
 
 _HASH_NAME = "pbkdf2_sha256"
@@ -4139,7 +4139,7 @@ class AuthStore:
                 SET default_responses_model = ?, updated_at = ?
                 WHERE default_responses_model = ?
                 """,
-                (DEFAULT_RESPONSES_MODEL, now, LEGACY_DEFAULT_RESPONSES_MODEL),
+                ("gpt-5.6-sol", now, LEGACY_DEFAULT_RESPONSES_MODEL),
             )
             conn.execute(
                 """

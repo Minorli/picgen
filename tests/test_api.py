@@ -171,7 +171,7 @@ def test_config_reports_api_key_presence_without_leaking_value(make_client, sett
     payload = response.json()
     assert payload["has_default_api_key"] is True
     assert payload["responses_url"] == "https://sub.tidba.com/v1/responses"
-    assert payload["default_responses_model"] == "gpt-5.6-sol"
+    assert payload["default_responses_model"] == "gpt-6-astra"
     assert payload["default_responses_reasoning_effort"] == "xhigh"
     assert payload["default_size"] == "1088x2240"
     assert payload["allow_anonymous_execution_overrides"] is True
@@ -1191,7 +1191,7 @@ def test_itinerary_map_render_saves_integrated_ai_artwork_with_geometry_control(
     assert fake.run_file_upload.await_args.args[2]["content_type"] == "image/png"
     upstream_payload = fake.run_responses.await_args.args[2]
     assert fake.run_responses.await_args.args[1] == "sk-test"
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert upstream_payload["parallel_tool_calls"] is False
     assert "max_tool_calls" not in upstream_payload
@@ -1678,7 +1678,7 @@ def test_itinerary_map_render_uses_ai_approximate_coordinates_when_geocoder_fail
     assert payload["plan"]["stops"][1]["lng"] == 12.4964
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert "可解析 JSON" in upstream_payload["instructions"]
     assert "经纬度" in upstream_payload["instructions"]
@@ -2876,9 +2876,9 @@ def test_responses_image_v3_client_legacy_model_is_normalized(make_client, setti
     )
 
     assert response.status_code == 200
-    assert response.json()["model"] == "gpt-5.6-sol"
+    assert response.json()["model"] == "gpt-6-astra"
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
 
 
@@ -2908,7 +2908,7 @@ def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "reference"
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "gpt-6-astra"
     assert payload["saved_image_url"].startswith("files/outputs/")
     assert (Path(payload["saved_image_path"])).is_file()
     fake.run_responses.assert_awaited_once()
@@ -2919,7 +2919,10 @@ def test_responses_image_v4_legacy_model_is_normalized_and_saves_streamed_image(
     assert upstream_payload["parallel_tool_calls"] is False
     assert "max_tool_calls" not in upstream_payload
     assert upstream_payload["tool_choice"] == {"type": "image_generation"}
-    assert upstream_payload["tools"] == [{"type": "image_generation", "size": "1088x2240", "quality": "high"}]
+    assert upstream_payload["tools"] == [{
+        "type": "image_generation", "model": "gpt-image-2.5-sunburst",
+        "size": "1088x2240", "quality": "high",
+    }]
 
 
 def test_responses_reasoning_follows_configured_default_model_only(
@@ -3292,10 +3295,10 @@ def test_copyright_risk_normalizes_gpt55_and_uses_inline_images(make_client, set
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "gpt-6-astra"
     assert "风险等级：低" in payload["risk_text"]
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"]["effort"] == "xhigh"
     assert "版权" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
@@ -3340,7 +3343,7 @@ def test_text_fidelity_check_uses_required_and_forbidden_phrases(make_client, se
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "gpt-6-astra"
     assert payload["passed"] is False
     assert "铁煎章鱼" in payload["fidelity_text"]
     upstream_payload = fake.run_responses.await_args.args[2]

@@ -75,7 +75,7 @@ def test_image_job_routes_native_text_generation_to_images(make_client, settings
     assert response.status_code == 200
     payload = response.json()
     assert payload["transport"] == "images-generate"
-    assert payload["model"] == "gpt-image-2"
+    assert payload["model"] == "gpt-image-2.5-sunburst"
     assert payload["reasoning_effort"] == ""
     fake.run_json.assert_awaited_once()
     fake.run_multipart.assert_not_awaited()
@@ -101,7 +101,7 @@ def test_image_job_routes_native_reference_to_images_edit(make_client, settings_
     assert response.status_code == 200
     payload = response.json()
     assert payload["transport"] == "images-edit"
-    assert payload["model"] == "gpt-image-2"
+    assert payload["model"] == "gpt-image-2.5-sunburst"
     fake.run_multipart.assert_awaited_once()
     fake.run_json.assert_not_awaited()
     fake.run_responses.assert_not_awaited()
@@ -126,10 +126,10 @@ def test_image_job_routes_six_person_size_to_responses(make_client, settings_fac
     assert response.status_code == 200
     payload = response.json()
     assert payload["transport"] == "responses-image"
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "gpt-6-astra"
     assert payload["reasoning_effort"] == "high"
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"] == {"effort": "high"}
     fake.run_json.assert_not_awaited()
     fake.run_multipart.assert_not_awaited()
@@ -743,7 +743,7 @@ def test_failed_old_responses_job_keeps_requested_reasoning_effort(
 
     job = client.get("/api/jobs?limit=1").json()["jobs"][0]
     assert job["status"] == "failed"
-    assert job["model"] == "gpt-5.6-sol"
+    assert job["model"] == "gpt-6-astra"
     assert job["transport"] == "responses-image"
     assert job["reasoning_effort"] == "low"
 
@@ -776,7 +776,7 @@ def test_image_job_records_actual_execution_metadata(make_client, settings_facto
     job = jobs_response.json()["jobs"][0]
     assert job["endpoint_path"] == "/api/image-jobs"
     assert job["transport"] == "responses-image"
-    assert job["model"] == "gpt-5.6-sol"
+    assert job["model"] == "gpt-6-astra"
     assert job["reasoning_effort"] == "xhigh"
 
     with sqlite3.connect(resolved.resolved_auth_db_path) as conn:
@@ -784,7 +784,7 @@ def test_image_job_records_actual_execution_metadata(make_client, settings_facto
             "SELECT model FROM generated_images WHERE job_id = ?",
             (job["id"],),
         ).fetchone()
-    assert image_model == ("gpt-5.6-sol",)
+    assert image_model == ("gpt-6-astra",)
 
 
 def test_failed_image_job_keeps_resolved_execution_metadata(make_client, settings_factory) -> None:
@@ -817,5 +817,5 @@ def test_failed_image_job_keeps_resolved_execution_metadata(make_client, setting
     job = jobs_response.json()["jobs"][0]
     assert job["status"] == "failed"
     assert job["transport"] == "responses-image"
-    assert job["model"] == "gpt-5.6-sol"
+    assert job["model"] == "gpt-6-astra"
     assert job["reasoning_effort"] == "xhigh"

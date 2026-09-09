@@ -15,7 +15,7 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 ResponsesReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
-DEFAULT_RESPONSES_MODEL = "gpt-5.6-sol"
+DEFAULT_RESPONSES_MODEL = "gpt-6-astra"
 RESPONSES_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 DEFAULT_RESPONSES_REASONING_EFFORT: ResponsesReasoningEffort = "xhigh"
 LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     default_generate_url: str = "https://sub.tidba.com/v1/images/generations"
     default_edit_url: str = "https://sub.tidba.com/v1/images/edits"
     default_responses_url: str = "https://sub.tidba.com/v1/responses"
-    default_model: str = "gpt-image-2"
+    default_model: str = "gpt-image-2.5-sunburst"
     default_responses_model: str = DEFAULT_RESPONSES_MODEL
     default_responses_reasoning_effort: ResponsesReasoningEffort = (
         DEFAULT_RESPONSES_REASONING_EFFORT

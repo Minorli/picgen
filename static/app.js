@@ -4,14 +4,15 @@ import {
   chooseLogoPlacement,
   createLogoPreservationDiagnostic,
   scaleLogoDetectionPlacements,
-} from "./logo-placement.mjs?v=0.1.68"
+} from "./logo-placement.mjs?v=0.1.69"
 import {
   DEFAULT_RESPONSES_MODEL,
+  migrateStoredImageModel,
   RESPONSES_MODEL_STORAGE_VERSION,
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.68"
+} from "./responses-settings.mjs?v=0.1.69"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -6702,7 +6703,7 @@ async function restoreWorkspaceState() {
   restoreSimpleDraft(snapshot.simpleDraft)
   state.generateIntent = snapshot.generateIntent === "variant" ? "variant" : "fresh"
   refs.generatePromptInput.value = forms.generatePrompt || ""
-  refs.generateModelInput.value = forms.generateModel || state.serverConfig.default_model || "gpt-image-2"
+  refs.generateModelInput.value = migrateStoredImageModel(forms.generateModel, state.serverConfig.default_model)
   refs.generateWidthInput.value = forms.generateWidth || ""
   refs.generateHeightInput.value = forms.generateHeight || ""
   refs.generateSizePreset.value = forms.generateSizePreset || "custom"
@@ -6744,7 +6745,7 @@ async function restoreWorkspaceState() {
   }
 
   refs.editPromptInput.value = forms.editPrompt || ""
-  refs.editModelInput.value = forms.editModel || state.serverConfig.default_model || "gpt-image-2"
+  refs.editModelInput.value = migrateStoredImageModel(forms.editModel, state.serverConfig.default_model)
   const currentResponsesModel = normalizeResponsesModel(refs.responsesModelInput.value)
   const workspaceResponsesSettings = migrateStoredResponsesReasoningSettings(
     migrateStoredResponsesSettings(
@@ -7197,8 +7198,8 @@ function loadSettings() {
     local.responsesModel || prefs.default_responses_model || state.serverConfig.default_responses_model,
   )
 
-  refs.generateModelInput.value = local.generateModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
-  refs.editModelInput.value = local.editModel || prefs.default_model || state.serverConfig.default_model || "gpt-image-2"
+  refs.generateModelInput.value = migrateStoredImageModel(local.generateModel || prefs.default_model, state.serverConfig.default_model)
+  refs.editModelInput.value = migrateStoredImageModel(local.editModel || prefs.default_model, state.serverConfig.default_model)
   updateResponsesReasoningDefaultOption()
   refs.responsesReasoningEffortSelect.value = local.responsesReasoningEffort || ""
   setGenerateSize(prefs.default_size || state.serverConfig.default_size || "auto")
@@ -7583,7 +7584,7 @@ function updateGenerateSampleCountUI() {
 
 function normalizeResponsesModel(value) {
   const model = String(value || "").trim()
-  if (!model || DEPRECATED_RESPONSES_MODELS.has(model)) {
+  if (!model || model === "gpt-5.6-sol" || model === "gpt-5.5" || DEPRECATED_RESPONSES_MODELS.has(model)) {
     return state.serverConfig?.default_responses_model || DEFAULT_RESPONSES_MODEL
   }
   return model
@@ -7809,7 +7810,7 @@ function applyFormSnapshot(snapshot) {
     refs.promptRecipeSelect.value = state.selectedRecipeId
   }
   refs.generatePromptInput.value = snapshot.generatePrompt || ""
-  refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2"
+  refs.generateModelInput.value = snapshot.generateModel || state.serverConfig?.default_model || "gpt-image-2.5-sunburst"
   if (Object.hasOwn(snapshot, "generateWidth") || Object.hasOwn(snapshot, "generateHeight")) {
     refs.generateWidthInput.value = snapshot.generateWidth || ""
     refs.generateHeightInput.value = snapshot.generateHeight || ""
@@ -7851,7 +7852,7 @@ function applyFormSnapshot(snapshot) {
     refs.itineraryIdInput.value = snapshot.itineraryId || ""
   }
   refs.editPromptInput.value = snapshot.editPrompt || ""
-  refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2"
+  refs.editModelInput.value = snapshot.editModel || state.serverConfig?.default_model || "gpt-image-2.5-sunburst"
   setGenerateIntent(snapshot.generateIntent || "fresh")
   setMode(snapshot.activeMode || "generate", { autoLoadLatest: false })
   updateLogoControlUI()
@@ -11341,7 +11342,7 @@ function confirmClearEditForm() {
 
 function clearGenerateForm() {
   refs.generatePromptInput.value = ""
-  refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2"
+  refs.generateModelInput.value = state.serverConfig.default_model || "gpt-image-2.5-sunburst"
   restoreCreativeBrief({})
   clearGenerateReferenceImage()
   setGenerateSize(state.serverConfig.default_size || "auto")
@@ -11371,7 +11372,7 @@ function clearGenerateForm() {
 
 function clearEditForm() {
   refs.editPromptInput.value = ""
-  refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2"
+  refs.editModelInput.value = state.serverConfig.default_model || "gpt-image-2.5-sunburst"
   refs.editImageInput.value = ""
   clearEditMaskImage()
   updatePromptCounters()
@@ -12327,7 +12328,7 @@ async function init() {
   } catch {
     refs.settingsHint.textContent = "无法读取服务端默认配置，但你仍然可以手动填写全部参数。"
     state.serverConfig = {
-      default_model: "gpt-image-2",
+      default_model: "gpt-image-2.5-sunburst",
       default_responses_model: DEFAULT_RESPONSES_MODEL,
       default_responses_reasoning_effort: DEFAULT_RESPONSES_REASONING_EFFORT,
       default_size: "1088x2240",

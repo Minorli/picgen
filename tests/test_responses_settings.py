@@ -10,6 +10,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 def _run_settings_migration(expression: str) -> object:
     script = f"""
 import {{
+  migrateStoredImageModel,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
 }} from './static/responses-settings.mjs'
@@ -34,7 +35,7 @@ def test_v3_legacy_model_is_migrated_again_without_losing_other_settings() -> No
 
     assert result == {
         "responsesModel": "gpt-5.6-sol",
-        "responsesModelStorageVersion": 4,
+        "responsesModelStorageVersion": 5,
         "imageTransport": "responses",
     }
 
@@ -50,7 +51,7 @@ def test_v4_legacy_model_is_always_migrated() -> None:
 
     assert result == {
         "sameObject": False,
-        "migrated": {"responsesModel": "gpt-5.6-sol", "responsesModelStorageVersion": 4},
+        "migrated": {"responsesModel": "gpt-5.6-sol", "responsesModelStorageVersion": 5},
     }
 
 
@@ -62,8 +63,8 @@ def test_legacy_runtime_default_cannot_restore_legacy_model() -> None:
     )
 
     assert result == {
-        "responsesModel": "gpt-5.6-sol",
-        "responsesModelStorageVersion": 4,
+        "responsesModel": "gpt-6-astra",
+        "responsesModelStorageVersion": 5,
     }
 
 
@@ -76,7 +77,7 @@ def test_legacy_workspace_model_uses_current_custom_model() -> None:
 
     assert result == {
         "responsesModel": "custom-responses-model",
-        "responsesModelStorageVersion": 4,
+        "responsesModelStorageVersion": 5,
     }
 
 
@@ -89,7 +90,7 @@ def test_v3_custom_model_is_preserved_while_advancing_storage_version() -> None:
 
     assert result == {
         "responsesModel": "custom-image-model",
-        "responsesModelStorageVersion": 4,
+        "responsesModelStorageVersion": 5,
     }
 
 
@@ -134,3 +135,14 @@ def test_legacy_explicit_nondefault_reasoning_is_preserved() -> None:
         "responsesReasoningEffort": "high",
         "responsesReasoningStorageVersion": 1,
     }
+
+
+def test_previous_default_models_follow_new_defaults_without_changing_custom_ids() -> None:
+    result = _run_settings_migration(
+        "({ images: [migrateStoredImageModel('gpt-image-2'), "
+        "migrateStoredImageModel('custom-image')], "
+        "responses: migrateStoredResponsesSettings({responsesModel: 'gpt-5.6-sol', "
+        "responsesModelStorageVersion: 4}) })"
+    )
+    assert result["images"] == ["gpt-image-2.5-sunburst", "custom-image"]
+    assert result["responses"]["responsesModel"] == "gpt-6-astra"

@@ -463,7 +463,7 @@ def test_responses_channel_reinforces_size_in_prompt(make_client, settings_facto
 
     assert response.status_code == 200
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"]["effort"] == "xhigh"
     input_text = upstream_payload["input"][0]["content"][0]["text"]
     assert "画布尺寸要求" in input_text
