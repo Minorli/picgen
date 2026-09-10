@@ -1827,7 +1827,7 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     assert update_response.status_code == 200
     preferences = update_response.json()["preferences"]
     assert preferences["default_model"] == "gpt-image-2"
-    assert preferences["default_responses_model"] == "gpt-5.6-sol"
+    assert preferences["default_responses_model"] == "gpt-6-astra"
     assert preferences["default_size"] == "1088x2240"
     assert preferences["default_quality"] == "high"
     assert preferences["default_output_format"] == "webp"
@@ -1842,7 +1842,7 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     )
     assert manual_response.status_code == 200
     preferences = manual_response.json()["preferences"]
-    assert preferences["default_responses_model"] == "gpt-5.6-sol"
+    assert preferences["default_responses_model"] == "gpt-6-astra"
 
     manual_response = client.put(
         "/api/preferences",
@@ -1850,7 +1850,7 @@ def test_user_preferences_are_persisted_without_api_key(make_client, settings_fa
     )
     assert manual_response.status_code == 200
     preferences = manual_response.json()["preferences"]
-    assert preferences["default_responses_model"] == "gpt-5.6-sol"
+    assert preferences["default_responses_model"] == "gpt-6-astra"
 
     custom_response = client.put(
         "/api/preferences",
@@ -2193,7 +2193,7 @@ def test_result_share_flow_between_users(make_client, settings_factory):
     assert shares[0]["generated_image_id"] == generated["generated_image_id"]
     assert shares[0]["prompt"] == "生成一张旅行海报"
     assert shares[0]["mode"] == "generate"
-    assert shares[0]["model"] == "gpt-image-2"
+    assert shares[0]["model"] == "gpt-image-2.5-sunburst"
     assert shares[0]["saved_image_url"] == generated["saved_image_url"]
 
     alice_inbox = client.get("/api/shares/inbox")
@@ -2214,7 +2214,7 @@ def test_result_share_flow_between_users(make_client, settings_factory):
     assert inbox[0]["sender_username"] == "alice"
     assert inbox[0]["prompt"] == "生成一张旅行海报"
     assert inbox[0]["mode"] == "generate"
-    assert inbox[0]["model"] == "gpt-image-2"
+    assert inbox[0]["model"] == "gpt-image-2.5-sunburst"
     assert inbox[0]["saved_image_url"] == generated["saved_image_url"]
     assert inbox[0]["generated_image_id"] == generated["generated_image_id"]
 
@@ -2639,7 +2639,7 @@ def test_team_chat_group_mentions_bot_and_tracks_unread(make_client, settings_fa
     assert team_messages[1]["content"].startswith("@alice ")
     fake.run_responses.assert_awaited_once()
     upstream_payload = fake.run_responses.await_args.args[2]
-    assert upstream_payload["model"] == "gpt-5.6-sol"
+    assert upstream_payload["model"] == "gpt-6-astra"
     assert upstream_payload["reasoning"] == {"effort": "xhigh"}
     assert "GPT-BOT" in upstream_payload["instructions"]
     assert "中文" in upstream_payload["instructions"]
