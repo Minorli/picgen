@@ -413,3 +413,11 @@
 - 保留首次 LOGO 成品通知及顺序重复保存去重行为；通知只取白名单字段并脱敏，不发送提示词、图片路径或完整元数据。
 - 新回归覆盖原生成与保存上下文分离、请求/成品尺寸不同、多候选计数、历史缺失、真实路由重复保存一次通知、模型元数据保留及跨用户读取拒绝；独立代码审查通过。
 - 本次验证不重放用户生图，不发送或修改真实 TG 消息。冻结代码执行 `./scripts/check.sh`：**619 passed**（107.13 秒），Ruff、Mypy 23 个文件通过；JS 语法、锁文件检查及依赖漏洞扫描通过。部署结果完成后补充。
+
+### 发布与生产验收
+
+- 发布提交 `e2081d4bfabd9e939762f755beb9043fbd0af134`，[GitHub CI](https://github.com/Minorli/picgen/actions/runs/38030256644) 通过；[Release v0.1.72](https://github.com/Minorli/picgen/releases/tag/v0.1.72) 和 Docker Hub `minorli/picgen:0.1.72` 已发布。镜像摘要 `sha256:720d8dc7f8740de594efd80bf92155f6cd14402b935a4276339dba43cc87a85e`，fnfarm 拉取一致。
+- 部署前确认无进行中任务，并在线备份 SQLite `/vol1/data1/picgen/backups/auth-20261010T061757Z-pre-0.1.72.sqlite3`，SHA256 `3db3abb749dd39093a99a5dd0dab3a42853e27bfd24ae8b389f6c06f7701a9db`；Compose 备份 `/vol1/data1/picgen/docker-compose.yml.bak-20261010T061757Z-pre-0.1.72`。
+- 生产于 `2026-10-10T06:17:58Z` 启动，观察到 `06:19:09Z`：healthy、重启数 0、无 WARNING/ERROR；注册仍开启。数据库前后均为 16 个用户、392 个任务、382 条图片记录，`quick_check=ok`。
+- 在已部署容器中读取 #474 / 图片 #471，仅调用消息组装函数、不调用发送函数，确认原请求 `e5dbfece16d0`、生图 132.7 秒、请求/成品 `1088x2240`、实际/请求 1 张；历史图像模型未记录时正确显示未知。未补写历史模型字段或重发旧 TG。
+- 本地验收容器已清理；PR #46 更新至 0.1.72，继续待独立批准后合并，主分支保护保持启用。
