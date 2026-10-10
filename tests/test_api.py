@@ -3854,14 +3854,14 @@ def test_responses_empty_stream_logs_terminal_summary_without_error_message(capl
         },
     ]
 
-    with caplog.at_level(logging.INFO, logger="picgen.upstream.responses"):
-        payload = stream_events_to_image_payload(
+    with caplog.at_level(logging.INFO, logger="picgen.upstream.responses"), pytest.raises(APIError) as info:
+        stream_events_to_image_payload(
             events,
             url="https://api.openai.com/v1/responses",
             started_at=0,
         )
 
-    record = next(record for record in caplog.records if record.getMessage() == "upstream_responses_stream_ok")
+    record = next(record for record in caplog.records if record.getMessage() == "upstream_responses_stream_error")
     formatted = JsonFormatter().format(record)
     assert record.fields["event_types"] == ["response.created", "response.failed.sk-***"]
     assert record.fields["response_status"] == "failed sk-***"
@@ -3870,7 +3870,8 @@ def test_responses_empty_stream_logs_terminal_summary_without_error_message(capl
     assert record.levelno == logging.WARNING
     assert leaked_key not in formatted
     assert "sensitive upstream detail" not in record.getMessage()
-    assert payload["status"] == f"failed {leaked_key}"
+    assert info.value.code == "upstream_error"
+    assert leaked_key not in (info.value.details or "")
 
 
 @pytest.mark.parametrize(

@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
@@ -2732,16 +2732,23 @@ def create_router() -> APIRouter:
 
     @router.get("/api/jobs")
     async def generation_jobs(
-        limit: int = 30,
+        limit: int = Query(default=30, ge=1, le=100),
+        before_id: int | None = Query(default=None, ge=1, le=9_223_372_036_854_775_807),
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         jobs = await anyio.to_thread.run_sync(
-            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit)
+            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit + 1, before_id=before_id)
         )
-        return {"scope": "self", "count": len(jobs), "jobs": jobs}
+        page = jobs[:limit]
+        return {
+            "scope": "self",
+            "count": len(page),
+            "jobs": page,
+            "next_before_id": page[-1]["id"] if len(jobs) > limit else None,
+        }
 
     @router.get("/api/generated-images/{generated_image_id}")
     async def generated_image_detail(
@@ -4614,15 +4621,27 @@ async def _with_timing(
                     image_records=image_records,
                     elapsed_ms=elapsed_ms,
                 )
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.record_usage(
-                    user_id=user.id,
-                    endpoint_path=path,
-                    mode=str(result.get("mode") or ""),
-                    image_count=_result_image_count(result),
-                    saved_bytes=_result_saved_bytes(result),
+            try:
+                await anyio.to_thread.run_sync(
+                    lambda: auth_store.record_usage(
+                        user_id=user.id,
+                        endpoint_path=path,
+                        mode=str(result.get("mode") or ""),
+                        image_count=_result_image_count(result),
+                        saved_bytes=_result_saved_bytes(result),
+                    )
                 )
-            )
+            except Exception as usage_exc:
+                # The paid result and job are already saved. A secondary usage
+                # counter failure must not turn them into a failed generation.
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "generation_usage_record_failed",
+                    path=path,
+                    job_id=job_id,
+                    error=type(usage_exc).__name__,
+                )
         if generation_alert is not None and _should_send_generation_success_alert(generation_alert):
             _spawn_notification_task(_send_generation_success_alert(settings, generation_alert))
     except APIError as exc:
@@ -4660,7 +4679,7 @@ async def _with_timing(
         raise
     except Exception as exc:
         error_code = type(exc).__name__
-        error_message = str(exc)
+        error_message = "本地服务发生未预期错误，请联系管理员并提供 request_id。"
         if auth_store is not None and job_id is not None:
             try:
                 await anyio.to_thread.run_sync(

@@ -4,7 +4,7 @@ import {
   chooseLogoPlacement,
   createLogoPreservationDiagnostic,
   scaleLogoDetectionPlacements,
-} from "./logo-placement.mjs?v=0.1.69"
+} from "./logo-placement.mjs?v=0.1.70"
 import {
   DEFAULT_RESPONSES_MODEL,
   migrateStoredImageModel,
@@ -12,7 +12,7 @@ import {
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.69"
+} from "./responses-settings.mjs?v=0.1.70"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -79,7 +79,7 @@ const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
-const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
+const UPSTREAM_RETRY_HINT = "等待上游响应中。仅连接建立失败时后台会自动重试；请求已提交后的超时、断流或接口错误不会自动重发，避免重复生成。第几次重试以最终错误详情或服务端日志为准。"
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -232,6 +232,9 @@ const state = {
   gallerySearchTimer: null,
   generatedImageDetailRequestSeq: 0,
   generationJobs: [],
+  generationJobsRequestSeq: 0,
+  generationJobsNextBeforeId: null,
+  generationJobsLoading: false,
   currentGalleryMeta: {
     generatedImageId: null,
     isFavorite: false,
@@ -399,6 +402,7 @@ const refs = {
   galleryEmpty: document.querySelector("#galleryEmpty"),
   refreshGalleryButton: document.querySelector("#refreshGalleryButton"),
   refreshJobsButton: document.querySelector("#refreshJobsButton"),
+  loadMoreJobsButton: document.querySelector("#loadMoreJobsButton"),
   jobCenterList: document.querySelector("#jobCenterList"),
   jobCenterEmpty: document.querySelector("#jobCenterEmpty"),
   gallerySearchInput: document.querySelector("#gallerySearchInput"),
@@ -948,6 +952,9 @@ function enterPasswordResetConfirm(token) {
 
 function invalidateUserContext() {
   state.userContextEpoch += 1
+  state.generationJobsNextBeforeId = null
+  state.generationJobsLoading = false
+  renderGenerationJobsPagination()
   invalidateLatestFileReads()
   state.activeRequestCancelled = true
   state.activeRequestController?.abort()
@@ -3748,6 +3755,7 @@ async function submitAIItineraryMap() {
       return
     }
     appendDebugLine("行程路线生成失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.code === "itinerary_coordinates_required") {
       setError(itineraryCoordinateHelpText(), error.details)
     } else {
@@ -4073,6 +4081,8 @@ async function refreshSharedResults() {
 }
 
 function resetReviewStateForExternalResult() {
+  // Historical/shared images do not carry the current form's replay snapshot.
+  state.lastRegenerationRequest = null
   state.resultGenerationSeq += 1
   state.copyrightRiskRequestSeq += 1
   state.textFidelityRequestSeq += 1
@@ -4414,7 +4424,7 @@ function renderGenerationJobs(jobs = state.generationJobs) {
   }
   refs.jobCenterList.replaceChildren()
   refs.jobCenterEmpty.classList.toggle("hidden", state.generationJobs.length > 0)
-  state.generationJobs.slice(0, 8).forEach((job) => {
+  state.generationJobs.forEach((job) => {
     const item = document.createElement("article")
     item.className = `job-center-item ${job.status === "failed" ? "failed" : ""}`
     const thumb = document.createElement("button")
@@ -4471,21 +4481,71 @@ function renderGenerationJobs(jobs = state.generationJobs) {
   })
 }
 
-async function refreshGenerationJobs() {
+function renderGenerationJobsPagination({ failed = false } = {}) {
+  if (!refs.loadMoreJobsButton) {
+    return
+  }
+  refs.loadMoreJobsButton.classList.toggle("hidden", !state.generationJobsNextBeforeId)
+  refs.loadMoreJobsButton.disabled = Boolean(state.generationJobsLoading)
+  refs.loadMoreJobsButton.textContent = state.generationJobsLoading
+    ? "正在加载…"
+    : failed ? "加载失败，点击重试" : "加载更早任务"
+}
+
+async function refreshGenerationJobs({ append = false } = {}) {
   if (!state.currentUser || !refs.jobCenterList) {
     return
   }
+  if (append && (!state.generationJobsNextBeforeId || state.generationJobsLoading)) {
+    return
+  }
+  const requestUserContextEpoch = state.userContextEpoch
+  const requestSeq = (state.generationJobsRequestSeq || 0) + 1
+  state.generationJobsRequestSeq = requestSeq
+  state.generationJobsLoading = true
+  renderGenerationJobsPagination()
+  const requestIsCurrent = () => (
+    requestSeq === state.generationJobsRequestSeq
+    && requestUserContextEpoch === state.userContextEpoch
+  )
+  const url = append
+    ? `/api/jobs?limit=20&before_id=${encodeURIComponent(state.generationJobsNextBeforeId)}`
+    : "/api/jobs?limit=20"
+  let failed = false
   try {
-    const { response, data } = await fetchJSON("/api/jobs?limit=20", { cache: "no-store" })
-    if (response.ok) {
-      renderGenerationJobs(data.jobs)
+    const { response, data } = await fetchJSON(url, { cache: "no-store" })
+    if (!requestIsCurrent()) {
       return
     }
+    if (response.ok) {
+      const incomingJobs = Array.isArray(data.jobs) ? data.jobs : []
+      const jobs = append ? [...state.generationJobs, ...incomingJobs] : incomingJobs
+      const seenIds = new Set()
+      const uniqueJobs = jobs.filter((job) => {
+        if (seenIds.has(job.id)) return false
+        seenIds.add(job.id)
+        return true
+      })
+      const nextBeforeId = Number(data.next_before_id)
+      state.generationJobsNextBeforeId = Number.isSafeInteger(nextBeforeId) && nextBeforeId > 0
+        ? nextBeforeId : null
+      renderGenerationJobs(uniqueJobs)
+      return
+    }
+    failed = true
   } catch (error) {
     if (error?.staleUserContext) {
       return
     }
-    // handled below
+    failed = true
+  } finally {
+    if (requestIsCurrent()) {
+      state.generationJobsLoading = false
+      renderGenerationJobsPagination({ failed })
+    }
+  }
+  if (!requestIsCurrent() || append) {
+    return
   }
   refs.jobCenterList.innerHTML = '<p class="empty-history">任务中心暂时不可用。</p>'
   refs.jobCenterEmpty?.classList.add("hidden")
@@ -6251,8 +6311,9 @@ async function submitAuthForm(event) {
     }
     setCurrentUser(data.user)
     refs.authPasswordInput.value = ""
-    await startAuthenticatedApp()
-    enterAppShell()
+    if (await startAuthenticatedApp()) {
+      enterAppShell()
+    }
   } catch {
     refs.authError.textContent = "网络连接错误"
   } finally {
@@ -6430,6 +6491,11 @@ function resetWorkspaceForUserScope() {
   state.rerunExecutionSnapshot = null
   state.galleryRequestSeq = (state.galleryRequestSeq || 0) + 1
   state.generatedImageDetailRequestSeq += 1
+  state.generationJobsRequestSeq = (state.generationJobsRequestSeq || 0) + 1
+  state.generationJobsNextBeforeId = null
+  state.generationJobsLoading = false
+  renderGenerationJobs([])
+  renderGenerationJobsPagination()
   state.galleryItems = []
   state.sharedResults = []
   renderGalleryItems([])
@@ -10898,6 +10964,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       return
     }
     appendDebugLine("延展请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11127,6 +11194,7 @@ async function submitGenerate() {
       return
     }
     appendDebugLine("生成请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11278,6 +11346,7 @@ async function submitEdit() {
       return
     }
     appendDebugLine("编辑请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11788,7 +11857,8 @@ function bindEvents() {
   bindSharedResultsList(refs.sharedResultsList)
   bindSharedResultsList(refs.simpleSharedResultsList)
   refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
-  refs.refreshJobsButton?.addEventListener("click", refreshGenerationJobs)
+  refs.refreshJobsButton?.addEventListener("click", () => void refreshGenerationJobs())
+  refs.loadMoreJobsButton?.addEventListener("click", () => void refreshGenerationJobs({ append: true }))
   refs.gallerySearchInput?.addEventListener("input", () => {
     window.clearTimeout(state.gallerySearchTimer)
     state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
@@ -12351,22 +12421,34 @@ async function init() {
     return
   }
 
-  await startAuthenticatedApp()
-  enterAppShell()
+  if (await startAuthenticatedApp()) {
+    enterAppShell()
+  }
 }
 
 async function startAuthenticatedApp() {
-  // Fast path only when the SAME user is still active. A 401 sends the user to the
-  // auth gate without resetting appReady, so without the id check a different user
-  // logging in on a shared browser would inherit the previous user's API key,
-  // history and workspace (the per-user loaders below would be skipped).
+  const userContextEpoch = state.userContextEpoch
+  // Every asynchronous startup stage can outlive a logout or account switch.
+  // Stop before loading or persisting data under the next user's identity.
   if (state.appReady && state.lastReadyUserId === (state.currentUser?.id ?? null)) {
     await refreshUsageSummary()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     await refreshImageStats()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     await refreshGenerationJobs()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     startTeamChatPolling()
     await refreshTeamChatUnread()
-    return
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
+    return true
   }
 
   resetWorkspaceForUserScope()
@@ -12378,15 +12460,30 @@ async function startAuthenticatedApp() {
   loadTeamChatRecentDms()
   renderHistory()
   await loadUserPreferences()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshOrgUnits()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   loadSettings()
   await loadPromptRecipes()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshImageStats()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   updateLogoControlUI()
   updatePromptCounters()
   updatePromptModeUI()
   updateGenerateIntentUI()
   const restored = await restoreWorkspaceState()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
 
   if (!restored) {
     updateEditSourceUI()
@@ -12405,9 +12502,19 @@ async function startAuthenticatedApp() {
   updateWorkflowStatus()
   startTeamChatPolling()
   await refreshTeamChatUnread()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshUsageSummary()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshGenerationJobs()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   scheduleWorkspacePersist()
+  return true
 }
 
 init()
