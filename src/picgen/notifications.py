@@ -64,11 +64,19 @@ class GenerationSuccessAlert:
     image_count: int
     candidate_count: int
     saved_bytes: int
-    elapsed_ms: float
+    elapsed_ms: float | None
     logo_requested: bool
     logo_overlay_applied: bool
     saved_image_urls: list[str]
     generated_image_ids: list[int]
+    transport: str = ""
+    image_model: str = ""
+    requested_size: str = ""
+    generation_path: str = ""
+    final_request_id: str = ""
+    final_save_elapsed_ms: float | None = None
+    task_image_count: int | None = None
+    requested_image_count: int | None = None
 
 
 def error_alert_notifications_enabled(settings: Settings) -> bool:
@@ -286,23 +294,53 @@ def build_error_alert_text(alert: ErrorAlert) -> str:
 
 def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
-    title = "LOGO 成品已保存" if alert.path == "/api/final-images" else "生图成功"
+    is_final = alert.path == "/api/final-images"
+    title = "LOGO 成品已保存" if is_final else "生图成功"
     lines = [
         f"【PicGen｜{title}】{alert.username or '-'} #{alert.job_id}",
         f"用户：{alert.username or '-'} (#{alert.user_id})",
         f"任务：#{alert.job_id} / {alert.request_id or '-'}",
         f"接口：{alert.method} {alert.path}",
         f"模式：{alert.mode or '-'}",
-        f"模型：{alert.model or '-'}",
-        f"尺寸：{alert.size or '-'}",
-        f"图片数：{alert.image_count}",
-        f"候选数：{alert.candidate_count}",
-        f"落盘：{_format_bytes(alert.saved_bytes)}",
-        f"耗时：{alert.elapsed_ms / 1000:.1f}s",
+    ]
+    if is_final:
+        lines.extend([
+            f"生成接口：POST {alert.generation_path or '未记录'}",
+            f"保存请求：{alert.final_request_id or '-'}",
+        ])
+    if alert.transport:
+        lines.append(f"通道：{alert.transport}")
+    if alert.transport.startswith("responses-"):
+        lines.extend([
+            f"主模型：{alert.model or '未记录'}",
+            f"图像模型（请求）：{alert.image_model or '未记录'}",
+        ])
+    else:
+        lines.append(f"模型：{alert.model or '-'}")
+    if alert.requested_size:
+        lines.append(f"请求尺寸：{alert.requested_size}")
+    lines.append(f"{'成品尺寸' if is_final else '尺寸'}：{alert.size or '未记录'}")
+    if is_final:
+        if alert.task_image_count is not None:
+            count = f"任务出图：{alert.task_image_count} 张"
+            if alert.requested_image_count is not None:
+                count += f"（请求 {alert.requested_image_count} 张）"
+            lines.append(count)
+        lines.append(f"本次成品：{alert.image_count} 张")
+    else:
+        lines.extend([f"图片数：{alert.image_count}", f"候选数：{alert.candidate_count}"])
+    duration = f"{alert.elapsed_ms / 1000:.1f}s" if alert.elapsed_ms is not None else "未记录"
+    lines.extend([
+        f"{'本次成品文件' if is_final else '落盘'}：{_format_bytes(alert.saved_bytes)}",
+        f"生图耗时：{duration}",
+    ])
+    if alert.final_save_elapsed_ms is not None:
+        lines.append(f"成品保存耗时：{alert.final_save_elapsed_ms / 1000:.1f}s")
+    lines.extend([
         f"LOGO：请求={'是' if alert.logo_requested else '否'} / 成品={'是' if alert.logo_overlay_applied else '否'}",
         f"图片 ID：{image_ids}",
-    ]
-    return "\n".join(lines)[:3900]
+    ])
+    return redact_sensitive_text("\n".join(lines), limit=3900)
 
 
 def _format_bytes(value: int) -> str:

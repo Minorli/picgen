@@ -1425,6 +1425,7 @@ async def _generate_itinerary_artwork(
             "endpoint_url": endpoint_url,
             "files_endpoint_url": sibling_endpoint_url(endpoint_url, "files"),
             "transport": "responses-itinerary-artwork",
+            "image_model": str(tool["model"]),
             "sample_count": 1,
             "logo_requested": parsed.logo_requested,
             "logo_overlay_applied": False,
@@ -1454,6 +1455,7 @@ async def _generate_itinerary_artwork(
             "prompt": parsed.title,
             "model": model,
             "transport": "responses-itinerary-artwork",
+            "image_model": str(tool["model"]),
             "size": f"{width}x{height}",
             "requested_size": composition["requested_size"],
             "composition": composition,
@@ -1514,6 +1516,7 @@ async def _generate_itinerary_artwork(
                 "prompt": parsed.title,
                 "model": model,
                 "transport": "responses-itinerary-artwork",
+                "image_model": str(tool["model"]),
                 "route_style": parsed.route_style,
                 "size": f"{width}x{height}",
                 "requested_size": composition["requested_size"],
@@ -1552,6 +1555,7 @@ async def _generate_itinerary_artwork(
     return {
         **image,
         "transport": "responses-itinerary-artwork",
+        "image_model": str(tool["model"]),
         "size": f"{width}x{height}",
         "requested_size": composition["requested_size"],
         "composition": composition,
@@ -3147,7 +3151,7 @@ def create_router() -> APIRouter:
         started_at = time.perf_counter()
         try:
             source_record = await anyio.to_thread.run_sync(
-                lambda: auth_store.generated_image_for_user(
+                lambda: auth_store.generated_image_detail_for_user(
                     generated_image_id=parsed.generated_image_id,
                     user_id=user.id,
                 )
@@ -3202,7 +3206,11 @@ def create_router() -> APIRouter:
                 _send_generation_success_alert(
                     settings,
                     _build_final_image_success_alert(
-                        image=updated,
+                        image={
+                            **updated,
+                            "lineage": source_record.get("lineage", {}),
+                            "metadata": source_record.get("metadata", {}),
+                        },
                         user=user,
                         elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                     ),
@@ -4375,6 +4383,12 @@ def _result_logo_overlay_applied(result: dict[str, Any]) -> bool:
     return any(bool(image.get("logo_overlay_applied")) for image in _result_images(result))
 
 
+def _saved_image_size(image: dict[str, Any]) -> str:
+    width = image.get("saved_image_width")
+    height = image.get("saved_image_height")
+    return f"{width}x{height}" if width and height else ""
+
+
 def _build_generation_success_alert(
     *,
     path: str,
@@ -4395,7 +4409,7 @@ def _build_generation_success_alert(
         path=path,
         mode=str(result.get("mode") or _job_mode(path, payload) or ""),
         model=str(result.get("model") or payload.get("model") or ""),
-        size=str(result.get("size") or payload.get("size") or ""),
+        size=", ".join(dict.fromkeys(size for image in _result_images(result) if (size := _saved_image_size(image)))),
         prompt=str(result.get("prompt") or payload.get("prompt") or ""),
         image_count=_result_image_count(result),
         candidate_count=int(result.get("candidate_count") or _result_image_count(result) or 0),
@@ -4405,6 +4419,9 @@ def _build_generation_success_alert(
         logo_overlay_applied=_result_logo_overlay_applied(result),
         saved_image_urls=_result_saved_image_urls(result),
         generated_image_ids=_result_generated_image_ids(result, image_records),
+        transport=str(result.get("transport") or _job_transport(path)),
+        image_model=str(result.get("image_model") or ""),
+        requested_size=str(payload.get("size") or result.get("size") or ""),
     )
 
 
@@ -4414,8 +4431,10 @@ def _build_final_image_success_alert(
     user: AuthUser,
     elapsed_ms: float,
 ) -> GenerationSuccessAlert:
+    lineage = image.get("lineage") or {}
+    metadata = image.get("metadata") or {}
     return GenerationSuccessAlert(
-        request_id=get_request_id(),
+        request_id=str(lineage.get("request_id") or ""),
         job_id=int(image.get("job_id") or 0),
         user_id=user.id,
         username=user.username,
@@ -4423,16 +4442,24 @@ def _build_final_image_success_alert(
         path="/api/final-images",
         mode=str(image.get("mode") or ""),
         model=str(image.get("model") or ""),
-        size="",
+        size=_saved_image_size(image),
         prompt=str(image.get("prompt") or ""),
         image_count=1 if image.get("saved_image_url") else 0,
         candidate_count=1 if image.get("saved_image_url") else 0,
         saved_bytes=max(0, int(image.get("saved_image_bytes") or 0)),
-        elapsed_ms=elapsed_ms,
+        elapsed_ms=lineage.get("elapsed_ms"),
         logo_requested=bool(image.get("logo_requested") or image.get("logo_overlay_applied")),
         logo_overlay_applied=bool(image.get("logo_overlay_applied")),
         saved_image_urls=[str(image.get("saved_image_url") or "")] if image.get("saved_image_url") else [],
         generated_image_ids=[int(image.get("id") or 0)] if image.get("id") else [],
+        transport=str(lineage.get("transport") or metadata.get("transport") or ""),
+        image_model=str(metadata.get("image_model") or ""),
+        requested_size=str(lineage.get("size") or metadata.get("requested_size") or ""),
+        generation_path=str(lineage.get("endpoint_path") or ""),
+        final_request_id=get_request_id(),
+        final_save_elapsed_ms=elapsed_ms,
+        task_image_count=lineage.get("image_count"),
+        requested_image_count=lineage.get("sample_count"),
     )
 
 
@@ -5137,6 +5164,7 @@ async def handle_responses_image(
         )
 
     metadata = request_metadata({**payload, **image_options}, size=size)
+    metadata["image_model"] = str(tool["model"])
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
         metadata["effective_prompt"] = effective_prompt
