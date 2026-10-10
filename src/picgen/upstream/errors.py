@@ -28,7 +28,10 @@ def extract_error_message(response_body: str) -> tuple[str, str | None]:
     try:
         parsed_body = json.loads(response_body)
     except (json.JSONDecodeError, RecursionError):
-        return message, response_body.strip() or None
+        return (
+            redact_sensitive_text(message, limit=1000),
+            redact_sensitive_text(response_body.strip(), limit=4000) or None,
+        )
 
     if isinstance(parsed_body, dict):
         if parsed_body.get("cloudflare_error") is True and parsed_body.get("error_code") == 1010:
@@ -137,6 +140,40 @@ def public_upstream_error_message(status: int, code: str, action: str) -> str:
     if status in {502, 503, 504}:
         return f"{action}暂时不可用，请稍后再试。"
     return "图片生成服务返回了错误，请稍后再试。"
+
+
+def raise_for_response_error(payload: dict[str, Any], *, event_type: str = "") -> None:
+    """Reject explicit Responses failures before extracting images or text."""
+    status = str(payload.get("status") or "").strip().lower()
+    error = payload.get("error")
+    failed_statuses = {"failed", "incomplete", "cancelled", "canceled"}
+    if not error and status not in failed_statuses and event_type not in {
+        "error", "response.failed", "response.incomplete", "response.cancelled", "response.canceled"
+    }:
+        return
+    if event_type == "error" and not error:
+        error = {key: payload[key] for key in ("code", "type", "message", "param") if key in payload}
+    # Keep diagnostics small and exclude potentially large/private image and
+    # text outputs. Public messages never include the provider's raw message.
+    diagnostics = {
+        "response_id": payload.get("id") or payload.get("response_id"),
+        "status": status,
+        "event_type": event_type,
+        "error": error,
+        "incomplete_details": payload.get("incomplete_details"),
+    }
+    serialized = _serialize_error_details(diagnostics, "Responses request failed")
+    code = classify_upstream_error(502, "", serialized)
+    details = redact_sensitive_text(serialized, limit=4000)
+    http_status = {
+        "upstream_rate_limited": 429,
+        "upstream_content_policy": 400,
+        "upstream_invalid_image_input": 400,
+    }.get(code, 502)
+    message = public_upstream_error_message(http_status, code, "图片生成服务")
+    if code == "upstream_error" and (status == "incomplete" or event_type == "response.incomplete"):
+        message = "图片生成服务未能完成这次请求，请稍后再试。"
+    raise APIError(http_status, message, details, code=code)
 
 
 def upstream_api_error(

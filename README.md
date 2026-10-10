@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.69**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.72**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,29 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.69 主要特性
+## 0.1.72 主要特性
+
+- **TG 通知对应真实生成任务**：LOGO 成品通知保留原生成请求 ID、请求尺寸、出图数量与生图耗时；另列本次成品尺寸、文件大小、保存请求与保存耗时。
+- **模型信息明确**：Responses 通知区分主模型与请求图像模型，图像模型随本次请求保存，历史未记录的值明确标为“未记录”。
+- **候选统计不混用**：多候选任务的实际出图数、请求数与本次保存的一张成品分别展示。
+
+### 0.1.71
+
+- **首页随部署更新**：入口 HTML 明确要求浏览器重新验证缓存，避免新后端搭配旧前端。包含 304 响应；带版本戳的 JS/CSS 仍正常缓存。此前已缓存旧版首页的浏览器首次需手动刷新一次。
+- 包含以下 0.1.70 平台审计修复。
+
+### 0.1.70
+
+- **连接抖动恢复**：仅在首次建连尚未发送请求时重试；读写失败、HTTP 错误和重定向后的连接错误不自动重放付费生图。
+- **失败终态准确**：Responses 的 failed、incomplete 与 error 会明确报错，失败前的预览图不再作为成功成品；图像和文字调用均覆盖。
+- **账号与错误信息加固**：改密立即作废旧找回链接；管理员配置变更撤销旧会话；找回链接并发只能消费一次；内部异常不暴露敏感详情。
+- **历史与工作区更可靠**：任务列表防止旧响应覆盖，失败后即时刷新；切换历史作品清除旧重跑参数；登录失效时停止旧工作区加载。
+- **完整任务历史**：任务中心支持“加载更早任务”，按用户隔离的稳定游标分页；切换账号立即清空上一个账号的任务列表。
+- **通知可追踪**：Telegram 必须确认成功才算送达；尊重短时限流等待，并记录脱敏后的成功与未配置状态。
+- **结果与统计隔离**：已保存的成品不会因附属用量统计失败而被误标成失败。
+- **依赖安全更新**：AnyIO 最低版本提高到 4.14.2，修复已公布的 TLS 域名校验和进程池阻塞漏洞。
+
+### 0.1.69
 
 - 默认 Responses 主模型升级为 `gpt-6-astra`；Images 与 Responses 图片工具使用 `gpt-image-2.5-sunburst`，候选列表提供 `gpt-image-2.5-flare`。
 - 浏览器加载设置和工作区时更新精确旧默认，自定义模型保留。图片质量仍为 `high`，路由、数据库结构及历史记录不变。
@@ -151,10 +173,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.69 .
+docker build -t minorli/picgen:0.1.72 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.69
+  minorli/picgen:0.1.72
 ```
 
 或：
@@ -169,10 +191,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.69`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.72`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.69 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.72 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/ready`，以非 root
@@ -203,8 +225,9 @@ IMAGE=minorli/picgen VERSION=0.1.69 PLATFORM=linux/amd64 ./scripts/docker-build-
 | `PICGEN_DEFAULT_MODEL` / `PICGEN_DEFAULT_RESPONSES_MODEL` | 默认模型 | `gpt-image-2.5-sunburst` / `gpt-6-astra` |
 | `PICGEN_DEFAULT_RESPONSES_REASONING_EFFORT` | `gpt-5.6-sol` 默认思考等级，可选 `low/medium/high/xhigh/max/ultra`；其它模型为兼容性不发送该字段 | `xhigh` |
 | `PICGEN_DEFAULT_SIZE` | 默认生图尺寸；当前按 6 人游主场景设置 | `1088x2240` |
-| `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 单次上游请求总超时 | 1200 |
-| `PICGEN_UPSTREAM_MAX_RETRIES` | 5xx / 网络瞬时错误重试次数 | 2 |
+| `PICGEN_UPSTREAM_TIMEOUT_SECONDS` | 上游读取/写入单次等待超时（非整个生图任务时限） | 1200 |
+| `PICGEN_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | 建立连接/等待连接池的单次超时 | 15 |
+| `PICGEN_UPSTREAM_MAX_RETRIES` | POST 首次建连失败的额外重试次数；图片下载也用于 5xx / 网络错误重试。POST 已发送后的错误不重试 | 2 |
 | `PICGEN_SIZE_MISMATCH_MAX_RETRIES` | 上游按比例缩小返回时自动重新生成的次数（仅精确尺寸+单张；保留最接近目标的一次结果）。上游确定性缩小时开重试只会重复扣费，默认关闭 | 0 |
 | `PICGEN_UPSTREAM_MAX_CONNECTIONS` | 连接池上限 | 64 |
 | `PICGEN_RATE_LIMIT_PER_MINUTE` / `PICGEN_RATE_LIMIT_BURST` | 限流配额 | 120 / 20 |
@@ -285,7 +308,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.69 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.72 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

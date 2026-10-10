@@ -20,6 +20,7 @@ from .errors import (
     compact_log_text,
     extract_error_message,
     public_upstream_error_message,
+    raise_for_response_error,
 )
 from .payload import ensure_json_object, normalize_responses_image_payload
 from .responses import parse_sse_json_events, stream_events_to_image_payload
@@ -71,8 +72,9 @@ class UpstreamClient(Protocol):
 class HttpxAsyncClient:
     """Async upstream client with connection pooling.
 
-    Non-idempotent image generation/edit POSTs are sent once to avoid duplicate
-    generations and double billing. Only idempotent image downloads retry.
+    Non-idempotent POSTs retry only initial connection failures before sending.
+    Once sent, they are not replayed, avoiding duplicate generations and billing.
+    Idempotent image downloads also retry response and network failures.
     """
 
     def __init__(
@@ -88,6 +90,7 @@ class HttpxAsyncClient:
         http2: bool = False,
     ) -> None:
         self.total_timeout = total_timeout
+        self.connect_timeout = connect_timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
         self.max_image_bytes = max_image_bytes
@@ -278,7 +281,10 @@ class HttpxAsyncClient:
 
         started_at = time.perf_counter()
         try:
-            async with self._client.stream("POST", url, content=body_bytes, headers=headers) as response:
+            response, attempts = await self._send_with_connect_retries(
+                "POST", url, content=body_bytes, headers=headers
+            )
+            try:
                 if response.status_code >= 400:
                     body_text = (await response.aread()).decode("utf-8", errors="replace")
                     self._raise_for_status(
@@ -287,7 +293,7 @@ class HttpxAsyncClient:
                         url=url,
                         started_at=started_at,
                         event_prefix="upstream_responses",
-                        attempt=0,
+                        attempt=attempts - 1,
                     )
                 content_type = response.headers.get("content-type", "")
                 body_text = (await response.aread()).decode("utf-8", errors="replace")
@@ -297,6 +303,11 @@ class HttpxAsyncClient:
                         url=url,
                         started_at=started_at,
                     )
+                parsed = ensure_json_object(
+                    self._parse_json(body_text, "Responses 图像接口"),
+                    "Responses 图像接口",
+                )
+                raise_for_response_error(parsed)
                 log_event(
                     logger,
                     logging.INFO,
@@ -304,14 +315,13 @@ class HttpxAsyncClient:
                     url=url,
                     elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                     body_chars=len(body_text),
-                )
-                parsed = ensure_json_object(
-                    self._parse_json(body_text, "Responses 图像接口"),
-                    "Responses 图像接口",
+                    attempts=attempts,
                 )
                 if payload.get("tools"):
                     return normalize_responses_image_payload(parsed)
                 return parsed
+            finally:
+                await response.aclose()
         except APIError:
             raise
         except httpx.RequestError as exc:
@@ -411,6 +421,30 @@ class HttpxAsyncClient:
 
     # --- internals ------------------------------------------------------
 
+    async def _send_with_connect_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        content: bytes | None,
+        headers: dict[str, str],
+    ) -> tuple[httpx.Response, int]:
+        request = self._client.build_request(method, url, content=content, headers=headers)
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Read the body outside this retry scope. A failed redirect has
+                # a different Request object, even if it returns to the same URL.
+                response = await self._client.send(request, stream=True)
+            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                if exc.request is not request or attempt >= self.max_retries:
+                    raise
+                await self._sleep_for_retry(
+                    attempt, url=url, reason=type(exc).__name__, retry_phase="connect"
+                )
+            else:
+                return response, attempt + 1
+        raise RuntimeError("unreachable")  # pragma: no cover
+
     async def _send(
         self,
         method: str,
@@ -423,7 +457,13 @@ class HttpxAsyncClient:
     ) -> httpx.Response:
         started_at = time.perf_counter()
         try:
-            response = await self._client.request(method, url, content=content, headers=headers)
+            response, attempts = await self._send_with_connect_retries(
+                method, url, content=content, headers=headers
+            )
+            try:
+                await response.aread()
+            finally:
+                await response.aclose()
         except httpx.TimeoutException as exc:
             self._raise_network(exc, url=url, started_at=started_at, action=action)
         except httpx.RequestError as exc:
@@ -445,7 +485,7 @@ class HttpxAsyncClient:
                 url=url,
                 started_at=started_at,
                 event_prefix=event_prefix,
-                attempt=0,
+                attempt=attempts - 1,
             )
 
         log_event(
@@ -455,7 +495,7 @@ class HttpxAsyncClient:
             url=url,
             elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
             body_chars=len(response.text) if hasattr(response, "text") else None,
-            attempts=1,
+            attempts=attempts,
         )
         return response
 
@@ -534,7 +574,11 @@ class HttpxAsyncClient:
                 "upstream_timeout",
                 url=url,
                 elapsed_ms=elapsed_ms,
-                timeout_s=self.total_timeout,
+                timeout_s=(
+                    self.connect_timeout
+                    if isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout))
+                    else self.total_timeout
+                ),
                 timeout_kind=type(exc).__name__,
                 action=action,
             )
@@ -555,7 +599,11 @@ class HttpxAsyncClient:
                 )
             raise APIError(
                 HTTPStatus.GATEWAY_TIMEOUT,
-                "图片生成服务响应超时，请稍后再试。",
+                (
+                    "连接图片生成服务超时，请稍后再试。"
+                    if isinstance(exc, httpx.ConnectTimeout)
+                    else "图片生成服务响应超时，请稍后再试。"
+                ),
                 detail,
                 code="upstream_timeout",
             ) from exc
@@ -579,7 +627,7 @@ class HttpxAsyncClient:
     def _parse_json(text: str, context: str) -> Any:
         try:
             return json.loads(text)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise APIError(
                 HTTPStatus.BAD_GATEWAY,
                 "图片生成服务返回了无法解析的响应，请稍后再试。",
@@ -635,5 +683,4 @@ async def shutdown_default_client() -> None:
         if _default_client is not None:
             await _default_client.aclose()
             _default_client = None
-
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..errors import APIError
 from ..logging_config import get_logger, log_event
 from ..redaction import redact_sensitive_text
+from .errors import raise_for_response_error
 from .payload import extract_response_image_item, normalize_responses_image_payload
 
 logger = get_logger("picgen.upstream.responses")
@@ -16,10 +18,13 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
 
     events: list[dict[str, Any]] = []
     data_lines: list[str] = []
+    event_name = ""
     dropped = 0
 
     def flush_event() -> None:
-        nonlocal dropped
+        nonlocal dropped, event_name
+        name = event_name
+        event_name = ""
         if not data_lines:
             return
         data = "\n".join(data_lines).strip()
@@ -28,10 +33,19 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
             return
         try:
             parsed = _json.loads(data)
+        except RecursionError as exc:
+            raise APIError(
+                502,
+                "图片生成服务返回了无法解析的响应，请稍后再试。",
+                "Responses SSE JSON 嵌套层级过深。",
+                code="upstream_invalid_response",
+            ) from exc
         except _json.JSONDecodeError:
             dropped += 1
             return
         if isinstance(parsed, dict):
+            if name and not parsed.get("type"):
+                parsed = {**parsed, "type": name}
             events.append(parsed)
 
     # SSE frames are delimited by \r\n / \n / \r ONLY. str.splitlines() would
@@ -44,6 +58,8 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
             continue
         if line.startswith("data:"):
             data_lines.append(line.removeprefix("data:").strip())
+        elif line.startswith("event:"):
+            event_name = line.removeprefix("event:").strip()
 
     flush_event()
     if dropped:
@@ -125,8 +141,10 @@ def stream_events_to_image_payload(
     completed_response: dict[str, Any] = {}
     text_chunks: list[str] = []
     event_types: list[str] = []
+    stream_error: APIError | None = None
     for event in events:
-        event_type = redact_sensitive_text(str(event.get("type") or "").strip(), limit=120)
+        raw_event_type = str(event.get("type") or "").strip()
+        event_type = redact_sensitive_text(raw_event_type, limit=120)
         if event_type and event_type not in event_types:
             event_types.append(event_type)
         image_b64 = event_image_base64(event)
@@ -138,6 +156,16 @@ def stream_events_to_image_payload(
         response_payload = event.get("response")
         if isinstance(response_payload, dict):
             completed_response = response_payload
+        try:
+            raise_for_response_error(
+                response_payload if isinstance(response_payload, dict) else event,
+                event_type=raw_event_type,
+            )
+        except APIError as exc:
+            stream_error = exc
+            if not isinstance(response_payload, dict):
+                completed_response = {**event, "error": event.get("error") or event}
+            break
     has_image = bool(last_image_b64 or extract_response_image_item(completed_response))
     has_text = bool(text_chunks) or response_has_text(completed_response)
     response_status = redact_sensitive_text(
@@ -156,17 +184,20 @@ def stream_events_to_image_payload(
 
     log_event(
         logger,
-        logging.INFO if has_image or has_text else logging.WARNING,
-        "upstream_responses_stream_ok",
+        logging.INFO if not stream_error and (has_image or has_text) else logging.WARNING,
+        "upstream_responses_stream_error" if stream_error else "upstream_responses_stream_ok",
         url=url,
         elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
         events=len(events),
         event_types=event_types[-20:],
         response_status=response_status,
+        response_id=redact_sensitive_text(str(completed_response.get("id") or ""), limit=120),
         response_error_code=response_error_code,
         has_image=has_image,
         has_text=has_text,
     )
+    if stream_error:
+        raise stream_error
     if has_image:
         normalized = normalize_responses_image_payload(
             completed_response,

@@ -14,6 +14,7 @@ from urllib import parse
 
 from ..errors import APIError
 from ..logging_config import get_logger, log_event
+from ..redaction import redact_sensitive_text
 from ..storage import (
     detect_image_dimensions,
     detect_image_mime,
@@ -21,6 +22,7 @@ from ..storage import (
     resize_image_to_exact_size,
     save_output_image,
 )
+from .errors import raise_for_response_error
 
 logger = get_logger("picgen.upstream.payload")
 
@@ -191,7 +193,7 @@ def _normalize_strict_size_image(
         return image_bytes, image_mime, {}
 
 
-def compact_raw_response(payload: Any) -> Any:
+def compact_raw_response(payload: Any, *, _depth: int = 0) -> Any:
     """Return a preview-safe copy of an upstream payload.
 
     The browser still gets first-class image fields and persisted file URLs from
@@ -199,18 +201,28 @@ def compact_raw_response(payload: Any) -> Any:
     not duplicate megabytes of image base64.
     """
 
+    if isinstance(payload, (dict, list)) and _depth >= 20:
+        return "[omitted nested content]"
     if isinstance(payload, dict):
         compacted: dict[str, Any] = {}
         for key, value in payload.items():
-            if key in _RAW_IMAGE_KEYS and isinstance(value, str):
-                compacted[key] = f"[omitted {len(value)} chars]"
+            safe_key = redact_sensitive_text(key) if isinstance(key, str) else key
+            # Ask the shared redactor to recognize credential field names, so
+            # structured values follow the same rules as logs and error text.
+            field_probe = f'{key}="redaction-probe"'
+            if redact_sensitive_text(field_probe) != field_probe:
+                compacted[safe_key] = "***"
+            elif key in _RAW_IMAGE_KEYS and isinstance(value, str):
+                compacted[safe_key] = f"[omitted {len(value)} chars]"
             elif key in _RAW_IMAGE_URL_KEYS and isinstance(value, str) and value.startswith("data:image/"):
-                compacted[key] = f"[omitted data URL {len(value)} chars]"
+                compacted[safe_key] = f"[omitted data URL {len(value)} chars]"
             else:
-                compacted[key] = compact_raw_response(value)
+                compacted[safe_key] = compact_raw_response(value, _depth=_depth + 1)
         return compacted
     if isinstance(payload, list):
-        return [compact_raw_response(item) for item in payload]
+        return [compact_raw_response(item, _depth=_depth + 1) for item in payload]
+    if isinstance(payload, str):
+        return redact_sensitive_text(payload)
     return payload
 
 
@@ -261,6 +273,7 @@ def normalize_responses_image_payload(
     fallback_b64: str | None = None,
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    raise_for_response_error(payload)
     items = extract_response_image_items(payload)
     if not items and fallback_b64:
         items = [{"b64_json": fallback_b64}]

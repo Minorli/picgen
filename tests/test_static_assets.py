@@ -13,7 +13,7 @@ def test_legacy_responses_model_storage_is_migrated_once() -> None:
     settings_js = (ROOT_DIR / "static" / "responses-settings.mjs").read_text(encoding="utf-8")
 
     assert 'const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])' in app_js
-    assert 'from "./responses-settings.mjs?v=0.1.69"' in app_js
+    assert 'from "./responses-settings.mjs?v=0.1.72"' in app_js
     assert 'const LEGACY_DEFAULT_RESPONSES_MODEL = "gpt-5.5"' in settings_js
     assert "const RESPONSES_MODEL_STORAGE_VERSION = 5" in settings_js
     assert "function migrateStoredResponsesSettings" in settings_js
@@ -38,7 +38,7 @@ def test_logo_overlay_uses_uploaded_asset_without_ai_guidance() -> None:
     assert 'const COMPANY_LOGO_URL = "6renyou.png"' in app_js
     assert "composeLogoOverlayForCandidates" in app_js
     assert "createOfficialLogoCanvas" in app_js
-    assert 'from "./logo-placement.mjs?v=0.1.69"' in app_js
+    assert 'from "./logo-placement.mjs?v=0.1.72"' in app_js
     assert "chooseLogoPlacement" in app_js
     assert "calculateLogoPlacementScore" in app_js
     assert "calculateOfficialLogoPixelMatch" in app_js
@@ -280,7 +280,8 @@ def test_generation_progress_explains_retry_attempts_inside_preview() -> None:
     assert "第 2 次尝试" not in app_js
     assert "第 3 次尝试" not in app_js
     assert "等待上游响应中" in app_js
-    assert "后台如遇临时 502/503/504 会自动重试" in app_js
+    assert "仅连接建立失败时后台会自动重试" in app_js
+    assert "请求已提交后的超时、断流或接口错误不会自动重发" in app_js
     assert "第几次重试以最终错误详情或服务端日志为准" in app_js
     assert "已多次尝试仍未成功" in app_js
     assert "setPendingResultFailure" in app_js
@@ -676,7 +677,7 @@ def test_progress_overlay_and_my_favorites_are_visible_workflows() -> None:
     assert "保存成品" in index_html
     assert "renderGenerationOverlaySteps" in app_js
     assert "updateGenerationOverlay" in app_js
-    assert "后台如遇临时错误会自动重试" in app_js
+    assert "仅连接建立失败时后台会自动重试" in app_js
     assert 'id="teamInspirationFeedButton"' in index_html
     assert "我的收藏" in index_html
     assert "团队灵感流" not in index_html

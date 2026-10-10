@@ -254,7 +254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = api_error_response_with(
             status=500,
             message=public_message,
-            details=details,
+            details=None,
             code="internal_error",
             request_id=request_id,
         )
@@ -318,6 +318,8 @@ def _base_operational_message(exc: APIError) -> str:
     if exc.code == "upstream_rate_limited":
         return "图片生成服务当前请求较多，请稍后再试。"
     if exc.code == "upstream_timeout":
+        if exc.message.startswith("连接图片生成服务超时"):
+            return "连接图片生成服务超时，请稍后再试。"
         return "图片生成服务响应超时，请稍后再试。"
     if exc.code == "upstream_network_error":
         return "暂时无法连接图片生成服务，请稍后再试。"
@@ -354,6 +356,8 @@ def _is_content_policy_error(exc: APIError) -> bool:
 
 
 def _public_operational_error_details(exc: APIError) -> str | None:
+    if exc.code == "internal_error":
+        return None
     details = redact_sensitive_text(exc.details or exc.message, limit=3600)
     if not details:
         return None
@@ -378,8 +382,8 @@ def _build_error_alert(
         code=code,
         client=request.client.host if request.client else "",
         public_message=public_message,
-        technical_message=technical_message,
-        details=details,
+        technical_message=redact_sensitive_text(technical_message, limit=1000),
+        details=redact_sensitive_text(details, limit=4000) or None,
     )
 
 

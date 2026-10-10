@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -11,9 +12,12 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .logging_config import get_logger, log_event
 from .redaction import redact_sensitive_text
 
 _TELEGRAM_SEND_ATTEMPTS = 3
+_TELEGRAM_MAX_RETRY_DELAY_SECONDS = 10
+logger = get_logger("picgen.notifications")
 
 
 @dataclass(frozen=True)
@@ -60,11 +64,19 @@ class GenerationSuccessAlert:
     image_count: int
     candidate_count: int
     saved_bytes: int
-    elapsed_ms: float
+    elapsed_ms: float | None
     logo_requested: bool
     logo_overlay_applied: bool
     saved_image_urls: list[str]
     generated_image_ids: list[int]
+    transport: str = ""
+    image_model: str = ""
+    requested_size: str = ""
+    generation_path: str = ""
+    final_request_id: str = ""
+    final_save_elapsed_ms: float | None = None
+    task_image_count: int | None = None
+    requested_image_count: int | None = None
 
 
 def error_alert_notifications_enabled(settings: Settings) -> bool:
@@ -86,6 +98,7 @@ async def _send_telegram_message(
     token = settings.error_alert_telegram_bot_token.strip()
     chat_id = settings.error_alert_telegram_chat_id.strip()
     if not token or not chat_id:
+        log_event(logger, logging.INFO, "telegram_notification_skipped", status="not_configured")
         return NotificationResult(configured=False, sent=False, status="not_configured")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -94,6 +107,7 @@ async def _send_telegram_message(
     # two quick retries recover most of those without delaying anything (the
     # callers run this off the request path).
     for attempt in range(_TELEGRAM_SEND_ATTEMPTS):
+        retry_delay = 1.0 + attempt
         try:
             async with httpx.AsyncClient(
                 timeout=settings.error_alert_telegram_timeout_seconds,
@@ -108,7 +122,17 @@ async def _send_telegram_message(
                     },
                 )
                 response.raise_for_status()
-            return NotificationResult(configured=True, sent=True, status="sent")
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("ok") is True:
+                log_event(logger, logging.INFO, "telegram_notification_sent", attempts=attempt + 1)
+                return NotificationResult(configured=True, sent=True, status="sent")
+            last_error = f"Telegram rejected message: {response.text.strip()[:200]}"
+            if not isinstance(payload, dict) or payload.get("error_code") != 429:
+                break
+            delay = _telegram_retry_delay(response, fallback=retry_delay)
+            if delay is None:
+                break
+            retry_delay = delay
         except httpx.HTTPStatusError as exc:
             # Keep Telegram's own description ("message is too long", …) —
             # without it failed notifications are undiagnosable from logs.
@@ -116,7 +140,12 @@ async def _send_telegram_message(
             last_error = f"{type(exc).__name__}: {exc}"
             if body_preview:
                 last_error = f"{last_error} | {body_preview}"
-            if exc.response.status_code < 500:
+            if exc.response.status_code == 429:
+                delay = _telegram_retry_delay(exc.response, fallback=retry_delay)
+                if delay is None:
+                    break
+                retry_delay = delay
+            elif exc.response.status_code < 500:
                 break
         except httpx.RequestError as exc:
             message = str(exc).strip()
@@ -126,13 +155,29 @@ async def _send_telegram_message(
             last_error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
             break
         if attempt + 1 < _TELEGRAM_SEND_ATTEMPTS:
-            await asyncio.sleep(1.0 + attempt)
+            await asyncio.sleep(retry_delay)
     return NotificationResult(
         configured=True,
         sent=False,
         status="failed",
         error=redact_sensitive_text(last_error, limit=300),
     )
+
+
+def _telegram_retry_delay(response: httpx.Response, *, fallback: float) -> float | None:
+    """Honor short flood-control delays without holding background tasks indefinitely."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return fallback
+    parameters = payload.get("parameters") if isinstance(payload, dict) else None
+    delay = parameters.get("retry_after") if isinstance(parameters, dict) else None
+    if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
+        return fallback
+    if delay > _TELEGRAM_MAX_RETRY_DELAY_SECONDS:
+        return None
+    return float(delay)
 
 
 async def send_error_alert_notification(
@@ -249,23 +294,53 @@ def build_error_alert_text(alert: ErrorAlert) -> str:
 
 def build_generation_success_alert_text(alert: GenerationSuccessAlert) -> str:
     image_ids = ", ".join(str(image_id) for image_id in alert.generated_image_ids[:10]) or "-"
-    title = "LOGO 成品已保存" if alert.path == "/api/final-images" else "生图成功"
+    is_final = alert.path == "/api/final-images"
+    title = "LOGO 成品已保存" if is_final else "生图成功"
     lines = [
         f"【PicGen｜{title}】{alert.username or '-'} #{alert.job_id}",
         f"用户：{alert.username or '-'} (#{alert.user_id})",
         f"任务：#{alert.job_id} / {alert.request_id or '-'}",
         f"接口：{alert.method} {alert.path}",
         f"模式：{alert.mode or '-'}",
-        f"模型：{alert.model or '-'}",
-        f"尺寸：{alert.size or '-'}",
-        f"图片数：{alert.image_count}",
-        f"候选数：{alert.candidate_count}",
-        f"落盘：{_format_bytes(alert.saved_bytes)}",
-        f"耗时：{alert.elapsed_ms / 1000:.1f}s",
+    ]
+    if is_final:
+        lines.extend([
+            f"生成接口：POST {alert.generation_path or '未记录'}",
+            f"保存请求：{alert.final_request_id or '-'}",
+        ])
+    if alert.transport:
+        lines.append(f"通道：{alert.transport}")
+    if alert.transport.startswith("responses-"):
+        lines.extend([
+            f"主模型：{alert.model or '未记录'}",
+            f"图像模型（请求）：{alert.image_model or '未记录'}",
+        ])
+    else:
+        lines.append(f"模型：{alert.model or '-'}")
+    if alert.requested_size:
+        lines.append(f"请求尺寸：{alert.requested_size}")
+    lines.append(f"{'成品尺寸' if is_final else '尺寸'}：{alert.size or '未记录'}")
+    if is_final:
+        if alert.task_image_count is not None:
+            count = f"任务出图：{alert.task_image_count} 张"
+            if alert.requested_image_count is not None:
+                count += f"（请求 {alert.requested_image_count} 张）"
+            lines.append(count)
+        lines.append(f"本次成品：{alert.image_count} 张")
+    else:
+        lines.extend([f"图片数：{alert.image_count}", f"候选数：{alert.candidate_count}"])
+    duration = f"{alert.elapsed_ms / 1000:.1f}s" if alert.elapsed_ms is not None else "未记录"
+    lines.extend([
+        f"{'本次成品文件' if is_final else '落盘'}：{_format_bytes(alert.saved_bytes)}",
+        f"生图耗时：{duration}",
+    ])
+    if alert.final_save_elapsed_ms is not None:
+        lines.append(f"成品保存耗时：{alert.final_save_elapsed_ms / 1000:.1f}s")
+    lines.extend([
         f"LOGO：请求={'是' if alert.logo_requested else '否'} / 成品={'是' if alert.logo_overlay_applied else '否'}",
         f"图片 ID：{image_ids}",
-    ]
-    return "\n".join(lines)[:3900]
+    ])
+    return redact_sensitive_text("\n".join(lines), limit=3900)
 
 
 def _format_bytes(value: int) -> str:
