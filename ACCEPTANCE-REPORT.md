@@ -376,4 +376,15 @@
 ### 备份与发布准备
 
 - 已完成在线 SQLite 备份 `/vol1/data1/picgen/backups/auth-20261010T031717Z-pre-0.1.70.sqlite3`，`quick_check=ok`，用户/任务/图片计数分别为 16/389/379；SHA256 `8e85055abc41ec592f7ce984f6edec63d2fb1382298a0461a405122e2796edb2`。
-- 发布和部署执行结果将在完成后补充；保留原镜像与 Compose 备份用于回滚。
+- 0.1.70 已从提交 `ddca3eaa993e0d136f1b5909223eb2807986dd6e` 构建发布，[GitHub CI](https://github.com/Minorli/picgen/actions/runs/38020238440) 全部通过，[Release](https://github.com/Minorli/picgen/releases/tag/v0.1.70) 与 Docker Hub 均已发布。镜像摘要 `sha256:a193d186170dcdd1fa4ef0d7f42c2ce4b325e74781f3f3823ae1a08e5b3378f4`，fnfarm 拉取摘要一致。
+- 切换前再次在线备份到 `/vol1/data1/picgen/backups/auth-20261010T032419Z-pre-0.1.70.sqlite3`（SHA256 与上述备份一致）；Compose 备份为 `/vol1/data1/picgen/docker-compose.yml.bak-20261010T032419Z-pre-0.1.70`。
+- 生产 0.1.70 于 `2026-10-10T03:24:20Z` 启动，healthy、重启数 0。部署后数据库仍为 16/389/379，`quick_check=ok`，注册开启，Astra/Sunburst 与 TG 配置保留；未认证任务请求为 401，注册空请求进入参数校验（400）而非关闭注册（403），日志无 WARNING/ERROR。
+- [PR #46](https://github.com/Minorli/picgen/pull/46) 保留待独立审核：主分支要求 1 人批准，未修改或绕过保护。正式镜像和标签对应已经通过本地检查、独立代码审查及 GitHub CI 的提交。
+
+## 0.1.71 部署验收发现的首页缓存修复（2026-10-10）
+
+- 0.1.70 部署验收时复现：后端 `/api/ready`、容器 HTML 和无缓存 HTTP 请求均为 0.1.70，但浏览器普通导航仍拿到缓存中的 0.1.69 首页及旧资源 URL；手动刷新后立即恢复。原因是入口 HTML 没有明确缓存策略，浏览器会进行启发式缓存。
+- 为避免改写已发布的 0.1.70 标签/镜像，另出 0.1.71，仅增加 `/` 与 `/index.html` 的 `Cache-Control: no-cache`（包含 304），同步版本戳。API 的 no-store、版本化静态资源和鉴权图片缓存策略保持原状。
+- 新增 3 项回归：两个入口的 200/304 必须重新验证，以及 API/JS 策略不被改变；独立前端审查通过。首次使用此前已缓存旧 HTML 的浏览器仍需刷新一次，服务端新响应头无法追溯修改已经保存的旧缓存。
+- 0.1.71 包含 0.1.70 的全部平台修复。最终冻结代码执行 `./scripts/check.sh`：**615 passed**（110.69 秒），Ruff、Mypy 23 个文件、JS 语法、锁文件检查全部通过；运行依赖再次 `pip-audit` 无已知漏洞。生产 TG 的只读 `getMe`/`getChat` 检查均为 HTTP 200 / `ok=true`，未发送测试消息。
+- 发布和部署结果完成后补充在本节。
