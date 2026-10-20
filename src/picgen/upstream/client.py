@@ -223,6 +223,10 @@ class HttpxAsyncClient:
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": content_type,
                         "Accept": "application/json",
+                        # Some compatible gateways reject uploads before
+                        # draining the body. Never pool that HTTP/1.1 connection
+                        # for the following Responses fallback request.
+                        "Connection": "close",
                     },
                 ),
                 event_prefix="upstream_file_upload",
