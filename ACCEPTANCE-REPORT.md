@@ -473,3 +473,13 @@
 - 依据与影响范围：[Pillow 官方安全/兼容说明](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)、[certifi 证书公告](https://github.com/certifi/python-certifi/security/advisories/GHSA-6q48-6c7w-9gw2)、[uv 证书公告](https://github.com/astral-sh/uv/security/advisories/GHSA-hq85-5cpj-mr62)。未发现凭据泄露证据，不把依赖漏洞等同于已发生入侵。
 - 最终冻结代码 `./scripts/check.sh`：**661 passed**（133.82 秒），Ruff、Mypy 23 个源文件全部通过；JS 语法与锁文件检查通过。独立审查发现的终态无最终图却接纳预览边界已修，复核对应 3 项回归通过，无剩余发布阻断。
 - 发布部署结果完成后补充。
+
+### 0.1.74 发布与生产验收
+
+- 发布提交 `a9cff20dedfc50411d58e1b6a210987f381e515f`，[GitHub CI](https://github.com/Minorli/picgen/actions/runs/39571625519) 通过；[Release v0.1.74](https://github.com/Minorli/picgen/releases/tag/v0.1.74) 与 Docker Hub 已发布。镜像摘要 `sha256:10a552d45e2369b4d6dd154a98b162d2d20e300a751e7d8cb745ea3e63b74e4a`，fnfarm 拉取一致。
+- 切换前再次核对进行中的生成任务为 0、最后完成时间为 `07:06:56Z`，超过 30 秒收尾窗口；Compose 重建增加 1250 秒优雅退出超时作为竞态保护。没有中断用户生图。
+- 在线备份 `/vol1/data1/picgen/backups/auth-20261021T085013Z-pre-0.1.74.sqlite3`，SHA256 `8d2ae363f009c2d44439f62bd7a5e37271e65f1a203ed72053812fb7b524cd7d`；Compose 备份 `/vol1/data1/picgen/docker-compose.yml.bak-20261021T085013Z-pre-0.1.74`。
+- 生产 `2026-10-21T08:50:19Z` 启动 0.1.74，healthy、重启数 0；SQLite quick_check=ok，用户/任务/图片前后为 17/435/415，进行中任务 0。注册继续开启，模型仍为 Astra/Sunburst。
+- 容器内 Pillow=13.0.0、certifi=2026.10.19，使用更新后的证书对上游 HTTPS GET 得到 200；无付费生图探测。生产容器内纯解析验证真实同结构的 nested moderation/output，准确返回新提示，未发送 TG 或创建业务任务。
+- 浏览器页脚和脚本版本均为 0.1.74，注册按钮可见；本地临时验收容器已清理。PR #46 同步更新范围，仍待独立批准合并，主分支保护未改动。
+- 发布边界：已修复平台结果解析、完整性判断、诊断与错误提示；外部生成结果审核仍可能拦截同一画面，未承诺取消上游审核或用自动重试掩盖失败。
