@@ -14,12 +14,19 @@ from urllib import parse
 
 from ..errors import APIError
 from ..logging_config import get_logger, log_event
+from ..redaction import redact_sensitive_text
 from ..storage import (
     detect_image_dimensions,
     detect_image_mime,
     is_decodable_image,
     resize_image_to_exact_size,
     save_output_image,
+)
+from .errors import (
+    image_call_has_result,
+    raise_for_image_response_error,
+    raise_for_response_error,
+    response_image_diagnostics,
 )
 
 logger = get_logger("picgen.upstream.payload")
@@ -191,7 +198,7 @@ def _normalize_strict_size_image(
         return image_bytes, image_mime, {}
 
 
-def compact_raw_response(payload: Any) -> Any:
+def compact_raw_response(payload: Any, *, _depth: int = 0) -> Any:
     """Return a preview-safe copy of an upstream payload.
 
     The browser still gets first-class image fields and persisted file URLs from
@@ -199,18 +206,28 @@ def compact_raw_response(payload: Any) -> Any:
     not duplicate megabytes of image base64.
     """
 
+    if isinstance(payload, (dict, list)) and _depth >= 20:
+        return "[omitted nested content]"
     if isinstance(payload, dict):
         compacted: dict[str, Any] = {}
         for key, value in payload.items():
-            if key in _RAW_IMAGE_KEYS and isinstance(value, str):
-                compacted[key] = f"[omitted {len(value)} chars]"
+            safe_key = redact_sensitive_text(key) if isinstance(key, str) else key
+            # Ask the shared redactor to recognize credential field names, so
+            # structured values follow the same rules as logs and error text.
+            field_probe = f'{key}="redaction-probe"'
+            if redact_sensitive_text(field_probe) != field_probe:
+                compacted[safe_key] = "***"
+            elif key in _RAW_IMAGE_KEYS and isinstance(value, str):
+                compacted[safe_key] = f"[omitted {len(value)} chars]"
             elif key in _RAW_IMAGE_URL_KEYS and isinstance(value, str) and value.startswith("data:image/"):
-                compacted[key] = f"[omitted data URL {len(value)} chars]"
+                compacted[safe_key] = f"[omitted data URL {len(value)} chars]"
             else:
-                compacted[key] = compact_raw_response(value)
+                compacted[safe_key] = compact_raw_response(value, _depth=_depth + 1)
         return compacted
     if isinstance(payload, list):
-        return [compact_raw_response(item) for item in payload]
+        return [compact_raw_response(item, _depth=_depth + 1) for item in payload]
+    if isinstance(payload, str):
+        return redact_sensitive_text(payload)
     return payload
 
 
@@ -241,7 +258,7 @@ def extract_response_image_items(payload: dict[str, Any]) -> list[dict[str, Any]
         if item.get("type") != "image_generation_call":
             continue
         result = item.get("result")
-        if isinstance(result, str) and result:
+        if image_call_has_result(item):
             images.append(
                 {
                     "b64_json": result,
@@ -261,8 +278,13 @@ def normalize_responses_image_payload(
     fallback_b64: str | None = None,
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    raise_for_response_error(payload)
+    raise_for_image_response_error(payload)
+    diagnostics = response_image_diagnostics(payload)
     items = extract_response_image_items(payload)
-    if not items and fallback_b64:
+    if not items and fallback_b64 and not diagnostics["refusal_count"] and not (
+        payload.get("status") == "completed" and diagnostics["reason"] == "image_tool_unfinished"
+    ):
         items = [{"b64_json": fallback_b64}]
 
     normalized: dict[str, Any] = {
@@ -271,7 +293,18 @@ def normalize_responses_image_payload(
         "response_id": payload.get("id"),
         "model": payload.get("model"),
         "status": payload.get("status"),
+        "image_diagnostics": diagnostics,
     }
+    if not items and events is None:
+        log_event(
+            logger, logging.WARNING, "upstream_responses_no_image",
+            response_id=diagnostics["response_id"], response_status=diagnostics["response_status"],
+            reason=diagnostics["reason"], image_call_count=diagnostics["image_call_count"],
+            refusal_count=diagnostics["refusal_count"], text_chars=diagnostics["text_chars"],
+            image_call_statuses=[item["status"] for item in diagnostics["image_calls"]],
+            image_error_codes=[item["error"].get("code", "") for item in diagnostics["image_calls"]],
+            image_moderation_stages=[item["error"].get("moderation_stage", "") for item in diagnostics["image_calls"]],
+        )
     if events is not None:
         normalized["stream_events"] = events
     return normalized

@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..errors import APIError
 from ..logging_config import get_logger, log_event
 from ..redaction import redact_sensitive_text
+from .errors import raise_for_image_response_error, raise_for_response_error, response_image_diagnostics
 from .payload import extract_response_image_item, normalize_responses_image_payload
 
 logger = get_logger("picgen.upstream.responses")
@@ -16,10 +18,13 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
 
     events: list[dict[str, Any]] = []
     data_lines: list[str] = []
+    event_name = ""
     dropped = 0
 
     def flush_event() -> None:
-        nonlocal dropped
+        nonlocal dropped, event_name
+        name = event_name
+        event_name = ""
         if not data_lines:
             return
         data = "\n".join(data_lines).strip()
@@ -28,10 +33,19 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
             return
         try:
             parsed = _json.loads(data)
+        except RecursionError as exc:
+            raise APIError(
+                502,
+                "图片生成服务返回了无法解析的响应，请稍后再试。",
+                "Responses SSE JSON 嵌套层级过深。",
+                code="upstream_invalid_response",
+            ) from exc
         except _json.JSONDecodeError:
             dropped += 1
             return
         if isinstance(parsed, dict):
+            if name and not parsed.get("type"):
+                parsed = {**parsed, "type": name}
             events.append(parsed)
 
     # SSE frames are delimited by \r\n / \n / \r ONLY. str.splitlines() would
@@ -44,6 +58,8 @@ def parse_sse_json_events(body: str) -> list[dict[str, Any]]:
             continue
         if line.startswith("data:"):
             data_lines.append(line.removeprefix("data:").strip())
+        elif line.startswith("event:"):
+            event_name = line.removeprefix("event:").strip()
 
     flush_event()
     if dropped:
@@ -118,55 +134,159 @@ def stream_events_to_image_payload(
     *,
     url: str,
     started_at: float,
+    expect_image: bool = False,
 ) -> dict[str, Any]:
     import time as _time
 
     last_image_b64: str | None = None
+    last_final_image_b64: str | None = None
+    saw_completed_response = False
     completed_response: dict[str, Any] = {}
     text_chunks: list[str] = []
     event_types: list[str] = []
+    stream_error: APIError | None = None
+    image_items: dict[str, dict[str, Any]] = {}
+    final_item_keys: set[str] = set()
+    refusal_keys: set[str] = set()
+
+    def remember_item(item: dict[str, Any], index: Any = None) -> str:
+        key = str(item.get("id") or (f"index:{index}" if index is not None else "unknown"))
+        image_items[key] = {**image_items.get(key, {}), **item}
+        return key
+
     for event in events:
-        event_type = redact_sensitive_text(str(event.get("type") or "").strip(), limit=120)
+        raw_event_type = event["type"].strip() if isinstance(event.get("type"), str) else ""
+        event_type = redact_sensitive_text(raw_event_type, limit=120)
         if event_type and event_type not in event_types:
             event_types.append(event_type)
         image_b64 = event_image_base64(event)
         if image_b64:
             last_image_b64 = image_b64
+            if raw_event_type != "response.image_generation_call.partial_image" and not event.get("partial_image_b64"):
+                last_final_image_b64 = image_b64
         text_delta = event_text_delta(event)
         if text_delta:
             text_chunks.append(text_delta)
         response_payload = event.get("response")
+        saw_completed_response = saw_completed_response or raw_event_type == "response.completed" or (
+            isinstance(response_payload, dict) and response_payload.get("status") == "completed"
+        )
         if isinstance(response_payload, dict):
             completed_response = response_payload
+            final_item_keys = set()
+            output = response_payload.get("output")
+            merged_output: list[Any] = []
+            for index, item in enumerate(output if isinstance(output, list) else []):
+                if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                    key = remember_item(item, index)
+                    final_item_keys.add(key)
+                    merged_output.append(image_items[key])
+                else:
+                    merged_output.append(item)
+            if isinstance(output, list):
+                completed_response = {**response_payload, "output": merged_output}
+        event_item = event.get("item")
+        if isinstance(event_item, dict) and event_item.get("type") == "image_generation_call":
+            remember_item(event_item, event.get("output_index"))
+        if raw_event_type in {"response.refusal.delta", "response.refusal.done"}:
+            refusal_keys.add(f"{event.get('item_id', '')}:{event.get('content_index', 0)}")
+        if isinstance(event_item, dict) and event_item.get("type") == "message":
+            content = event_item.get("content")
+            for index, part in enumerate(content if isinstance(content, list) else []):
+                if isinstance(part, dict) and part.get("type") == "refusal":
+                    refusal_keys.add(f"{event_item.get('id', '')}:{index}")
+        is_image_event = raw_event_type.startswith("response.image_generation_call.")
+        if is_image_event:
+            phase = raw_event_type.rsplit(".", 1)[-1]
+            if phase in {"generating", "in_progress", "completed", "failed", "incomplete", "cancelled", "canceled"}:
+                item = {
+                    "type": "image_generation_call", "id": event.get("item_id"), "status": phase,
+                    **{key: event[key] for key in ("error", "result") if key in event},
+                }
+                if phase == "completed" and image_b64 and not event.get("partial_image_b64"):
+                    item["result"] = image_b64
+                remember_item(item, event.get("output_index"))
+        try:
+            if not is_image_event or isinstance(response_payload, dict):
+                raise_for_response_error(
+                    response_payload if isinstance(response_payload, dict) else event,
+                    event_type=raw_event_type,
+                )
+        except APIError as exc:
+            stream_error = exc
+            if not isinstance(response_payload, dict):
+                completed_response = {**event, "error": event.get("error") or event}
+            break
+    extra_items = [item for key, item in image_items.items() if key not in final_item_keys]
+    if extra_items:
+        output = completed_response.get("output")
+        completed_response = {
+            **completed_response, "output": [*(output if isinstance(output, list) else []), *extra_items],
+        }
+    if text_chunks and not isinstance(completed_response.get("output_text"), str):
+        completed_response = {**completed_response, "output_text": "".join(text_chunks)}
+    diagnostics = response_image_diagnostics(completed_response)
+    if refusal_keys and not diagnostics["refusal_count"]:
+        output = completed_response.get("output")
+        completed_response = {
+            **completed_response,
+            "output": [
+                *(output if isinstance(output, list) else []),
+                {"type": "message", "content": [{"type": "refusal"} for _ in refusal_keys]},
+            ],
+        }
+        diagnostics = response_image_diagnostics(completed_response)
+    if not stream_error:
+        try:
+            raise_for_image_response_error(completed_response)
+        except APIError as exc:
+            stream_error = exc
+    if saw_completed_response:
+        # A terminal response ends the legacy partial-only fallback. Explicit
+        # completed image aliases remain valid final results.
+        last_image_b64 = last_final_image_b64
+    if diagnostics["refusal_count"] or (
+        completed_response.get("status") == "completed" and diagnostics["reason"] == "image_tool_unfinished"
+    ):
+        last_image_b64 = None
     has_image = bool(last_image_b64 or extract_response_image_item(completed_response))
     has_text = bool(text_chunks) or response_has_text(completed_response)
-    response_status = redact_sensitive_text(
-        str(completed_response.get("status") or "").strip(),
-        limit=120,
-    )
+    response_status = diagnostics["response_status"]
     response_error = completed_response.get("error")
     response_error_code = (
         redact_sensitive_text(
-            str(response_error.get("code") or response_error.get("type") or "").strip(),
+            response_error.get("code") or response_error.get("type") or "",
             limit=120,
         )
         if isinstance(response_error, dict)
+        and isinstance(response_error.get("code") or response_error.get("type") or "", str)
         else ""
     )
 
+    no_image = expect_image and not has_image
     log_event(
         logger,
-        logging.INFO if has_image or has_text else logging.WARNING,
-        "upstream_responses_stream_ok",
+        logging.INFO if not stream_error and not no_image and (has_image or has_text) else logging.WARNING,
+        ("upstream_responses_stream_error" if stream_error else
+         "upstream_responses_stream_no_image" if no_image else "upstream_responses_stream_ok"),
         url=url,
         elapsed_ms=round((_time.perf_counter() - started_at) * 1000, 1),
         events=len(events),
         event_types=event_types[-20:],
         response_status=response_status,
+        response_id=diagnostics["response_id"],
         response_error_code=response_error_code,
         has_image=has_image,
         has_text=has_text,
+        reason=diagnostics["reason"],
+        image_call_statuses=[item["status"] for item in diagnostics["image_calls"]],
+        image_error_codes=[item["error"].get("code", "") for item in diagnostics["image_calls"]],
+        image_moderation_stages=[item["error"].get("moderation_stage", "") for item in diagnostics["image_calls"]],
+        refusal_count=diagnostics["refusal_count"],
+        text_chars=diagnostics["text_chars"],
     )
+    if stream_error:
+        raise stream_error
     if has_image:
         normalized = normalize_responses_image_payload(
             completed_response,
@@ -180,6 +300,7 @@ def stream_events_to_image_payload(
         return normalized
 
     payload = dict(completed_response)
+    payload["image_diagnostics"] = diagnostics
     if text_chunks and not isinstance(payload.get("output_text"), str):
         payload["output_text"] = "".join(text_chunks)
     payload["stream_events"] = events[-20:]
