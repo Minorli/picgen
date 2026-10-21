@@ -3,8 +3,142 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..errors import APIError
+from ..errors import OUTPUT_IMAGE_POLICY_MESSAGE, APIError
 from ..redaction import redact_sensitive_text
+
+_IMAGE_FAILED_STATUSES = frozenset({"failed", "incomplete", "cancelled", "canceled"})
+_IMAGE_DIAGNOSTIC_REASONS = frozenset({
+    "", "partial_image_failure", "image_tool_failed", "response_refusal", "image_tool_unfinished", "no_image_output",
+})
+
+
+def sanitize_image_diagnostics(value: Any) -> dict[str, Any]:
+    """Copy only bounded diagnostic fields; never trust provider-owned extras."""
+    fields = {
+        "response_id", "response_status", "image_call_count", "result_image_count", "image_calls",
+        "refusal_count", "text_chars", "reason",
+    }
+    if not isinstance(value, dict) or not fields.intersection(value):
+        return {}
+
+    def safe_text(value: Any) -> str:
+        return redact_sensitive_text(value, limit=120) if isinstance(value, str) else ""
+
+    result: dict[str, Any] = {key: safe_text(value.get(key)) for key in ("response_id", "response_status")}
+    for key in ("image_call_count", "result_image_count", "refusal_count", "text_chars"):
+        count = value.get(key)
+        result[key] = max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+    reason = value.get("reason")
+    result["reason"] = reason if isinstance(reason, str) and reason in _IMAGE_DIAGNOSTIC_REASONS else "no_image_output"
+    calls = value.get("image_calls")
+    result["image_calls"] = []
+    for item in (calls[:20] if isinstance(calls, list) else []):
+        if not isinstance(item, dict):
+            continue
+        error = item.get("error")
+        safe_error = {
+            key: safe_text(error[key]) for key in ("code", "type", "param") if key in error
+        } if isinstance(error, dict) else {}
+        stage = error.get("moderation_stage") if isinstance(error, dict) else None
+        if isinstance(stage, str) and stage in {"input", "output"}:
+            safe_error["moderation_stage"] = stage
+        result["image_calls"].append({
+            "id": safe_text(item.get("id")), "status": safe_text(item.get("status")),
+            "has_result": item.get("has_result") is True,
+            "error": safe_error,
+        })
+    return result
+
+
+def response_image_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    output = payload.get("output")
+    return [
+        item for item in output if isinstance(item, dict) and item.get("type") == "image_generation_call"
+    ] if isinstance(output, list) else []
+
+
+def image_call_has_result(item: dict[str, Any]) -> bool:
+    return (
+        str(item.get("status") or "") not in _IMAGE_FAILED_STATUSES | {"in_progress", "generating"}
+        and not item.get("error")
+        and isinstance(item.get("result"), str)
+        and bool(item["result"])
+    )
+
+
+def _image_moderation_stage(error: Any) -> str:
+    details = error.get("moderation_details") if isinstance(error, dict) else None
+    stage = details.get("moderation_stage") if isinstance(details, dict) else None
+    return stage if isinstance(stage, str) and stage in {"input", "output"} else ""
+
+
+def response_image_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    calls = response_image_calls(payload)
+    summaries = []
+    for item in calls[:20]:
+        error = item.get("error")
+        safe_error = {
+            key: error[key] for key in ("code", "type", "param") if key in error
+        } if isinstance(error, dict) else {}
+        stage = _image_moderation_stage(error)
+        if stage:
+            safe_error["moderation_stage"] = stage
+        summaries.append({
+            "id": item.get("id"),
+            "status": item.get("status"),
+            "has_result": image_call_has_result(item),
+            "error": safe_error,
+        })
+    output = payload.get("output")
+    parts = [
+        part for item in output if isinstance(item, dict) and isinstance(item.get("content"), list)
+        for part in item["content"] if isinstance(part, dict)
+    ] if isinstance(output, list) else []
+    refusals = sum(part.get("type") == "refusal" for part in parts)
+    text_chars = sum(len(str(part.get("text") or "")) for part in parts if part.get("type") in {"output_text", "text"})
+    text_chars = max(text_chars, len(str(payload.get("output_text") or "")))
+    result_count = sum(image_call_has_result(item) for item in calls)
+    failed = any(item.get("error") or str(item.get("status") or "") in _IMAGE_FAILED_STATUSES for item in calls)
+    unfinished = any(str(item.get("status") or "") in {"in_progress", "generating"} for item in calls)
+    reason = (
+        "partial_image_failure" if result_count and failed else
+        "" if result_count else
+        "image_tool_failed" if failed else
+        "response_refusal" if refusals else
+        "image_tool_unfinished" if unfinished else "no_image_output"
+    )
+    return sanitize_image_diagnostics({
+        "response_id": payload.get("id"),
+        "response_status": payload.get("status"),
+        "image_call_count": len(calls), "result_image_count": result_count,
+        "image_calls": summaries, "refusal_count": refusals, "text_chars": text_chars, "reason": reason,
+    })
+
+
+def raise_for_image_response_error(payload: dict[str, Any]) -> None:
+    calls = response_image_calls(payload)
+    # A failed candidate must not discard other completed, usable candidates.
+    if any(image_call_has_result(item) for item in calls):
+        return
+    for item in calls:
+        status = str(item.get("status") or "")
+        if item.get("error") or status in _IMAGE_FAILED_STATUSES:
+            try:
+                raise_for_response_error({
+                    "id": payload.get("id"), "image_call_id": item.get("id"),
+                    "status": status if status in _IMAGE_FAILED_STATUSES else "failed",
+                    "error": item.get("error"), "incomplete_details": item.get("incomplete_details"),
+                })
+            except APIError as exc:
+                # Provider tool errors may echo private prompt/refusal text.
+                # Use it for classification, but expose only structured facts.
+                details = json.dumps(response_image_diagnostics({**payload, "output": [item]}), ensure_ascii=False)
+                message = (
+                    OUTPUT_IMAGE_POLICY_MESSAGE
+                    if exc.code == "upstream_content_policy" and _image_moderation_stage(item.get("error")) == "output"
+                    else exc.message
+                )
+                raise APIError(exc.status, message, details, code=exc.code) from None
 
 
 def compact_log_text(value: str, limit: int = 300) -> str:
@@ -157,6 +291,7 @@ def raise_for_response_error(payload: dict[str, Any], *, event_type: str = "") -
     # text outputs. Public messages never include the provider's raw message.
     diagnostics = {
         "response_id": payload.get("id") or payload.get("response_id"),
+        "image_call_id": payload.get("image_call_id"),
         "status": status,
         "event_type": event_type,
         "error": error,

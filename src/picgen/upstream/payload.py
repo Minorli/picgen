@@ -22,7 +22,12 @@ from ..storage import (
     resize_image_to_exact_size,
     save_output_image,
 )
-from .errors import raise_for_response_error
+from .errors import (
+    image_call_has_result,
+    raise_for_image_response_error,
+    raise_for_response_error,
+    response_image_diagnostics,
+)
 
 logger = get_logger("picgen.upstream.payload")
 
@@ -253,7 +258,7 @@ def extract_response_image_items(payload: dict[str, Any]) -> list[dict[str, Any]
         if item.get("type") != "image_generation_call":
             continue
         result = item.get("result")
-        if isinstance(result, str) and result:
+        if image_call_has_result(item):
             images.append(
                 {
                     "b64_json": result,
@@ -274,8 +279,12 @@ def normalize_responses_image_payload(
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     raise_for_response_error(payload)
+    raise_for_image_response_error(payload)
+    diagnostics = response_image_diagnostics(payload)
     items = extract_response_image_items(payload)
-    if not items and fallback_b64:
+    if not items and fallback_b64 and not diagnostics["refusal_count"] and not (
+        payload.get("status") == "completed" and diagnostics["reason"] == "image_tool_unfinished"
+    ):
         items = [{"b64_json": fallback_b64}]
 
     normalized: dict[str, Any] = {
@@ -284,7 +293,18 @@ def normalize_responses_image_payload(
         "response_id": payload.get("id"),
         "model": payload.get("model"),
         "status": payload.get("status"),
+        "image_diagnostics": diagnostics,
     }
+    if not items and events is None:
+        log_event(
+            logger, logging.WARNING, "upstream_responses_no_image",
+            response_id=diagnostics["response_id"], response_status=diagnostics["response_status"],
+            reason=diagnostics["reason"], image_call_count=diagnostics["image_call_count"],
+            refusal_count=diagnostics["refusal_count"], text_chars=diagnostics["text_chars"],
+            image_call_statuses=[item["status"] for item in diagnostics["image_calls"]],
+            image_error_codes=[item["error"].get("code", "") for item in diagnostics["image_calls"]],
+            image_moderation_stages=[item["error"].get("moderation_stage", "") for item in diagnostics["image_calls"]],
+        )
     if events is not None:
         normalized["stream_events"] = events
     return normalized

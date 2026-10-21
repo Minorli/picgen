@@ -264,6 +264,10 @@ class HttpxAsyncClient:
     ) -> dict[str, Any]:
         body_bytes = json.dumps(payload).encode("utf-8")
         is_stream = bool(payload.get("stream"))
+        expect_image = any(
+            isinstance(tool, dict) and tool.get("type") == "image_generation"
+            for tool in payload.get("tools") or []
+        )
         log_event(
             logger,
             logging.INFO,
@@ -306,23 +310,25 @@ class HttpxAsyncClient:
                         parse_sse_json_events(body_text),
                         url=url,
                         started_at=started_at,
+                        expect_image=expect_image,
                     )
                 parsed = ensure_json_object(
                     self._parse_json(body_text, "Responses 图像接口"),
                     "Responses 图像接口",
                 )
                 raise_for_response_error(parsed)
-                log_event(
-                    logger,
-                    logging.INFO,
-                    "upstream_responses_ok",
-                    url=url,
-                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-                    body_chars=len(body_text),
-                    attempts=attempts,
-                )
-                if payload.get("tools"):
-                    return normalize_responses_image_payload(parsed)
+                if expect_image:
+                    parsed = normalize_responses_image_payload(parsed)
+                if not expect_image or parsed.get("data"):
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "upstream_responses_ok",
+                        url=url,
+                        elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                        body_chars=len(body_text),
+                        attempts=attempts,
+                    )
                 return parsed
             finally:
                 await response.aclose()

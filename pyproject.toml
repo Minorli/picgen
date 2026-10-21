@@ -1,6 +1,6 @@
 [project]
 name = "picgen"
-version = "0.1.73"
+version = "0.1.74"
 description = "Enterprise-grade local web console for OpenAI-compatible image generation and editing APIs."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,7 +22,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.4.0",
     "anyio>=4.14.2",
-    "pillow>=11.0.0",
+    "pillow>=13.0.0",
     "fonttools>=4.0.0",
 ]
 

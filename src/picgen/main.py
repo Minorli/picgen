@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from . import __version__
 from .auth import AuthStore
 from .config import Settings
-from .errors import APIError
+from .errors import NO_IMAGE_ERROR_MESSAGES, OUTPUT_IMAGE_POLICY_MESSAGE, APIError
 from .logging_config import configure_logging, get_logger, get_request_id, log_event
 from .middleware import (
     BodySizeLimitMiddleware,
@@ -313,6 +313,8 @@ def _public_operational_error_message(exc: APIError, *, alert_enabled: bool) -> 
 
 
 def _base_operational_message(exc: APIError) -> str:
+    if exc.code == "upstream_content_policy" and exc.message == OUTPUT_IMAGE_POLICY_MESSAGE:
+        return OUTPUT_IMAGE_POLICY_MESSAGE
     if _is_content_policy_error(exc) or exc.code == "upstream_content_policy":
         return "这次提示词没有通过上游内容审核，请调整描述后重试。"
     if exc.code == "upstream_rate_limited":
@@ -328,7 +330,9 @@ def _base_operational_message(exc: APIError) -> str:
     if exc.code == "upstream_image_too_large":
         return "上游返回的图片超过了大小限制，请降低尺寸或质量后重试。"
     if exc.code == "upstream_no_image":
-        return "图片生成服务这次没有返回图片，请稍后再试。"
+        if exc.message in NO_IMAGE_ERROR_MESSAGES.values():
+            return exc.message
+        return NO_IMAGE_ERROR_MESSAGES["no_image_output"]
     if exc.code == "upstream_blocked":
         return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
     if exc.code == "upstream_error":

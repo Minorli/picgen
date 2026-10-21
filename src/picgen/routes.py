@@ -42,7 +42,7 @@ from .config import (
     RESPONSES_REASONING_EFFORTS,
     Settings,
 )
-from .errors import APIError
+from .errors import NO_IMAGE_ERROR_MESSAGES, APIError
 from .itinerary_map import (
     apply_itinerary_coordinate_estimates,
     build_itinerary_map_plan_async,
@@ -132,6 +132,7 @@ from .upstream import (
     validate_url,
 )
 from .upstream.client import UpstreamClient
+from .upstream.errors import response_image_diagnostics, sanitize_image_diagnostics
 
 logger = get_logger("picgen.routes")
 _TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
@@ -1470,12 +1471,7 @@ async def _generate_itinerary_artwork(
     )
     image_data_url = str(saved.get("image_data_url") or "")
     if not saved.get("saved_image_url") and not image_data_url:
-        raise APIError(
-            HTTPStatus.BAD_GATEWAY,
-            "路线图生成接口没有返回可保存的图片",
-            _details_text(compact_raw_response(upstream_response)),
-            code="upstream_no_image",
-        )
+        raise _no_image_error(upstream_response)
     image_mime = str(saved.get("saved_image_mime") or "")
     if (image_mime and not image_mime.startswith("image/")) or (
         image_data_url and not image_data_url.startswith("data:image/")
@@ -1804,12 +1800,7 @@ async def handle_itinerary_map_render(
                 user_id=user.id if user else None,
                 username=user.username if user else "",
             )
-            raise APIError(
-                HTTPStatus.BAD_GATEWAY,
-                "路线图 AI 底图这次没有生成成功，请稍后重试",
-                "Responses image generation completed without a usable image output.",
-                code="upstream_no_image",
-            ) from exc
+            raise
         except (OSError, ValueError, binascii.Error) as exc:
             log_event(
                 logger,
@@ -5219,6 +5210,30 @@ async def handle_responses_image(
     )
 
 
+def _no_image_error(upstream_response: dict[str, Any]) -> APIError:
+    # Even normalized diagnostics can arrive through an untrusted compatible
+    # provider. Only bounded structural facts may reach the UI or alerts.
+    diagnostics = sanitize_image_diagnostics(upstream_response.get("image_diagnostics"))
+    response_diagnostics = sanitize_image_diagnostics(response_image_diagnostics(upstream_response))
+    if diagnostics:
+        diagnostics = {
+            **diagnostics,
+            "response_id": diagnostics.get("response_id") or response_diagnostics.get("response_id", ""),
+            "response_status": diagnostics.get("response_status") or response_diagnostics.get("response_status", ""),
+        }
+    else:
+        diagnostics = response_diagnostics
+    message = NO_IMAGE_ERROR_MESSAGES.get(
+        str(diagnostics.get("reason") or ""), NO_IMAGE_ERROR_MESSAGES["no_image_output"]
+    )
+    return APIError(
+        HTTPStatus.BAD_GATEWAY,
+        message,
+        _details_text(diagnostics),
+        code="upstream_no_image",
+    )
+
+
 async def _finalize_image_response(
     *,
     upstream_response: dict[str, Any],
@@ -5242,14 +5257,9 @@ async def _finalize_image_response(
     )
     # An empty upstream response (no candidates) must be a clear error, not a blank
     # 200 that gets recorded as a "succeeded" job with 0 images. The itinerary path
-    # catches this code to surface its own message / fallback.
+    # also preserves these safe diagnostics and the same failure code.
     if int(saved.get("candidate_count") or 0) <= 0:
-        raise APIError(
-            HTTPStatus.BAD_GATEWAY,
-            "图片生成接口这次没有返回图片，请稍后重试。",
-            _details_text(compact_raw_response(upstream_response)),
-            code="upstream_no_image",
-        )
+        raise _no_image_error(upstream_response)
     _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
 

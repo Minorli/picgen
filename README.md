@@ -1,6 +1,6 @@
 # PicGen Console
 
-一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.73**。它把
+一个面向 OpenAI 兼容图像生成 / 编辑接口的本地工作台，当前版本 **0.1.74**。它把
 `/v1/images/generations`、`/v1/images/edits` 与 `/v1/responses`（含 `image_generation` 工具）
 包装成统一可观测的代理，前端是一套零依赖的 Web 控制台。
 
@@ -14,7 +14,16 @@
 
 ![PicGen Console 主程序界面](demo1.png)
 
-## 0.1.73 主要特性
+## 0.1.74 主要特性
+
+- **准确识别图片工具失败**：外层 Responses 已完成不再掩盖内部图片工具失败，较早的 SSE 工具结果不会被尾部空摘要覆盖。
+- **审核阶段明确**：生成结果被上游审核拦截时，明确提示“生成结果未通过安全检查”，不再误称提示词违规或笼统报无图。
+- **成品完整性**：保留完整成功候选；明确失败或已结束却没有最终图时，不把部分预览冒充成品。
+- **排障与隐私**：无图任务记录专用警告及有界诊断，页面、历史与告警使用一致安全提示，不回显原始提示词或拒绝正文。
+- **安全依赖更新**：Pillow 更新至 13.0.0、证书包 certifi 至 2026.10.19，镜像构建使用 uv 0.13.4。
+- 不修改用户提示词、默认模型或无图重试策略；上游输出审核仍由上游决定。
+
+### 0.1.73
 
 - **修复参考图与行程图的快速 400 错误**：Files 上传单独关闭 HTTP/1.1 连接，防止兼容网关提前返回上传错误后污染下一次 Responses 请求。
 - 保留原始输入图、尺寸、模型与单次生图语义；正常生成和下载继续使用连接池。新增真实 TCP 回归覆盖上传失败/成功后都不会复用上传连接。
@@ -178,10 +187,10 @@ PICGEN_LOG_FORMAT=json \
 ### Docker
 
 ```bash
-docker build -t minorli/picgen:0.1.73 .
+docker build -t minorli/picgen:0.1.74 .
 docker run --rm -p 8000:8000 \
   -v picgen-data:/app/data \
-  minorli/picgen:0.1.73
+  minorli/picgen:0.1.74
 ```
 
 或：
@@ -196,10 +205,10 @@ docker compose up -d
 ./scripts/docker-build-push.sh
 ```
 
-默认会构建并推送 `minorli/picgen:0.1.73`。也可以覆盖：
+默认会构建并推送 `minorli/picgen:0.1.74`。也可以覆盖：
 
 ```bash
-IMAGE=minorli/picgen VERSION=0.1.73 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
+IMAGE=minorli/picgen VERSION=0.1.74 PLATFORM=linux/amd64 ./scripts/docker-build-push.sh
 ```
 
 镜像不会包含 `.env`、本地用户库或历史图片。容器内置 `HEALTHCHECK` 探测 `/api/ready`，以非 root
@@ -313,7 +322,7 @@ Bug 反馈和找回密码申请会先写入本地认证库，再优先发送到 
 
 ## 图像通道
 
-PicGen 0.1.73 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
+PicGen 0.1.74 把四类图像操作统一提交给 `/api/image-jobs`，实际通道由服务端决定：
 
 | 用户操作 | 默认接口 | 默认模型 |
 | --- | --- | --- |

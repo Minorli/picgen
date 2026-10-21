@@ -4,7 +4,7 @@ import {
   chooseLogoPlacement,
   createLogoPreservationDiagnostic,
   scaleLogoDetectionPlacements,
-} from "./logo-placement.mjs?v=0.1.73"
+} from "./logo-placement.mjs?v=0.1.74"
 import {
   DEFAULT_RESPONSES_MODEL,
   migrateStoredImageModel,
@@ -12,7 +12,7 @@ import {
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.73"
+} from "./responses-settings.mjs?v=0.1.74"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
