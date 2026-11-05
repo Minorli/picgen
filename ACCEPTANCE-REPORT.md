@@ -512,3 +512,7 @@
 - 实际通过imagejobs处理链使用1.25MB JPEG参考图验证，63.4秒返回并保存1088x2240 PNG，transport=images-edit，size_mismatch=false。未创建生产测试任务或发送TG。
 - 新增7项回归，相关53项通过；独立审查无阻断。行程地图的独立Responses链路未调整，不能宣称恢复。完整检查及部署信息随后补充。
 - 最终完整检查681 passed（132.41秒），Ruff/Mypy/JS语法/锁文件均通过。依赖扫描首次PyPI TLS连接异常，重试后无已知漏洞。
+- 发布提交`c656bf644e7cf04a291ca162cc2e9453040c9b4f`为GitHub签名提交，CI run 42010435099通过；[Release v0.1.76](https://github.com/Minorli/picgen/releases/tag/v0.1.76)和镜像发布，摘要`sha256:036a6ef6df532b860950c2945098680110b5a251a289738f9b9aae91edee4914`。
+- 首次切换检查发现参考图任务608正在运行，部署在修改配置/重启前退出。等其自然结束并超过30秒收尾窗口后再次检查active=0才切换，未中断用户任务。
+- 在线备份`/vol1/data1/picgen/backups/auth-20261105T103228Z-pre-0.1.76.sqlite3`，SHA256`bb5b9fc70f92ed6392a6ca935312534f76c664273f68cac6558af91327c2807f`；Compose备份`/vol1/data1/picgen/docker-compose.yml.bak-20261105T103228Z-pre-0.1.76`。生产前后17用户/525任务/502图片，quick_check=ok。
+- 生产于2026-11-05T10:32:29Z启动0.1.76，healthy、重启0；generation/editing两个恢复开关均true，xhigh与注册保持。实际部署容器内验证generate预选images-generate，reference/edit/variant预选images-edit；本地验收容器已清理。行程图独立链路仍不在恢复范围。
