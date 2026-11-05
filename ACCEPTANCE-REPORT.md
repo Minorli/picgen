@@ -483,3 +483,14 @@
 - 容器内 Pillow=13.0.0、certifi=2026.10.19，使用更新后的证书对上游 HTTPS GET 得到 200；无付费生图探测。生产容器内纯解析验证真实同结构的 nested moderation/output，准确返回新提示，未发送 TG 或创建业务任务。
 - 浏览器页脚和脚本版本均为 0.1.74，注册按钮可见；本地临时验收容器已清理。PR #46 同步更新范围，仍待独立批准合并，主分支保护未改动。
 - 发布边界：已修复平台结果解析、完整性判断、诊断与错误提示；外部生成结果审核仍可能拦截同一画面，未承诺取消上游审核或用自动重试掩盖失败。
+
+## 0.1.75 普通生图应急恢复（2026-11-05）
+
+- 生产 0.1.74 服务与数据库健康，但任务 600–603 连续被上游图片工具以 `invalid_value / complexity` 拒绝。隔离复现得到 `Complexity 'xhigh' is not supported for this image model`；`high` 同样失败，不能据此说主模型不支持思考等级。
+- 用户清理账号池后，仅通过 API 重新探测（未登录上游后台）：Astra/Sol、Sunburst/Flare/Image 2、候选 Image 2.6 的 Responses 工具路径仍拒绝 complexity，工具回显为 gpt-image-2-codex；账号类型未在响应中确认。官方 ChatGPT 发布记录确认 Images 2.6 已发布，但候选 API ID `gpt-image-2.6` 未验证可用，不能把目录和请求名称当成实际执行模型证明。
+- Images 直接调用 Sunburst/Flare 可出图，但最初未遵守请求画幅；增加明确方向和宽高比提示后，返回 875x1798，按既有 3% 比例阈值可以归一到1088x2240，不放宽阈值、不强裁不同画幅。
+- 新开关 `PICGEN_PREFER_IMAGES_FOR_GENERATION` 默认 false；开启时，仅无输入图的 generate 请求预先走 Images，显式选择 Responses 仍保留。不是失败后的自动重发。
+- 识图、文字检查与其他 Responses 调用保持 Astra/xhigh 配置；普通生图使用直接 Images 通道，不声称仍由 Astra 调度。图片质量继续 high，原始文案与历史元数据保留。
+- 实际通过 `/api/image-jobs` 对应处理链验证中文标题海报，约32秒返回并保存1088x2240 PNG，无size_mismatch；人工检查标题/副标题和图片完整性。原生reference编辑接口另测成功，但本版本未改变带图任务或行程自动路由，不能宣称这些路径全部恢复。
+- 新增13项回归；完整 `./scripts/check.sh` **674 passed**（121.78秒），Ruff、Mypy通过；JS语法、锁文件、依赖扫描通过，独立审查无阻断。
+- 生产切换与备份结果完成后补充。禁止登录上游管理后台的限制继续遵守。

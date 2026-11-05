@@ -45,6 +45,7 @@ class Settings(BaseSettings):
         DEFAULT_RESPONSES_REASONING_EFFORT
     )
     default_size: str = "1088x2240"
+    prefer_images_for_generation: bool = False
     default_api_key: str = ""
 
     upstream_user_agent: str = DEFAULT_USER_AGENT

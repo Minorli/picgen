@@ -212,6 +212,20 @@ def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
     return {**options, "quality": "high"}
 
 
+def _append_generation_canvas_prompt(prompt: str, size: str) -> str:
+    dimensions = _parse_requested_size(size)
+    if dimensions is None:
+        return prompt
+    width, height = dimensions
+    orientation = "竖版长图" if height > width else "横版宽图" if width > height else "方形画布"
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"画布尺寸要求：最终输出图片必须精确为 {width}x{height} 像素（宽x高）。"
+        f"构图必须为{orientation}，宽高比为 {width}:{height}；"
+        "请按这个画幅安排全部主体与文字，不得更换宽高比或裁掉内容。"
+    )
+
+
 def _responses_reasoning_options(
     model: str,
     reasoning_effort: str,
@@ -375,7 +389,10 @@ def _resolve_image_job_transport(
     mode: str,
     has_input: bool,
     preferred_transport: str = "auto",
+    prefer_images_for_generation: bool = False,
 ) -> str:
+    if prefer_images_for_generation and mode == "generate" and not has_input and preferred_transport != "responses":
+        return "images-generate"
     if preferred_transport == "responses" or size not in IMAGES_API_EXACT_SIZES:
         return "responses-image"
     if has_input or mode in IMAGE_INPUT_MODES:
@@ -396,6 +413,7 @@ def _resolve_image_execution_plan(
         mode=parsed.mode,
         has_input=has_input,
         preferred_transport=advanced.preferred_transport if advanced else "auto",
+        prefer_images_for_generation=settings.prefer_images_for_generation,
     )
     if transport == "images-generate":
         endpoint_url = (advanced.generate_url if advanced else None) or settings.default_generate_url
@@ -4822,9 +4840,12 @@ async def handle_generate(
         recipe_id = ""
         recipe_version = ""
 
+    upstream_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size:
+        upstream_prompt = _append_generation_canvas_prompt(upstream_prompt, size)
     upstream_payload: dict[str, Any] = {
         "model": model,
-        "prompt": append_restricted_destination_guard(effective_prompt),
+        "prompt": upstream_prompt,
         **image_options,
     }
     if size and size != "auto":
