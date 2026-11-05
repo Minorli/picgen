@@ -108,6 +108,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
+        elif request.url.path in {"/", "/index.html"}:
+            # Revalidate the entry page so its versioned asset URLs follow
+            # deployments; include this header on conditional 304 responses.
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
 

@@ -681,6 +681,7 @@ class AuthStore:
         normalized = normalize_username(username)
         clean_username = username.strip()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT *
@@ -728,15 +729,34 @@ class AuthStore:
                         company="",
                         department="",
                     )
+            password_changed = not verify_password(password, str(row["password_hash"]))
+            revoke_credentials = password_changed or str(row["role"]) != "admin" or not bool(row["is_active"])
             conn.execute(
                 """
                 UPDATE users
                 SET username = ?, password_hash = ?, role = 'admin', is_active = 1,
-                    failed_login_count = 0, locked_until = NULL
+                    failed_login_count = 0, locked_until = NULL,
+                    password_changed_at = CASE WHEN ? THEN ? ELSE password_changed_at END
                 WHERE id = ?
                 """,
-                (clean_username, hash_password(password), row["id"]),
+                (
+                    clean_username,
+                    hash_password(password) if password_changed else str(row["password_hash"]),
+                    password_changed,
+                    now,
+                    row["id"],
+                ),
             )
+            if revoke_credentials:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+                conn.execute(
+                    """
+                    UPDATE password_reset_requests
+                    SET status = 'resolved', resolved_at = ?, resolved_by_user_id = NULL
+                    WHERE status = 'pending' AND (user_id = ? OR username_normalized = ?)
+                    """,
+                    (now, row["id"], normalized),
+                )
             return _auth_user_from_row(row, username=clean_username, role="admin", is_active=True)
 
     def authenticate(self, username: str, password: str) -> AuthUser:
@@ -992,10 +1012,13 @@ class AuthStore:
 
     def reset_password_with_token(self, *, token: str, password: str) -> AuthUser | None:
         token_hash = hash_session_token(token.strip())
-        now_dt = _now()
-        now = _datetime_text(now_dt)
         new_hash = hash_password(password)
         with self._lock, self._connect() as conn:
+            # Serialize validation and consumption across workers: a token
+            # revoked or consumed concurrently must not overwrite newer credentials.
+            conn.execute("BEGIN IMMEDIATE")
+            now_dt = _now()
+            now = _datetime_text(now_dt)
             row = conn.execute(
                 """
                 SELECT
@@ -1299,6 +1322,14 @@ class AuthStore:
             )
             if updated_cursor.rowcount != 1:
                 raise InvalidCredentialsError("current_password")
+            conn.execute(
+                """
+                UPDATE password_reset_requests
+                SET status = 'resolved', resolved_at = ?, resolved_by_user_id = NULL
+                WHERE status = 'pending' AND (user_id = ? OR username_normalized = ?)
+                """,
+                (now, user_id, str(row["username_normalized"])),
+            )
             if token_hash:
                 conn.execute(
                     """
@@ -1811,6 +1842,8 @@ class AuthStore:
                     j.recipe_version,
                     j.status,
                     j.sample_count,
+                    j.size AS requested_size,
+                    j.image_count,
                     j.started_at,
                     j.completed_at,
                     j.elapsed_ms,
@@ -1858,6 +1891,8 @@ class AuthStore:
             "recipe_version": str(row["recipe_version"] or ""),
             "status": str(row["status"] or ""),
             "sample_count": max(1, int(row["sample_count"] or 1)),
+            "size": str(row["requested_size"] or ""),
+            "image_count": max(0, int(row["image_count"] or 0)),
             "started_at": str(row["started_at"] or ""),
             "completed_at": str(row["completed_at"] or ""),
             "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
@@ -2164,8 +2199,11 @@ class AuthStore:
             ).fetchall()
         return [_gallery_image_row_to_dict(row) for row in rows]
 
-    def list_generation_jobs_for_user(self, *, user_id: int, limit: int = 30) -> list[dict[str, Any]]:
-        bounded_limit = max(1, min(int(limit or 30), 100))
+    def list_generation_jobs_for_user(
+        self, *, user_id: int, limit: int = 30, before_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        # One extra row lets the API detect a next page without a separate count.
+        bounded_limit = max(1, min(int(limit or 30), 101))
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
@@ -2208,11 +2246,11 @@ class AuthStore:
                         ORDER BY gi.candidate_index ASC, gi.id ASC
                         LIMIT 1
                     )
-                WHERE j.user_id = ?
-                ORDER BY j.started_at DESC, j.id DESC
+                WHERE j.user_id = ? AND (? IS NULL OR j.id < ?)
+                ORDER BY j.id DESC
                 LIMIT ?
                 """,
-                (user_id, bounded_limit),
+                (user_id, before_id, before_id, bounded_limit),
             ).fetchall()
         return [_generation_job_row_to_dict(row) for row in rows]
 
