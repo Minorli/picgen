@@ -494,3 +494,12 @@
 - 实际通过 `/api/image-jobs` 对应处理链验证中文标题海报，约32秒返回并保存1088x2240 PNG，无size_mismatch；人工检查标题/副标题和图片完整性。原生reference编辑接口另测成功，但本版本未改变带图任务或行程自动路由，不能宣称这些路径全部恢复。
 - 新增13项回归；完整 `./scripts/check.sh` **674 passed**（121.78秒），Ruff、Mypy通过；JS语法、锁文件、依赖扫描通过，独立审查无阻断。
 - 生产切换与备份结果完成后补充。禁止登录上游管理后台的限制继续遵守。
+
+### 0.1.75 生产恢复验收
+
+- 代码提交 `0b3cab3d13dd1db5f3386c20e55f7fa8ff466534`，GitHub CI通过（run 41988753496）；本机GPG密钥锁定导致本地签名超时，改用GitHub官方createCommitOnBranch签名提交，verified=true。提交树与已测试的index逐字节一致，未关闭签名要求或分支保护。
+- [Release v0.1.75](https://github.com/Minorli/picgen/releases/tag/v0.1.75)及Docker镜像已发布，摘要`sha256:815b910ba70b237f68ee8e7820fe784431f75a463c71c08d20591afb51a016e8`。
+- 切换前确认active任务0且完成时间超过30秒，SQLite备份`/vol1/data1/picgen/backups/auth-20261105T074715Z-pre-0.1.75.sqlite3`，SHA256`f2ae4031bc6c92b4a826f090116b7ce2167681c9e539c032061e0fac57208503`；Compose备份`/vol1/data1/picgen/docker-compose.yml.bak-20261105T074715Z-pre-0.1.75`。基线17用户/521任务/500图片。
+- 生产Compose显式启用`PICGEN_PREFER_IMAGES_FOR_GENERATION=true`，保留Astra/xhigh和注册开启。新进程确认普通1088x2240任务预选images-generate，服务healthy。
+- 在生产容器中使用实际部署的handler和上游做隔离出图（输出仅保存/tmp，不创建生产任务或发TG），约31秒成功得到1088x2240 PNG，size_mismatch=false。没有中断用户任务，也未自动重跑失败的客户请求。
+- 应急恢复边界：无参考图的普通海报已恢复；带图/行程的自动路由尚未切换，不宣称上游Responses工具故障已修复。客户端显式指定Responses仍遵从其选择。临时本地容器已清理。
