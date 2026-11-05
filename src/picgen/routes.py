@@ -390,7 +390,10 @@ def _resolve_image_job_transport(
     has_input: bool,
     preferred_transport: str = "auto",
     prefer_images_for_generation: bool = False,
+    prefer_images_for_editing: bool = False,
 ) -> str:
+    if prefer_images_for_editing and has_input and preferred_transport != "responses":
+        return "images-edit"
     if prefer_images_for_generation and mode == "generate" and not has_input and preferred_transport != "responses":
         return "images-generate"
     if preferred_transport == "responses" or size not in IMAGES_API_EXACT_SIZES:
@@ -414,6 +417,7 @@ def _resolve_image_execution_plan(
         has_input=has_input,
         preferred_transport=advanced.preferred_transport if advanced else "auto",
         prefer_images_for_generation=settings.prefer_images_for_generation,
+        prefer_images_for_editing=settings.prefer_images_for_editing,
     )
     if transport == "images-generate":
         endpoint_url = (advanced.generate_url if advanced else None) or settings.default_generate_url
@@ -4953,9 +4957,12 @@ async def handle_edit(
     _validate_exact_image_size(size)
     strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
+    upstream_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size:
+        upstream_prompt = _append_generation_canvas_prompt(upstream_prompt, size)
     fields: dict[str, Any] = {
         "model": model,
-        "prompt": append_restricted_destination_guard(effective_prompt),
+        "prompt": upstream_prompt,
         **image_options,
     }
     if size and size != "auto":

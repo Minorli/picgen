@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     )
     default_size: str = "1088x2240"
     prefer_images_for_generation: bool = False
+    prefer_images_for_editing: bool = False
     default_api_key: str = ""
 
     upstream_user_agent: str = DEFAULT_USER_AGENT

@@ -503,3 +503,12 @@
 - 生产Compose显式启用`PICGEN_PREFER_IMAGES_FOR_GENERATION=true`，保留Astra/xhigh和注册开启。新进程确认普通1088x2240任务预选images-generate，服务healthy。
 - 在生产容器中使用实际部署的handler和上游做隔离出图（输出仅保存/tmp，不创建生产任务或发TG），约31秒成功得到1088x2240 PNG，size_mismatch=false。没有中断用户任务，也未自动重跑失败的客户请求。
 - 应急恢复边界：无参考图的普通海报已恢复；带图/行程的自动路由尚未切换，不宣称上游Responses工具故障已修复。客户端显式指定Responses仍遵从其选择。临时本地容器已清理。
+
+## 0.1.76 带图任务恢复（2026-11-05）
+
+- 最新报错为任务607，reference/1088x2240，request ID `59fae358067b`，仍走Responses图片工具并在88秒后返回invalid_value；普通任务605/606已在Images通道成功，未发生恢复回退。
+- 增加独立`PICGEN_PREFER_IMAGES_FOR_EDITING`开关，默认false；生产开启后，带输入图的reference/variant/edit/generate任务预选原生Images编辑接口，显式Responses设置仍优先。
+- 严格尺寸编辑请求复用方向/画幅提示，原始图片、蒙版字节和高画质保留；保留既有3%比例保护、蒙版外合成与零尺寸重试默认，不增加失败后付费重发。
+- 实际通过imagejobs处理链使用1.25MB JPEG参考图验证，63.4秒返回并保存1088x2240 PNG，transport=images-edit，size_mismatch=false。未创建生产测试任务或发送TG。
+- 新增7项回归，相关53项通过；独立审查无阻断。行程地图的独立Responses链路未调整，不能宣称恢复。完整检查及部署信息随后补充。
+- 最终完整检查681 passed（132.41秒），Ruff/Mypy/JS语法/锁文件均通过。依赖扫描首次PyPI TLS连接异常，重试后无已知漏洞。

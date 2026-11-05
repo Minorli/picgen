@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-minorli/picgen}"
-VERSION="${VERSION:-0.1.75}"
+VERSION="${VERSION:-0.1.76}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
 docker buildx build \
