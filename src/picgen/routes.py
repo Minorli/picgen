@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import anyio
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import Path as FastAPIPath
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
@@ -42,7 +43,7 @@ from .config import (
     RESPONSES_REASONING_EFFORTS,
     Settings,
 )
-from .errors import APIError
+from .errors import NO_IMAGE_ERROR_MESSAGES, APIError
 from .itinerary_map import (
     apply_itinerary_coordinate_estimates,
     build_itinerary_map_plan_async,
@@ -75,6 +76,7 @@ from .restricted_destinations import (
     values_contain_restricted_destination,
 )
 from .schemas import (
+    _SQLITE_MAX_INT,
     AdminCreateUserRequest,
     AdminResetPasswordRequest,
     AdminUpdateUserOrgRequest,
@@ -132,12 +134,14 @@ from .upstream import (
     validate_url,
 )
 from .upstream.client import UpstreamClient
+from .upstream.errors import response_image_diagnostics, sanitize_image_diagnostics
 
 logger = get_logger("picgen.routes")
 _TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
+SqliteIdPath = Annotated[int, FastAPIPath(ge=1, le=_SQLITE_MAX_INT)]
 _ITINERARY_ID_RE = re.compile(
-    r"(?i)(?:行程\s*id|行程\s*ID|itinerary\s*id|trip\s*id|(?<![A-Za-z])id)"
-    r"\s*[:：#-]?\s*([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
+    r"(?i)(?:(?:行程|itinerary|trip)\s*id\s*[:：#-]?\s*|(?<![A-Za-z0-9])id\b\s*[:：#]\s*)"
+    r"([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
 )
 
 
@@ -209,6 +213,20 @@ def _highest_quality_image_options(options: dict[str, Any]) -> dict[str, Any]:
     if quality and quality != "auto":
         return options
     return {**options, "quality": "high"}
+
+
+def _append_generation_canvas_prompt(prompt: str, size: str) -> str:
+    dimensions = _parse_requested_size(size)
+    if dimensions is None:
+        return prompt
+    width, height = dimensions
+    orientation = "竖版长图" if height > width else "横版宽图" if width > height else "方形画布"
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"画布尺寸要求：最终输出图片必须精确为 {width}x{height} 像素（宽x高）。"
+        f"构图必须为{orientation}，宽高比为 {width}:{height}；"
+        "请按这个画幅安排全部主体与文字，不得更换宽高比或裁掉内容。"
+    )
 
 
 def _responses_reasoning_options(
@@ -374,7 +392,13 @@ def _resolve_image_job_transport(
     mode: str,
     has_input: bool,
     preferred_transport: str = "auto",
+    prefer_images_for_generation: bool = False,
+    prefer_images_for_editing: bool = False,
 ) -> str:
+    if prefer_images_for_editing and has_input and preferred_transport != "responses":
+        return "images-edit"
+    if prefer_images_for_generation and mode == "generate" and not has_input and preferred_transport != "responses":
+        return "images-generate"
     if preferred_transport == "responses" or size not in IMAGES_API_EXACT_SIZES:
         return "responses-image"
     if has_input or mode in IMAGE_INPUT_MODES:
@@ -395,6 +419,8 @@ def _resolve_image_execution_plan(
         mode=parsed.mode,
         has_input=has_input,
         preferred_transport=advanced.preferred_transport if advanced else "auto",
+        prefer_images_for_generation=settings.prefer_images_for_generation,
+        prefer_images_for_editing=settings.prefer_images_for_editing,
     )
     if transport == "images-generate":
         endpoint_url = (advanced.generate_url if advanced else None) or settings.default_generate_url
@@ -1355,8 +1381,16 @@ async def _generate_itinerary_artwork(
     output_size: str,
     composition: dict[str, Any],
 ) -> dict[str, Any]:
-    endpoint_url = validate_url(settings.default_responses_url, "Responses 图像接口 URL")
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 图像接口 URL",
+    )
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
     if not api_key:
         return {}
     model = _normalize_responses_model(
@@ -1425,6 +1459,7 @@ async def _generate_itinerary_artwork(
             "endpoint_url": endpoint_url,
             "files_endpoint_url": sibling_endpoint_url(endpoint_url, "files"),
             "transport": "responses-itinerary-artwork",
+            "image_model": str(tool["model"]),
             "sample_count": 1,
             "logo_requested": parsed.logo_requested,
             "logo_overlay_applied": False,
@@ -1454,6 +1489,7 @@ async def _generate_itinerary_artwork(
             "prompt": parsed.title,
             "model": model,
             "transport": "responses-itinerary-artwork",
+            "image_model": str(tool["model"]),
             "size": f"{width}x{height}",
             "requested_size": composition["requested_size"],
             "composition": composition,
@@ -1468,12 +1504,7 @@ async def _generate_itinerary_artwork(
     )
     image_data_url = str(saved.get("image_data_url") or "")
     if not saved.get("saved_image_url") and not image_data_url:
-        raise APIError(
-            HTTPStatus.BAD_GATEWAY,
-            "路线图生成接口没有返回可保存的图片",
-            _details_text(compact_raw_response(upstream_response)),
-            code="upstream_no_image",
-        )
+        raise _no_image_error(upstream_response)
     image_mime = str(saved.get("saved_image_mime") or "")
     if (image_mime and not image_mime.startswith("image/")) or (
         image_data_url and not image_data_url.startswith("data:image/")
@@ -1514,6 +1545,7 @@ async def _generate_itinerary_artwork(
                 "prompt": parsed.title,
                 "model": model,
                 "transport": "responses-itinerary-artwork",
+                "image_model": str(tool["model"]),
                 "route_style": parsed.route_style,
                 "size": f"{width}x{height}",
                 "requested_size": composition["requested_size"],
@@ -1552,6 +1584,7 @@ async def _generate_itinerary_artwork(
     return {
         **image,
         "transport": "responses-itinerary-artwork",
+        "image_model": str(tool["model"]),
         "size": f"{width}x{height}",
         "requested_size": composition["requested_size"],
         "composition": composition,
@@ -1657,10 +1690,18 @@ async def _complete_itinerary_plan_with_ai_coordinates(
 ) -> dict[str, Any]:
     if plan.get("status") == "ready":
         return plan
-    endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
-    api_key = (parsed.api_key or settings.default_api_key).strip()
-    if not api_key:
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 文本接口 URL",
+    )
+    if not (parsed.api_key or settings.default_api_key).strip():
         return plan
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
 
     model = _normalize_responses_model(
         parsed.model,
@@ -1800,12 +1841,7 @@ async def handle_itinerary_map_render(
                 user_id=user.id if user else None,
                 username=user.username if user else "",
             )
-            raise APIError(
-                HTTPStatus.BAD_GATEWAY,
-                "路线图 AI 底图这次没有生成成功，请稍后重试",
-                "Responses image generation completed without a usable image output.",
-                code="upstream_no_image",
-            ) from exc
+            raise
         except (OSError, ValueError, binascii.Error) as exc:
             log_event(
                 logger,
@@ -2732,20 +2768,27 @@ def create_router() -> APIRouter:
 
     @router.get("/api/jobs")
     async def generation_jobs(
-        limit: int = 30,
+        limit: int = Query(default=30, ge=1, le=100),
+        before_id: int | None = Query(default=None, ge=1, le=9_223_372_036_854_775_807),
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
         if user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         jobs = await anyio.to_thread.run_sync(
-            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit)
+            lambda: auth_store.list_generation_jobs_for_user(user_id=user.id, limit=limit + 1, before_id=before_id)
         )
-        return {"scope": "self", "count": len(jobs), "jobs": jobs}
+        page = jobs[:limit]
+        return {
+            "scope": "self",
+            "count": len(page),
+            "jobs": page,
+            "next_before_id": page[-1]["id"] if len(jobs) > limit else None,
+        }
 
     @router.get("/api/generated-images/{generated_image_id}")
     async def generated_image_detail(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
@@ -2763,7 +2806,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/generated-images/{generated_image_id}/versions")
     async def generated_image_versions(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         limit: int = 200,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2787,7 +2830,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/gallery/{generated_image_id}")
     async def update_gallery_item(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         body: Any = JSON_BODY,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2811,13 +2854,20 @@ def create_router() -> APIRouter:
 
     @router.get("/api/usage")
     async def usage(
+        settings: Settings = Depends(get_settings),
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
-        target_user_id = None if user is None or user.is_admin else user.id
+        if not settings.auth_enabled or user is None:
+            return {
+                "current_user": None,
+                "scope": "self",
+                "users": [],
+            }
+        target_user_id = None if user.is_admin else user.id
         users = await anyio.to_thread.run_sync(lambda: auth_store.usage_summary(target_user_id))
         return {
-            "current_user": user.public_dict() if user else None,
+            "current_user": user.public_dict(),
             "scope": "all" if target_user_id is None else "self",
             "users": users,
         }
@@ -2859,7 +2909,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/admin/users/{user_id}/org")
     async def admin_update_user_org(
-        user_id: int,
+        user_id: SqliteIdPath,
         body: Any = JSON_BODY,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2929,7 +2979,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/admin/users/{user_id}/password")
     async def admin_reset_user_password(
-        user_id: int,
+        user_id: SqliteIdPath,
         body: Any = JSON_BODY,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2949,7 +2999,7 @@ def create_router() -> APIRouter:
 
     @router.delete("/api/admin/users/{user_id}")
     async def admin_delete_user(
-        user_id: int,
+        user_id: SqliteIdPath,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
@@ -3140,7 +3190,7 @@ def create_router() -> APIRouter:
         started_at = time.perf_counter()
         try:
             source_record = await anyio.to_thread.run_sync(
-                lambda: auth_store.generated_image_for_user(
+                lambda: auth_store.generated_image_detail_for_user(
                     generated_image_id=parsed.generated_image_id,
                     user_id=user.id,
                 )
@@ -3195,7 +3245,11 @@ def create_router() -> APIRouter:
                 _send_generation_success_alert(
                     settings,
                     _build_final_image_success_alert(
-                        image=updated,
+                        image={
+                            **updated,
+                            "lineage": source_record.get("lineage", {}),
+                            "metadata": source_record.get("metadata", {}),
+                        },
                         user=user,
                         elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                     ),
@@ -3227,7 +3281,7 @@ def create_router() -> APIRouter:
         settings: Settings = Depends(get_settings),
         user: AuthUser | None = Depends(require_current_user),
     ) -> dict[str, Any]:
-        if user is None:
+        if settings.auth_enabled and user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(ItineraryMapPlanRequest, payload)
@@ -3548,12 +3602,9 @@ def _text_fidelity_passed(text: str) -> bool:
     normalized = re.sub(r"\s+", "", text or "")
     if not normalized:
         return False
-    if "结论：通过" in normalized or "结论:通过" in normalized:
-        return True
-    failure_markers = ("结论：不通过", "结论:不通过", "不通过", "缺失", "疑似错误", "残留旧文字", "错字", "漏字")
-    if any(marker in normalized for marker in failure_markers):
+    if "结论：不通过" in normalized or "结论:不通过" in normalized:
         return False
-    return False
+    return "结论：通过" in normalized or "结论:通过" in normalized
 
 
 def _parse_team_chat_mentions(content: str) -> list[str]:
@@ -4368,6 +4419,12 @@ def _result_logo_overlay_applied(result: dict[str, Any]) -> bool:
     return any(bool(image.get("logo_overlay_applied")) for image in _result_images(result))
 
 
+def _saved_image_size(image: dict[str, Any]) -> str:
+    width = image.get("saved_image_width")
+    height = image.get("saved_image_height")
+    return f"{width}x{height}" if width and height else ""
+
+
 def _build_generation_success_alert(
     *,
     path: str,
@@ -4388,7 +4445,7 @@ def _build_generation_success_alert(
         path=path,
         mode=str(result.get("mode") or _job_mode(path, payload) or ""),
         model=str(result.get("model") or payload.get("model") or ""),
-        size=str(result.get("size") or payload.get("size") or ""),
+        size=", ".join(dict.fromkeys(size for image in _result_images(result) if (size := _saved_image_size(image)))),
         prompt=str(result.get("prompt") or payload.get("prompt") or ""),
         image_count=_result_image_count(result),
         candidate_count=int(result.get("candidate_count") or _result_image_count(result) or 0),
@@ -4398,6 +4455,9 @@ def _build_generation_success_alert(
         logo_overlay_applied=_result_logo_overlay_applied(result),
         saved_image_urls=_result_saved_image_urls(result),
         generated_image_ids=_result_generated_image_ids(result, image_records),
+        transport=str(result.get("transport") or _job_transport(path)),
+        image_model=str(result.get("image_model") or ""),
+        requested_size=str(payload.get("size") or result.get("size") or ""),
     )
 
 
@@ -4407,8 +4467,10 @@ def _build_final_image_success_alert(
     user: AuthUser,
     elapsed_ms: float,
 ) -> GenerationSuccessAlert:
+    lineage = image.get("lineage") or {}
+    metadata = image.get("metadata") or {}
     return GenerationSuccessAlert(
-        request_id=get_request_id(),
+        request_id=str(lineage.get("request_id") or ""),
         job_id=int(image.get("job_id") or 0),
         user_id=user.id,
         username=user.username,
@@ -4416,16 +4478,24 @@ def _build_final_image_success_alert(
         path="/api/final-images",
         mode=str(image.get("mode") or ""),
         model=str(image.get("model") or ""),
-        size="",
+        size=_saved_image_size(image),
         prompt=str(image.get("prompt") or ""),
         image_count=1 if image.get("saved_image_url") else 0,
         candidate_count=1 if image.get("saved_image_url") else 0,
         saved_bytes=max(0, int(image.get("saved_image_bytes") or 0)),
-        elapsed_ms=elapsed_ms,
+        elapsed_ms=lineage.get("elapsed_ms"),
         logo_requested=bool(image.get("logo_requested") or image.get("logo_overlay_applied")),
         logo_overlay_applied=bool(image.get("logo_overlay_applied")),
         saved_image_urls=[str(image.get("saved_image_url") or "")] if image.get("saved_image_url") else [],
         generated_image_ids=[int(image.get("id") or 0)] if image.get("id") else [],
+        transport=str(lineage.get("transport") or metadata.get("transport") or ""),
+        image_model=str(metadata.get("image_model") or ""),
+        requested_size=str(lineage.get("size") or metadata.get("requested_size") or ""),
+        generation_path=str(lineage.get("endpoint_path") or ""),
+        final_request_id=get_request_id(),
+        final_save_elapsed_ms=elapsed_ms,
+        task_image_count=lineage.get("image_count"),
+        requested_image_count=lineage.get("sample_count"),
     )
 
 
@@ -4614,15 +4684,27 @@ async def _with_timing(
                     image_records=image_records,
                     elapsed_ms=elapsed_ms,
                 )
-            await anyio.to_thread.run_sync(
-                lambda: auth_store.record_usage(
-                    user_id=user.id,
-                    endpoint_path=path,
-                    mode=str(result.get("mode") or ""),
-                    image_count=_result_image_count(result),
-                    saved_bytes=_result_saved_bytes(result),
+            try:
+                await anyio.to_thread.run_sync(
+                    lambda: auth_store.record_usage(
+                        user_id=user.id,
+                        endpoint_path=path,
+                        mode=str(result.get("mode") or ""),
+                        image_count=_result_image_count(result),
+                        saved_bytes=_result_saved_bytes(result),
+                    )
                 )
-            )
+            except Exception as usage_exc:
+                # The paid result and job are already saved. A secondary usage
+                # counter failure must not turn them into a failed generation.
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "generation_usage_record_failed",
+                    path=path,
+                    job_id=job_id,
+                    error=type(usage_exc).__name__,
+                )
         if generation_alert is not None and _should_send_generation_success_alert(generation_alert):
             _spawn_notification_task(_send_generation_success_alert(settings, generation_alert))
     except APIError as exc:
@@ -4660,7 +4742,7 @@ async def _with_timing(
         raise
     except Exception as exc:
         error_code = type(exc).__name__
-        error_message = str(exc)
+        error_message = "本地服务发生未预期错误，请联系管理员并提供 request_id。"
         if auth_store is not None and job_id is not None:
             try:
                 await anyio.to_thread.run_sync(
@@ -4785,9 +4867,12 @@ async def handle_generate(
         recipe_id = ""
         recipe_version = ""
 
+    upstream_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size:
+        upstream_prompt = _append_generation_canvas_prompt(upstream_prompt, size)
     upstream_payload: dict[str, Any] = {
         "model": model,
-        "prompt": append_restricted_destination_guard(effective_prompt),
+        "prompt": upstream_prompt,
         **image_options,
     }
     if size and size != "auto":
@@ -4895,9 +4980,12 @@ async def handle_edit(
     _validate_exact_image_size(size)
     strict_size = _strict_requested_size(size)
     image_options = _highest_quality_image_options(openai_image_options(payload))
+    upstream_prompt = append_restricted_destination_guard(effective_prompt)
+    if strict_size:
+        upstream_prompt = _append_generation_canvas_prompt(upstream_prompt, size)
     fields: dict[str, Any] = {
         "model": model,
-        "prompt": append_restricted_destination_guard(effective_prompt),
+        "prompt": upstream_prompt,
         **image_options,
     }
     if size and size != "auto":
@@ -5014,8 +5102,19 @@ async def handle_responses_image(
     )
     reasoning_effort = reasoning_options.get("reasoning", {}).get("effort", "")
 
-    _ensure_no_restricted_destination_text(parsed.prompt)
-    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
+    original_prompt = (parsed.original_prompt or parsed.prompt).strip()
+    prompt_mode = parsed.prompt_mode
+    recipe_id = parsed.recipe_id or ""
+    recipe_version = parsed.recipe_version or ""
+    recipe = recipe_public_dict(recipe_id) if recipe_id else None
+    _ensure_no_restricted_destination_text(parsed.prompt, original_prompt)
+    _ensure_not_legacy_program_layout_background_prompt(parsed.prompt, original_prompt)
+    if prompt_mode == "recipe" and recipe is None:
+        raise APIError(HTTPStatus.BAD_REQUEST, "请选择有效的创作配方", code="validation_error")
+    if prompt_mode != "recipe":
+        recipe_id = ""
+        recipe_version = ""
+    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=original_prompt)
     effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -5118,9 +5217,18 @@ async def handle_responses_image(
         )
 
     metadata = request_metadata({**payload, **image_options}, size=size)
+    metadata["image_model"] = str(tool["model"])
+    metadata["original_prompt"] = original_prompt
+    metadata["effective_prompt"] = effective_prompt
+    metadata["prompt_mode"] = prompt_mode
+    if recipe_id:
+        metadata["recipe_id"] = recipe_id
+    if recipe_version:
+        metadata["recipe_version"] = recipe_version
+    if recipe is not None:
+        metadata["recipe_title"] = recipe["title"]
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
-        metadata["effective_prompt"] = effective_prompt
     mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
     image_metadata = _image_reference_metadata(image_parts)
 
@@ -5172,6 +5280,30 @@ async def handle_responses_image(
     )
 
 
+def _no_image_error(upstream_response: dict[str, Any]) -> APIError:
+    # Even normalized diagnostics can arrive through an untrusted compatible
+    # provider. Only bounded structural facts may reach the UI or alerts.
+    diagnostics = sanitize_image_diagnostics(upstream_response.get("image_diagnostics"))
+    response_diagnostics = sanitize_image_diagnostics(response_image_diagnostics(upstream_response))
+    if diagnostics:
+        diagnostics = {
+            **diagnostics,
+            "response_id": diagnostics.get("response_id") or response_diagnostics.get("response_id", ""),
+            "response_status": diagnostics.get("response_status") or response_diagnostics.get("response_status", ""),
+        }
+    else:
+        diagnostics = response_diagnostics
+    message = NO_IMAGE_ERROR_MESSAGES.get(
+        str(diagnostics.get("reason") or ""), NO_IMAGE_ERROR_MESSAGES["no_image_output"]
+    )
+    return APIError(
+        HTTPStatus.BAD_GATEWAY,
+        message,
+        _details_text(diagnostics),
+        code="upstream_no_image",
+    )
+
+
 async def _finalize_image_response(
     *,
     upstream_response: dict[str, Any],
@@ -5195,14 +5327,9 @@ async def _finalize_image_response(
     )
     # An empty upstream response (no candidates) must be a clear error, not a blank
     # 200 that gets recorded as a "succeeded" job with 0 images. The itinerary path
-    # catches this code to surface its own message / fallback.
+    # also preserves these safe diagnostics and the same failure code.
     if int(saved.get("candidate_count") or 0) <= 0:
-        raise APIError(
-            HTTPStatus.BAD_GATEWAY,
-            "图片生成接口这次没有返回图片，请稍后重试。",
-            _details_text(compact_raw_response(upstream_response)),
-            code="upstream_no_image",
-        )
+        raise _no_image_error(upstream_response)
     _mark_image_size_mismatch(saved, save_context)
     return {**extra, **saved}
 

@@ -151,11 +151,13 @@ function analyzeRegion(ctx, region) {
   let edgeCount = 0
   let denseEdgeCount = 0
   let textLikeEdgeCount = 0
+  let luminanceTotal = 0
 
   for (let py = 0; py < height; py += 1) {
     for (let px = 0; px < width; px += 1) {
       const index = (py * width + px) * 4
       const luminance = pixelLuminance(data, index)
+      luminanceTotal += luminance
       let hasDenseEdge = false
       let hasTextLikeEdge = false
 
@@ -186,9 +188,11 @@ function analyzeRegion(ctx, region) {
   const averageEdge = edgeCount ? edgeTotal / edgeCount / 255 : 0
   const edgeDensity = denseEdgeCount / pixelCount
   const textLikeDensity = textLikeEdgeCount / pixelCount
+  const averageLuminance = luminanceTotal / pixelCount
   return {
     complexity: averageEdge * 100,
     penalty: averageEdge * 25 + edgeDensity * 30 + textLikeDensity * 45,
+    averageLuminance,
   }
 }
 
@@ -236,9 +240,14 @@ export function calculateLogoPlacementScore(ctx, canvas, placement) {
   const safetyRegion = expandLogoSafetyRegion(canvas.width, canvas.height, placement)
   const coreAnalysis = analyzeRegion(ctx, placement)
   const safetyAnalysis = analyzeRegion(ctx, safetyRegion)
+  // 官方 LOGO 文字为深色（黑色字标），极暗背景（亮度 < 48）会导致字标不可见。
+  const darkBackgroundPenalty = coreAnalysis.averageLuminance < 48
+    ? ((48 - coreAnalysis.averageLuminance) / 48) * 6
+    : 0
   return coreAnalysis.penalty * 0.55
     + safetyAnalysis.penalty * 0.35
     + safetyAnalysis.complexity * 0.10
+    + darkBackgroundPenalty
 }
 
 export function chooseLogoPlacement(scoredCandidates) {

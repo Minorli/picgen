@@ -29,9 +29,9 @@ Source: https://github.com/arco-design/arco-design, commit 79516eebaaf11f3459508
   <!-- general/outline/image.svg -->
   <symbol id="icon-image" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
 <path d="M24 33L33 24V33H24ZM24 33L20.5 28.5L17 33H24ZM39 41H9C7.89543 41 7 40.1046 7 39V9C7 7.89543 7.89543 7 9 7H39C40.1046 7 41 7.89543 41 9V39C41 40.1046 40.1046 41 39 41ZM15 15H17V17H15V15Z" stroke-linecap="butt"></path>
-<path d="M33 33V24L24 33H33Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
-<path d="M23.5 33L20.5 29L17.5 33H23.5Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
-<rect x="15" y="15" width="2" height="2" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></rect>
+<path d="M33 33V24L24 33H33Z" fill="currentColor" stroke="none" stroke-linecap="butt"></path>
+<path d="M23.5 33L20.5 29L17.5 33H23.5Z" fill="currentColor" stroke="none" stroke-linecap="butt"></path>
+<rect x="15" y="15" width="2" height="2" fill="currentColor" stroke="none" stroke-linecap="butt"></rect>
   </symbol>
   <!-- edit/outline/edit.svg -->
   <symbol id="icon-edit" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
@@ -130,9 +130,9 @@ Source: https://github.com/arco-design/arco-design, commit 79516eebaaf11f3459508
   </symbol>
   <!-- interactive-button/outline/more.svg -->
   <symbol id="icon-more" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4">
-<path d="M38 25L38 23L40 23L40 25L38 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
-<path d="M23 25L23 23L25 23L25 25L23 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
-<path d="M8 25L8 23L10 23L10 25L8 25Z" fill="currentColor" stroke="none" stroke-width="none" stroke-linecap="butt"></path>
+<path d="M38 25L38 23L40 23L40 25L38 25Z" fill="currentColor" stroke="none" stroke-linecap="butt"></path>
+<path d="M23 25L23 23L25 23L25 25L23 25Z" fill="currentColor" stroke="none" stroke-linecap="butt"></path>
+<path d="M8 25L8 23L10 23L10 25L8 25Z" fill="currentColor" stroke="none" stroke-linecap="butt"></path>
 <path d="M38 25L38 23L40 23L40 25L38 25Z" stroke-linecap="butt"></path>
 <path d="M23 25L23 23L25 23L25 25L23 25Z" stroke-linecap="butt"></path>
 <path d="M8 25L8 23L10 23L10 25L8 25Z" stroke-linecap="butt"></path>

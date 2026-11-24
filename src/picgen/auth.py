@@ -8,7 +8,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -173,7 +174,7 @@ class AuthStore:
             if self._initialized:
                 return
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._raw_connect() as conn:
+            with closing(self._raw_connect()) as conn, conn:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(
                     """
@@ -627,6 +628,7 @@ class AuthStore:
             username_normalized=normalized,
             role=normalized_role,
         )
+        password_hash = hash_password(password)
         with self._lock, self._connect() as conn:
             _require_active_org_unit(conn, clean_company, clean_department)
             try:
@@ -647,7 +649,7 @@ class AuthStore:
                     (
                         username.strip(),
                         normalized,
-                        hash_password(password),
+                        password_hash,
                         normalized_role,
                         1 if is_active else 0,
                         clean_company,
@@ -681,6 +683,7 @@ class AuthStore:
         normalized = normalize_username(username)
         clean_username = username.strip()
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT *
@@ -728,15 +731,34 @@ class AuthStore:
                         company="",
                         department="",
                     )
+            password_changed = not verify_password(password, str(row["password_hash"]))
+            revoke_credentials = password_changed or str(row["role"]) != "admin" or not bool(row["is_active"])
             conn.execute(
                 """
                 UPDATE users
                 SET username = ?, password_hash = ?, role = 'admin', is_active = 1,
-                    failed_login_count = 0, locked_until = NULL
+                    failed_login_count = 0, locked_until = NULL,
+                    password_changed_at = CASE WHEN ? THEN ? ELSE password_changed_at END
                 WHERE id = ?
                 """,
-                (clean_username, hash_password(password), row["id"]),
+                (
+                    clean_username,
+                    hash_password(password) if password_changed else str(row["password_hash"]),
+                    password_changed,
+                    now,
+                    row["id"],
+                ),
             )
+            if revoke_credentials:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+                conn.execute(
+                    """
+                    UPDATE password_reset_requests
+                    SET status = 'resolved', resolved_at = ?, resolved_by_user_id = NULL
+                    WHERE status = 'pending' AND (user_id = ? OR username_normalized = ?)
+                    """,
+                    (now, row["id"], normalized),
+                )
             return _auth_user_from_row(row, username=clean_username, role="admin", is_active=True)
 
     def authenticate(self, username: str, password: str) -> AuthUser:
@@ -992,10 +1014,13 @@ class AuthStore:
 
     def reset_password_with_token(self, *, token: str, password: str) -> AuthUser | None:
         token_hash = hash_session_token(token.strip())
-        now_dt = _now()
-        now = _datetime_text(now_dt)
         new_hash = hash_password(password)
         with self._lock, self._connect() as conn:
+            # Serialize validation and consumption across workers: a token
+            # revoked or consumed concurrently must not overwrite newer credentials.
+            conn.execute("BEGIN IMMEDIATE")
+            now_dt = _now()
+            now = _datetime_text(now_dt)
             row = conn.execute(
                 """
                 SELECT
@@ -1009,6 +1034,7 @@ class AuthStore:
                 WHERE r.token_hash = ?
                   AND r.status = 'pending'
                   AND u.is_active = 1
+                  AND (COALESCE(r.email, '') = '' OR LOWER(r.email) = LOWER(COALESCE(u.email, '')))
                 ORDER BY r.id DESC
                 LIMIT 1
                 """,
@@ -1299,6 +1325,14 @@ class AuthStore:
             )
             if updated_cursor.rowcount != 1:
                 raise InvalidCredentialsError("current_password")
+            conn.execute(
+                """
+                UPDATE password_reset_requests
+                SET status = 'resolved', resolved_at = ?, resolved_by_user_id = NULL
+                WHERE status = 'pending' AND (user_id = ? OR username_normalized = ?)
+                """,
+                (now, user_id, str(row["username_normalized"])),
+            )
             if token_hash:
                 conn.execute(
                     """
@@ -1340,6 +1374,8 @@ class AuthStore:
             clean_username = username.strip() or str(row["username"])
             normalized_username = normalize_username(clean_username)
             username_changed = normalized_username != str(row["username_normalized"])
+            clean_email = email.strip()[:160]
+            email_changed = clean_email.casefold() != str(row["email"] or "").strip().casefold()
             verified_password_hash = str(row["password_hash"])
             if username_changed and not verify_password(current_password, verified_password_hash):
                 raise InvalidCredentialsError("current_password")
@@ -1376,7 +1412,7 @@ class AuthStore:
                         wechat.strip()[:120],
                         phone_country_code.strip()[:8] or "+86",
                         phone.strip()[:40],
-                        email.strip()[:160],
+                        clean_email,
                         clean_company,
                         clean_department,
                         team.strip()[:120],
@@ -1402,6 +1438,15 @@ class AuthStore:
                     )
                 else:
                     conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            if email_changed:
+                conn.execute(
+                    """
+                    UPDATE password_reset_requests
+                    SET status = 'revoked', resolved_at = ?
+                    WHERE user_id = ? AND status = 'pending'
+                    """,
+                    (_now_text(), user_id),
+                )
             updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if updated is None:
                 raise InvalidCredentialsError("inactive")
@@ -1465,12 +1510,13 @@ class AuthStore:
     def user_for_session(self, token: str) -> AuthUser | None:
         if not token:
             return None
-        now = _now_text()
+        now_dt = _now()
+        now = _datetime_text(now_dt)
         token_hash = hash_session_token(token)
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT u.*
+                SELECT u.*, s.last_seen_at AS session_last_seen_at
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = ? AND s.expires_at > ? AND u.is_active = 1
@@ -1479,8 +1525,15 @@ class AuthStore:
             ).fetchone()
             if row is None:
                 return None
-            conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash))
-            conn.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now, row["id"]))
+            previous_seen = _parse_datetime_text(row["session_last_seen_at"])
+            user_previous_seen = _parse_datetime_text(row["last_seen_at"])
+            if (
+                user_previous_seen is None
+                or previous_seen is None
+                or (now_dt - previous_seen) >= timedelta(seconds=60)
+            ):
+                conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash))
+                conn.execute("UPDATE users SET last_seen_at = ? WHERE id = ?", (now, row["id"]))
             return _auth_user_from_row(row)
 
     def create_generation_job(
@@ -1811,6 +1864,8 @@ class AuthStore:
                     j.recipe_version,
                     j.status,
                     j.sample_count,
+                    j.size AS requested_size,
+                    j.image_count,
                     j.started_at,
                     j.completed_at,
                     j.elapsed_ms,
@@ -1823,12 +1878,13 @@ class AuthStore:
                 (generated_image_id, user_id, 1 if allow_viewer_access else 0),
             ).fetchone()
             viewer_is_admin = False
-            if row is not None and int(row["user_id"]) != user_id:
+            owner_user_id = int(row["user_id"]) if row is not None and row["user_id"] is not None else None
+            if row is not None and owner_user_id != user_id:
                 viewer = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
                 viewer_is_admin = viewer is not None and str(viewer["role"] or "") == "admin"
         if row is None:
             return None
-        if int(row["user_id"]) != user_id:
+        if owner_user_id != user_id:
             saved_url = str(row["saved_image_url"] or "").strip().lstrip("/")
             relative_path = saved_url.removeprefix("files/")
             absolute_path = Path(str(row["saved_image_path"] or relative_path))
@@ -1858,6 +1914,8 @@ class AuthStore:
             "recipe_version": str(row["recipe_version"] or ""),
             "status": str(row["status"] or ""),
             "sample_count": max(1, int(row["sample_count"] or 1)),
+            "size": str(row["requested_size"] or ""),
+            "image_count": max(0, int(row["image_count"] or 0)),
             "started_at": str(row["started_at"] or ""),
             "completed_at": str(row["completed_at"] or ""),
             "elapsed_ms": float(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
@@ -2164,8 +2222,11 @@ class AuthStore:
             ).fetchall()
         return [_gallery_image_row_to_dict(row) for row in rows]
 
-    def list_generation_jobs_for_user(self, *, user_id: int, limit: int = 30) -> list[dict[str, Any]]:
-        bounded_limit = max(1, min(int(limit or 30), 100))
+    def list_generation_jobs_for_user(
+        self, *, user_id: int, limit: int = 30, before_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        # One extra row lets the API detect a next page without a separate count.
+        bounded_limit = max(1, min(int(limit or 30), 101))
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
@@ -2208,11 +2269,11 @@ class AuthStore:
                         ORDER BY gi.candidate_index ASC, gi.id ASC
                         LIMIT 1
                     )
-                WHERE j.user_id = ?
-                ORDER BY j.started_at DESC, j.id DESC
+                WHERE j.user_id = ? AND (? IS NULL OR j.id < ?)
+                ORDER BY j.id DESC
                 LIMIT ?
                 """,
-                (user_id, bounded_limit),
+                (user_id, before_id, before_id, bounded_limit),
             ).fetchall()
         return [_generation_job_row_to_dict(row) for row in rows]
 
@@ -2414,10 +2475,12 @@ class AuthStore:
                     json_extract(gim.metadata_json, '$.source_saved_image_url') IN ({placeholders})
                     OR json_extract(gim.metadata_json, '$.source_saved_image_path') IN ({placeholders})
                     OR json_extract(gim.metadata_json, '$.source_image_path') IN ({placeholders})
+                    OR json_extract(gim.metadata_json, '$.ai_background_image_url') IN ({placeholders})
+                    OR json_extract(gim.metadata_json, '$.ai_background_image_path') IN ({placeholders})
                   )
                 LIMIT 1
                 """,
-                (user_id, *references, *references, *references),
+                (user_id, *references, *references, *references, *references, *references),
             ).fetchone()
             if metadata_owned is not None:
                 return True
@@ -4171,9 +4234,15 @@ class AuthStore:
         )
         return migrated_sidecar_paths
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         self.initialize()
-        return self._raw_connect()
+        conn = self._raw_connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _raw_connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0)

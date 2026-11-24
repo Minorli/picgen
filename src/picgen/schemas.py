@@ -128,12 +128,22 @@ class ResponsesImageRequest(_ImageOptions):
     logo_requested: bool = False
     source_generated_image_id: int | None = Field(default=None, ge=1, le=_SQLITE_MAX_INT)
     itinerary_id: str | None = Field(default=None, max_length=64)
+    prompt_mode: Literal["free", "recipe"] = "free"
+    original_prompt: str | None = Field(default=None, max_length=32_000)
+    recipe_id: str | None = Field(default=None, max_length=128)
+    recipe_version: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _validate_prompt(self) -> ResponsesImageRequest:
         self.prompt = _require_prompt(self.prompt, empty_message="Responses 图像提示词不能为空")
         if self.itinerary_id is not None:
             self.itinerary_id = self.itinerary_id.strip()
+        if self.original_prompt is not None:
+            self.original_prompt = self.original_prompt.strip()
+        if self.recipe_id is not None:
+            self.recipe_id = self.recipe_id.strip()
+        if self.recipe_version is not None:
+            self.recipe_version = self.recipe_version.strip()
         return self
 
 
@@ -347,7 +357,6 @@ class UserProfileRequest(BaseModel):
 
     @field_validator(
         "username",
-        "current_password",
         "display_name",
         "wechat",
         "phone_country_code",
@@ -393,9 +402,12 @@ class UserProfileRequest(BaseModel):
             return value
         # Whitespace/control characters would be stored and later crash SMTP
         # header construction (EmailMessage rejects CR/LF in "To").
-        if any(char.isspace() or ord(char) < 32 for char in value):
+        if any(char.isspace() or ord(char) < 32 or char in {",", ";", "<", ">", '"'} for char in value):
             raise ValueError("邮箱格式不正确")
-        if "@" not in value or "." not in value.rsplit("@", 1)[-1]:
+        if value.count("@") != 1:
+            raise ValueError("邮箱格式不正确")
+        local_part, domain_part = value.split("@", 1)
+        if not local_part or "." not in domain_part or domain_part.startswith(".") or domain_part.endswith("."):
             raise ValueError("邮箱格式不正确")
         return value
 

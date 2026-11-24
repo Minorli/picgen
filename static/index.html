@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PicGen Console</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23108566'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23108566'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="styles.css?v=0.1.69">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23009568'/%3E%3Cpath d='M32 13l16 9v20l-16 9-16-9V22l16-9z' fill='%23ecfdf5'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23009568'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="styles.css?v=0.1.78">
   </head>
   <body class="auth-gate">
     <div id="authOverlay" class="auth-page" aria-hidden="false">
@@ -84,11 +84,6 @@
           </div>
         </div>
         <div class="topbar-tools">
-          <button id="openProfileButton" class="system-pill user-pill user-profile-button" type="button">
-            <span id="userAvatar" class="user-avatar" aria-hidden="true">?</span>
-            <strong id="currentUsername">未登录</strong>
-          </button>
-          <div id="userImageStats" class="system-pill image-stats-pill hidden" aria-live="polite"></div>
           <button id="uiModeToggleButton" class="ux-button ux-button-secondary ui-mode-toggle" type="button" title="切换界面模式">
             <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-list"></use></svg>
             <span id="uiModeToggleLabel">简洁模式</span>
@@ -97,9 +92,39 @@
             <span>Team Chat</span>
             <span id="teamChatUnreadBadge" class="team-chat-unread-badge hidden" aria-live="polite">0</span>
           </button>
-          <button id="changePasswordButton" class="ghost-button compact-top-button" type="button">修改密码</button>
-          <button id="bugReportButton" class="ghost-button compact-top-button" type="button">反馈 Bug</button>
-          <button id="logoutButton" class="ghost-button compact-top-button" type="button">退出</button>
+          <div id="accountMenuWrap" class="account-menu-wrap">
+            <button id="accountMenuTrigger" class="system-pill user-pill account-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
+              <span id="userAvatar" class="user-avatar" aria-hidden="true">?</span>
+              <strong id="currentUsername">未登录</strong>
+              <span id="adminPendingBadge" class="account-pending-badge hidden" aria-live="polite">0</span>
+              <svg class="ux-icon account-menu-caret" aria-hidden="true"><use href="icons.svg#icon-arrow-down"></use></svg>
+            </button>
+            <div id="accountDropdownMenu" class="account-dropdown-menu hidden" role="menu" aria-label="账号与系统菜单">
+              <div id="userImageStats" class="system-pill image-stats-pill account-stats-banner hidden" aria-live="polite"></div>
+              <button id="openProfileButton" class="account-menu-item user-profile-button" type="button" role="menuitem">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-user"></use></svg>
+                <span>个人资料</span>
+              </button>
+              <button id="openAdminConsoleButton" class="account-menu-item hidden" type="button" role="menuitem">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-settings"></use></svg>
+                <span>管理员控制台</span>
+                <span id="adminMenuBadge" class="account-menu-badge hidden">0</span>
+              </button>
+              <button id="changePasswordButton" class="account-menu-item" type="button" role="menuitem">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-edit"></use></svg>
+                <span>修改密码</span>
+              </button>
+              <button id="bugReportButton" class="account-menu-item" type="button" role="menuitem">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-exclamation-circle"></use></svg>
+                <span>反馈 Bug</span>
+              </button>
+              <div class="account-menu-divider" role="separator"></div>
+              <button id="logoutButton" class="account-menu-item account-menu-danger" type="button" role="menuitem">
+                <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-close"></use></svg>
+                <span>退出</span>
+              </button>
+            </div>
+          </div>
           <div class="system-pill">
             <span class="live-dot"></span>
             <strong id="requestStatus">空闲</strong>
@@ -116,6 +141,18 @@
             <button class="nav-link" type="button" data-mode="edit">编辑</button>
             <a id="connectionSettingsLink" class="hidden" href="#connectionSettings">高级设置</a>
           </nav>
+          <div id="railAssetTabs" class="rail-asset-tabs" role="tablist" aria-label="创作资产切换">
+            <button class="rail-asset-tab active" type="button" role="tab" aria-selected="true" data-rail-tab="gallery">
+              <span>作品库</span>
+            </button>
+            <button class="rail-asset-tab" type="button" role="tab" aria-selected="false" data-rail-tab="history">
+              <span>记录</span>
+            </button>
+            <button class="rail-asset-tab" type="button" role="tab" aria-selected="false" data-rail-tab="shared">
+              <span>分享</span>
+              <span id="railSharedBadge" class="rail-tab-badge hidden">0</span>
+            </button>
+          </div>
 
           <section class="rail-section" data-rail-section="history">
             <div class="rail-heading">
@@ -154,7 +191,7 @@
               </div>
             </div>
             <div class="rail-section-body">
-              <input id="gallerySearchInput" class="rail-search-input" type="search" placeholder="搜索提示词、标签、用户">
+              <input id="gallerySearchInput" class="rail-search-input" type="search" aria-label="搜索作品库" placeholder="搜索提示词、标签、用户">
               <div class="gallery-filter-row">
                 <label><input id="galleryFavoriteOnlyInput" type="checkbox"> 只看收藏</label>
                 <button id="clearGalleryFiltersButton" class="text-button" type="button">重置</button>
@@ -223,6 +260,14 @@
                 </div>
               </header>
               <div id="simpleScenarioFields" class="simple-scenario-fields"></div>
+              <section id="simpleTextPreviewCard" class="simple-text-preview hidden" aria-label="画面文字核对">
+                <div class="simple-text-preview-header">
+                  <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-check"></use></svg>
+                  <strong>画面文字实时核对</strong>
+                  <span>点击生成即直出，无需二次确认弹窗</span>
+                </div>
+                <div id="simpleTextPreviewList" class="simple-text-preview-list"></div>
+              </section>
               <div id="simpleFormAlert" class="ux-alert ux-alert-error hidden" role="alert">
                 <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-exclamation-circle"></use></svg>
                 <span id="simpleFormAlertText"></span>
@@ -410,11 +455,14 @@
               <section class="studio-block model-block">
                 <h2 class="compact-title">图像尺寸</h2>
                 <div class="size-picker">
-                  <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1088x2240"><span>6人游<small>1088x2240</small></span></label>
                   <label><input type="radio" name="visualSize" value="1024x1536"><span>2:3<small>1024x1536</small></span></label>
                   <label><input type="radio" name="visualSize" value="1536x1024"><span>3:2<small>1536x1024</small></span></label>
-                  <label><input type="radio" name="visualSize" value="1088x2240"><span>6人游<small>1088x2240</small></span></label>
+                  <label><input type="radio" name="visualSize" value="1024x1024"><span>1:1<small>1024x1024</small></span></label>
+                  <label><input type="radio" name="visualSize" value="2048x2048"><span>2K 方图<small>2048x2048</small></span></label>
                   <label><input type="radio" name="visualSize" value="3840x2160"><span>16:9<small>3840x2160</small></span></label>
+                  <label><input type="radio" name="visualSize" value="2160x3840"><span>4K 竖版<small>2160x3840</small></span></label>
+                  <label><input type="radio" name="visualSize" value="auto"><span>智能比例<small>Auto</small></span></label>
                   <label><input type="radio" name="visualSize" value="custom"><span>自定义<small>W × H</small></span></label>
                 </div>
 
@@ -437,9 +485,9 @@
                       <option value="custom">自定义尺寸</option>
                     </select>
                     <div class="size-manual-row">
-                      <input id="generateWidthInput" type="number" min="64" max="3840" step="16" placeholder="宽">
+                      <input id="generateWidthInput" type="number" min="64" max="3840" step="16" aria-label="自定义宽度" placeholder="宽">
                       <span class="size-divider" aria-hidden="true">×</span>
-                      <input id="generateHeightInput" type="number" min="64" max="3840" step="16" placeholder="高">
+                      <input id="generateHeightInput" type="number" min="64" max="3840" step="16" aria-label="自定义高度" placeholder="高">
                     </div>
                   </div>
                 </div>
@@ -500,11 +548,13 @@
                   </label>
                   <strong id="logoComposeStatus">本地贴图</strong>
                 </div>
-                <label class="itinerary-id-toggle">
-                  <input id="itineraryIdEnabled" type="checkbox">
-                  <span>行程 ID</span>
-                  <input id="itineraryIdInput" type="text" maxlength="64" placeholder="例如 396396" disabled>
-                </label>
+                <div class="itinerary-id-toggle">
+                  <label>
+                    <input id="itineraryIdEnabled" type="checkbox">
+                    <span>行程 ID</span>
+                  </label>
+                  <input id="itineraryIdInput" type="text" maxlength="64" aria-label="行程 ID 编号" placeholder="例如 396396" disabled>
+                </div>
               </div>
 
               <div class="primary-run-row">
@@ -554,7 +604,28 @@
                 <button class="prompt-chip" type="button" data-target="edit" data-snippet="色调更统一，整体更克制">统一色调</button>
               </div>
 
-              <p class="helper-text">编辑模式只发送提示词、输入图和可选 mask。需要改尺寸或做风格延展，请回到生成模式。</p>
+              <div class="edit-size-strategy" role="radiogroup" aria-label="编辑输出画幅">
+                <div class="edit-size-strategy-header">
+                  <span>输出画幅</span>
+                  <strong id="editTargetSizeBadge" class="edit-size-badge">自适应原图比例</strong>
+                </div>
+                <div class="edit-size-strategy-options">
+                  <label>
+                    <input type="radio" name="editSizeStrategy" value="source" checked>
+                    <span>
+                      <strong>按输入原图比例</strong>
+                      <small>自动匹配上传图片宽高，避免横图被压成竖版</small>
+                    </span>
+                  </label>
+                  <label>
+                    <input type="radio" name="editSizeStrategy" value="preset">
+                    <span>
+                      <strong>沿用海报面板尺寸</strong>
+                      <small>按“海报生成”面板所选宽高输出</small>
+                    </span>
+                  </label>
+                </div>
+              </div>
 
               <div class="primary-run-row">
                 <button id="editButton" class="primary-button" type="button">▶ 开始编辑</button>
@@ -694,6 +765,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                         <li data-progress-step="waiting">等待上游</li>
                         <li data-progress-step="receiving">保存成品</li>
                       </ol>
+                      <button id="overlayCancelButton" class="ux-button ux-button-secondary generation-overlay-cancel hidden" type="button">中断生成</button>
                     </div>
                     <div id="resultHoverActions" class="result-hover-actions hidden" aria-label="图片快捷操作">
                       <button id="hoverContinueEditButton" class="ghost-button" type="button">继续编辑</button>
@@ -711,6 +783,14 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   <div id="resultSizeWarning" class="ux-alert ux-alert-warning result-size-warning hidden" role="status">
                     <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-exclamation-circle"></use></svg>
                     <span id="resultSizeWarningText"></span>
+                  </div>
+                  <div id="simpleResultAlert" class="ux-alert ux-alert-error simple-result-alert hidden" role="alert">
+                    <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-exclamation-circle"></use></svg>
+                    <span id="simpleResultAlertText"></span>
+                  </div>
+                  <div id="simpleReviewSummary" class="ux-alert ux-alert-info simple-review-summary hidden" role="status">
+                    <svg class="ux-icon" aria-hidden="true"><use href="icons.svg#icon-info-circle"></use></svg>
+                    <span id="simpleReviewSummaryText"></span>
                   </div>
                   <div id="resultActions" class="result-actions hidden">
                     <a id="downloadButton" class="primary-button result-primary-action disabled-link" href="#" download="picgen-output.png" aria-disabled="true">下载带 6 人游 LOGO 成品</a>
@@ -782,7 +862,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                       <button class="feedback-rating-button" type="button" data-rating="bad">不好</button>
                     </div>
                     <div id="feedbackReasonPanel" class="feedback-reason-panel hidden">
-                      <textarea id="feedbackReasonInput" rows="3" maxlength="1000" placeholder="可以简单说下哪里不好，例如文字不清、人物变形、风格不对。"></textarea>
+                      <textarea id="feedbackReasonInput" rows="3" maxlength="1000" aria-label="不满意原因" placeholder="可以简单说下哪里不好，例如文字不清、人物变形、风格不对。"></textarea>
                       <div class="feedback-reason-actions">
                         <button id="submitBadFeedbackButton" class="ghost-button" type="button">提交原因</button>
                         <button id="regenerateFromBadFeedbackButton" class="primary-button" type="button">再生成一张</button>
@@ -793,9 +873,9 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                         <strong>分享给站内用户</strong>
                         <span id="shareResultStatus">选择接收人</span>
                       </div>
-                      <input id="shareRecipientSearchInput" class="share-recipient-search" type="search" placeholder="搜索用户">
+                      <input id="shareRecipientSearchInput" class="share-recipient-search" type="search" aria-label="搜索接收人" placeholder="搜索用户">
                       <div id="shareRecipientsList" class="share-recipients-list"></div>
-                      <textarea id="shareResultNoteInput" rows="2" maxlength="1000" placeholder="可选：补充说明，例如这版适合哪个渠道。"></textarea>
+                      <textarea id="shareResultNoteInput" rows="2" maxlength="1000" aria-label="分享补充说明" placeholder="可选：补充说明，例如这版适合哪个渠道。"></textarea>
                       <button id="submitShareResultButton" class="primary-button" type="button">分享这张图</button>
                     </div>
                   </div>
@@ -819,7 +899,8 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                 </div>
                 <p class="idle-note">发起请求后，这里显示本地代理与上游响应进度。</p>
                 <div id="jobCenterList" class="job-center-list"></div>
-                <p id="jobCenterEmpty" class="empty-history">暂无近期任务。</p>
+                <p id="jobCenterEmpty" class="empty-history">暂无任务。</p>
+                <button id="loadMoreJobsButton" class="text-button hidden" type="button">加载更早任务</button>
               </section>
 
               <section class="studio-card inspector-card">
@@ -861,109 +942,17 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   </div>
                   <p id="textFidelityText">生成完成后自动检查用户文案。</p>
                 </div>
-                <div id="adminPanel" class="admin-panel hidden">
-                  <div id="adminFeedbackSummary" class="feedback-summary-panel">
-                    <div class="admin-panel-title">
-                      <span>满意度</span>
-                      <button id="refreshFeedbackSummaryButton" class="text-button" type="button">刷新</button>
-                    </div>
-                    <div class="feedback-summary-grid">
-                      <div><span>满意</span><strong id="feedbackGoodCount">0</strong></div>
-                      <div><span>一般</span><strong id="feedbackOkCount">0</strong></div>
-                      <div><span>不好</span><strong id="feedbackBadCount">0</strong></div>
-                    </div>
-                    <p id="feedbackSummaryRate" class="feedback-summary-rate">暂无反馈。</p>
-                    <div id="feedbackRecentList" class="feedback-recent-list"></div>
+                <div id="adminQuickEntryCard" class="admin-quick-entry hidden">
+                  <div>
+                    <strong>平台管理与高级通道</strong>
+                    <span id="adminQuickSummary">用户组织、密码审批、满意度看板与模型路由已整合至独立控制台。</span>
                   </div>
-                  <div id="adminBugReportsPanel" class="feedback-summary-panel">
-                    <div class="admin-panel-title">
-                      <span>Bug 反馈</span>
-                      <button id="refreshBugReportsButton" class="text-button" type="button">刷新</button>
-                    </div>
-                    <div id="bugReportsList" class="feedback-recent-list"></div>
-                  </div>
-                  <div id="adminPasswordResetPanel" class="feedback-summary-panel">
-                    <div class="admin-panel-title">
-                      <span>密码找回</span>
-                      <button id="refreshPasswordResetRequestsButton" class="text-button" type="button">刷新</button>
-                    </div>
-                    <div id="passwordResetRequestsList" class="password-reset-list"></div>
-                  </div>
-                  <div id="adminOrgPanel" class="feedback-summary-panel">
-                    <div class="admin-panel-title">
-                      <span>组织与部门</span>
-                      <button id="refreshAdminOrgButton" class="text-button" type="button">刷新</button>
-                    </div>
-                    <form id="adminOrgCreateForm" class="admin-create-form">
-                      <label>
-                        <span>公司</span>
-                        <input id="adminOrgCompanyInput" type="text" maxlength="120" value="6renyou">
-                      </label>
-                      <label>
-                        <span>部门</span>
-                        <input id="adminOrgDepartmentInput" type="text" maxlength="120" placeholder="例如 Bespoke Travel">
-                      </label>
-                      <button class="primary-button" type="submit">添加部门</button>
-                    </form>
-                    <form id="adminUserOrgForm" class="admin-create-form">
-                      <label>
-                        <span>用户 ID</span>
-                        <input id="adminOrgUserIdInput" type="number" min="1" step="1" placeholder="用户 ID">
-                      </label>
-                      <label>
-                        <span>组织</span>
-                        <select id="adminOrgUnitSelect"></select>
-                      </label>
-                      <label>
-                        <span>原因</span>
-                        <input id="adminOrgReasonInput" type="text" maxlength="1000" placeholder="可选">
-                      </label>
-                      <button class="ghost-button" type="submit">调整组织</button>
-                    </form>
-                    <form id="adminGroupAnnouncementForm" class="admin-create-form">
-                      <label>
-                        <span>公告组织</span>
-                        <select id="adminAnnouncementOrgSelect"></select>
-                      </label>
-                      <label>
-                        <span>群公告</span>
-                        <input id="adminAnnouncementContentInput" type="text" maxlength="2000" placeholder="显示在对应部门群顶部">
-                      </label>
-                      <button class="ghost-button" type="submit">保存公告</button>
-                    </form>
-                    <p id="adminOrgStatus" class="admin-user-error" role="status"></p>
-                    <div id="adminOrgStatsList" class="feedback-recent-list"></div>
-                    <div id="adminOrgUnitsList" class="feedback-recent-list"></div>
-                    <div id="adminOrgAuditList" class="feedback-recent-list"></div>
-                  </div>
-                  <div class="admin-panel-title">
-                    <span>用户管理</span>
-                    <button id="refreshAdminUsersButton" class="text-button" type="button">刷新</button>
-                  </div>
-                  <form id="adminCreateUserForm" class="admin-create-form">
-                    <label>
-                      <span>用户名</span>
-                      <input id="adminNewUsernameInput" type="text" autocomplete="off" minlength="2" maxlength="64" placeholder="新用户">
-                    </label>
-                    <label>
-                      <span>密码</span>
-                      <input id="adminNewPasswordInput" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="至少 8 位">
-                    </label>
-                    <label>
-                      <span>角色</span>
-                      <select id="adminNewRoleSelect">
-                        <option value="user">普通用户</option>
-                        <option value="admin">管理员</option>
-                      </select>
-                    </label>
-                    <button id="adminCreateUserButton" class="primary-button" type="submit">创建</button>
-                  </form>
-                  <p id="adminUserError" class="admin-user-error" role="alert"></p>
-                  <div id="adminUsersList" class="admin-users-list"></div>
+                  <button id="openAdminQuickButton" class="ghost-button" type="button">打开控制台</button>
                 </div>
               </section>
             </section>
 
+            <div id="connectionSettingsAnchor" class="hidden" aria-hidden="true"></div>
             <section id="connectionSettings" class="studio-card settings-drawer hidden">
               <div class="section-title">
                 <h2>管理员高级设置</h2>
@@ -1068,7 +1057,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
       </div>
 
       <footer class="system-footer">
-        <span>PicGen Console　v0.1.69</span>
+        <span>PicGen Console　v0.1.78</span>
         <span>本地代理保存结果到 <strong>data/outputs</strong></span>
       </footer>
     </div>
@@ -1139,8 +1128,8 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
               <span>邮箱</span>
               <input id="profileEmailInput" type="email" maxlength="160" autocomplete="email">
             </label>
-            <label>
-              <span>电话</span>
+            <div class="profile-phone-group">
+              <label for="profilePhoneInput"><span>电话</span></label>
               <div class="phone-input-row">
                 <select id="profilePhoneCountryCodeInput" aria-label="电话国家码">
                   <option value="+86">+86 中国</option>
@@ -1155,16 +1144,16 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                 </select>
                 <input id="profilePhoneInput" type="tel" maxlength="40" autocomplete="tel-national">
               </div>
-            </label>
+            </div>
             <label>
               <span>公司</span>
-              <select id="profileCompanyInput" disabled aria-readonly="true">
+              <select id="profileCompanyInput" disabled>
                 <option value="6renyou">6renyou</option>
               </select>
             </label>
             <label>
               <span>部门</span>
-              <select id="profileDepartmentInput" disabled aria-readonly="true">
+              <select id="profileDepartmentInput" disabled>
                 <option value="PD &amp; OPS">PD &amp; OPS</option>
               </select>
             </label>
@@ -1253,6 +1242,7 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
                   id="teamChatMessageInput"
                   rows="2"
                   maxlength="4000"
+                  aria-label="聊天消息内容"
                   placeholder="输入群消息，可以 @GPT-BOT"
                   required
                 ></textarea>
@@ -1300,6 +1290,158 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
           <p id="bugReportStatus" class="bug-report-status" role="status"></p>
           <button id="submitBugReportButton" class="primary-button" type="submit">提交反馈</button>
         </form>
+      </section>
+    </div>
+
+    <div id="adminConsoleModal" class="admin-console-modal hidden" aria-hidden="true">
+      <div id="adminConsoleBackdrop" class="preview-modal-backdrop"></div>
+      <section class="admin-console-dialog" role="dialog" aria-modal="true" aria-labelledby="adminConsoleTitle">
+        <header class="admin-console-header">
+          <div>
+            <p class="eyebrow">Administration</p>
+            <h2 id="adminConsoleTitle">管理员控制台</h2>
+          </div>
+          <button id="closeAdminConsoleButton" class="ghost-button" type="button">关闭</button>
+        </header>
+        <div id="adminConsoleTabs" class="admin-console-tabs" role="tablist" aria-label="后台管理分区">
+          <button class="admin-console-tab active" type="button" role="tab" aria-selected="true" data-admin-tab="users">用户与组织</button>
+          <button class="admin-console-tab" type="button" role="tab" aria-selected="false" data-admin-tab="support">
+            <span>密码审批与反馈</span>
+            <span id="adminTabResetBadge" class="account-menu-badge hidden">0</span>
+          </button>
+          <button class="admin-console-tab" type="button" role="tab" aria-selected="false" data-admin-tab="quality">满意度看板</button>
+          <button class="admin-console-tab" type="button" role="tab" aria-selected="false" data-admin-tab="models">模型与通道配置</button>
+        </div>
+
+        <div id="adminPanel" class="admin-panel hidden">
+          <section class="admin-tab-pane" data-admin-pane="users">
+            <div class="admin-section-block">
+              <div class="admin-panel-title">
+                <span>用户管理</span>
+                <div class="admin-toolbar-inline">
+                  <input id="adminUserSearchInput" class="admin-search-input" type="search" aria-label="搜索用户" placeholder="按用户名、昵称、部门或 ID 搜索">
+                  <button id="refreshAdminUsersButton" class="text-button" type="button">刷新</button>
+                </div>
+              </div>
+              <form id="adminCreateUserForm" class="admin-create-form">
+                <label>
+                  <span>用户名</span>
+                  <input id="adminNewUsernameInput" type="text" autocomplete="off" minlength="2" maxlength="64" placeholder="新用户">
+                </label>
+                <label>
+                  <span>密码</span>
+                  <input id="adminNewPasswordInput" type="password" autocomplete="new-password" minlength="8" maxlength="256" placeholder="至少 8 位">
+                </label>
+                <label>
+                  <span>角色</span>
+                  <select id="adminNewRoleSelect">
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员</option>
+                  </select>
+                </label>
+                <button id="adminCreateUserButton" class="primary-button" type="submit">创建</button>
+              </form>
+              <p id="adminUserError" class="admin-user-error" role="alert"></p>
+              <div id="adminUsersList" class="admin-users-list"></div>
+            </div>
+
+            <div id="adminOrgPanel" class="feedback-summary-panel admin-section-block">
+              <div class="admin-panel-title">
+                <span>组织与部门</span>
+                <button id="refreshAdminOrgButton" class="text-button" type="button">刷新</button>
+              </div>
+              <form id="adminOrgCreateForm" class="admin-create-form admin-three-col-form">
+                <label>
+                  <span>公司</span>
+                  <input id="adminOrgCompanyInput" type="text" maxlength="120" value="6renyou">
+                </label>
+                <label>
+                  <span>部门</span>
+                  <input id="adminOrgDepartmentInput" type="text" maxlength="120" placeholder="例如 Bespoke Travel">
+                </label>
+                <button class="primary-button" type="submit">添加部门</button>
+              </form>
+              <form id="adminUserOrgForm" class="admin-create-form">
+                <label>
+                  <span>选择成员</span>
+                  <select id="adminOrgUserSelect" aria-label="选择要调整组织的成员">
+                    <option value="">请选择成员</option>
+                  </select>
+                  <input id="adminOrgUserIdInput" type="hidden">
+                </label>
+                <label>
+                  <span>目标组织</span>
+                  <select id="adminOrgUnitSelect"></select>
+                </label>
+                <label>
+                  <span>调整原因</span>
+                  <input id="adminOrgReasonInput" type="text" maxlength="1000" placeholder="可选">
+                </label>
+                <button class="ghost-button" type="submit">调整组织</button>
+              </form>
+              <form id="adminGroupAnnouncementForm" class="admin-create-form admin-three-col-form">
+                <label>
+                  <span>公告组织</span>
+                  <select id="adminAnnouncementOrgSelect"></select>
+                </label>
+                <label>
+                  <span>群公告</span>
+                  <input id="adminAnnouncementContentInput" type="text" maxlength="2000" placeholder="显示在对应部门群顶部">
+                </label>
+                <button class="ghost-button" type="submit">保存公告</button>
+              </form>
+              <p id="adminOrgStatus" class="admin-user-error" role="status"></p>
+              <div class="admin-org-columns">
+                <div>
+                  <h3 class="admin-sub-heading">各部门活跃与产出</h3>
+                  <div id="adminOrgStatsList" class="feedback-recent-list"></div>
+                </div>
+                <div>
+                  <h3 class="admin-sub-heading">组织单元与近期调岗记录</h3>
+                  <div id="adminOrgUnitsList" class="feedback-recent-list"></div>
+                  <div id="adminOrgAuditList" class="feedback-recent-list"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="admin-tab-pane hidden" data-admin-pane="support">
+            <div id="adminPasswordResetPanel" class="feedback-summary-panel admin-section-block">
+              <div class="admin-panel-title">
+                <span>密码找回待审批</span>
+                <button id="refreshPasswordResetRequestsButton" class="text-button" type="button">刷新</button>
+              </div>
+              <div id="passwordResetRequestsList" class="password-reset-list"></div>
+            </div>
+            <div id="adminBugReportsPanel" class="feedback-summary-panel admin-section-block">
+              <div class="admin-panel-title">
+                <span>Bug 反馈记录</span>
+                <button id="refreshBugReportsButton" class="text-button" type="button">刷新</button>
+              </div>
+              <div id="bugReportsList" class="feedback-recent-list"></div>
+            </div>
+          </section>
+
+          <section class="admin-tab-pane hidden" data-admin-pane="quality">
+            <div id="adminFeedbackSummary" class="feedback-summary-panel admin-section-block">
+              <div class="admin-panel-title">
+                <span>全站成图满意度</span>
+                <button id="refreshFeedbackSummaryButton" class="text-button" type="button">刷新</button>
+              </div>
+              <div class="feedback-summary-grid">
+                <div><span>满意</span><strong id="feedbackGoodCount">0</strong></div>
+                <div><span>一般</span><strong id="feedbackOkCount">0</strong></div>
+                <div><span>不好</span><strong id="feedbackBadCount">0</strong></div>
+              </div>
+              <p id="feedbackSummaryRate" class="feedback-summary-rate">暂无反馈。</p>
+              <div id="feedbackRecentList" class="feedback-recent-list"></div>
+            </div>
+          </section>
+
+          <section class="admin-tab-pane hidden" data-admin-pane="models">
+            <div id="adminModelsMount" class="admin-models-mount"></div>
+          </section>
+        </div>
       </section>
     </div>
 
@@ -1378,6 +1520,6 @@ D6：城市 D → 机场/车站；交通：飞机/火车；当天重点：返程
       <span id="toastMessageText"></span>
     </div>
 
-    <script src="app.js?v=0.1.69" type="module"></script>
+    <script src="app.js?v=0.1.78" type="module"></script>
   </body>
 </html>

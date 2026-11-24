@@ -15,13 +15,14 @@ from starlette.background import BackgroundTask
 from . import __version__
 from .auth import AuthStore
 from .config import Settings
-from .errors import APIError
+from .errors import NO_IMAGE_ERROR_MESSAGES, OUTPUT_IMAGE_POLICY_MESSAGE, APIError
 from .logging_config import configure_logging, get_logger, get_request_id, log_event
 from .middleware import (
     BodySizeLimitMiddleware,
     ProxyAuthMiddleware,
     RateLimitMiddleware,
     RequestIdMiddleware,
+    SameOriginCsrfMiddleware,
     SecurityHeadersMiddleware,
     api_error_response,
     api_error_response_with,
@@ -179,6 +180,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #   requests that rate-limiting or proxy auth would reject anyway.
     # - RateLimit stays outside ProxyAuth so token guessing burns rate budget.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved_settings.max_request_body_bytes)
+    app.add_middleware(
+        SameOriginCsrfMiddleware,
+        allowed_origins=tuple(resolved_settings.cors_allow_origins or ()),
+        public_base_url=resolved_settings.public_base_url,
+    )
 
     if resolved_settings.proxy_auth_token:
         app.add_middleware(ProxyAuthMiddleware, token=resolved_settings.proxy_auth_token)
@@ -197,7 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=resolved_settings.cors_allow_origins,
             allow_credentials=resolved_settings.cors_allow_credentials,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["*"],
             expose_headers=["X-Request-ID"],
         )
@@ -239,6 +245,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger,
             logging.ERROR,
             "unhandled_exception",
+            exc_info=exc,
             method=request.method,
             path=request.url.path,
             error=type(exc).__name__,
@@ -254,7 +261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = api_error_response_with(
             status=500,
             message=public_message,
-            details=details,
+            details=None,
             code="internal_error",
             request_id=request_id,
         )
@@ -313,11 +320,15 @@ def _public_operational_error_message(exc: APIError, *, alert_enabled: bool) -> 
 
 
 def _base_operational_message(exc: APIError) -> str:
+    if exc.code == "upstream_content_policy" and exc.message == OUTPUT_IMAGE_POLICY_MESSAGE:
+        return OUTPUT_IMAGE_POLICY_MESSAGE
     if _is_content_policy_error(exc) or exc.code == "upstream_content_policy":
         return "这次提示词没有通过上游内容审核，请调整描述后重试。"
     if exc.code == "upstream_rate_limited":
         return "图片生成服务当前请求较多，请稍后再试。"
     if exc.code == "upstream_timeout":
+        if exc.message.startswith("连接图片生成服务超时"):
+            return "连接图片生成服务超时，请稍后再试。"
         return "图片生成服务响应超时，请稍后再试。"
     if exc.code == "upstream_network_error":
         return "暂时无法连接图片生成服务，请稍后再试。"
@@ -326,7 +337,9 @@ def _base_operational_message(exc: APIError) -> str:
     if exc.code == "upstream_image_too_large":
         return "上游返回的图片超过了大小限制，请降低尺寸或质量后重试。"
     if exc.code == "upstream_no_image":
-        return "图片生成服务这次没有返回图片，请稍后再试。"
+        if exc.message in NO_IMAGE_ERROR_MESSAGES.values():
+            return exc.message
+        return NO_IMAGE_ERROR_MESSAGES["no_image_output"]
     if exc.code == "upstream_blocked":
         return "图片生成服务被上游临时拦截，请稍后再试或联系管理员。"
     if exc.code == "upstream_error":
@@ -339,7 +352,7 @@ def _base_operational_message(exc: APIError) -> str:
 def _is_content_policy_error(exc: APIError) -> bool:
     if exc.code == "upstream_content_policy":
         return True
-    if exc.code.startswith("upstream_"):
+    if exc.code == "internal_error" or exc.status >= 500 or exc.code.startswith("upstream_"):
         return False
     haystack = f"{exc.message}\n{exc.details or ''}".lower()
     return any(
@@ -354,6 +367,8 @@ def _is_content_policy_error(exc: APIError) -> bool:
 
 
 def _public_operational_error_details(exc: APIError) -> str | None:
+    if exc.code == "internal_error":
+        return None
     details = redact_sensitive_text(exc.details or exc.message, limit=3600)
     if not details:
         return None
@@ -378,8 +393,8 @@ def _build_error_alert(
         code=code,
         client=request.client.host if request.client else "",
         public_message=public_message,
-        technical_message=technical_message,
-        details=details,
+        technical_message=redact_sensitive_text(technical_message, limit=1000),
+        details=redact_sensitive_text(details, limit=4000) or None,
     )
 
 

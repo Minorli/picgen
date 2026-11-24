@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from http import HTTPStatus
 
+NO_IMAGE_ERROR_MESSAGES = {
+    "no_image_output": "图片生成服务这次没有返回图片，具体原因尚未明确。请稍后手动重试。",
+    "response_refusal": "上游返回了拒绝结果，但未提供明确错误代码。请检查描述后手动重试。",
+    "image_tool_unfinished": "生图步骤未完成，未返回可用图片。请稍后手动重试。",
+    "image_tool_failed": "上游生图步骤失败，未返回可用图片。请稍后手动重试。",
+}
+OUTPUT_IMAGE_POLICY_MESSAGE = "本次生成结果未通过上游安全检查，图片未交付。请调整画面要求后重试。"
+
 
 class APIError(Exception):
     """Domain-level error mapped to an HTTP response.

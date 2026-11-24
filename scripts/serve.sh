@@ -2,12 +2,15 @@
 # Production server launcher.
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
 export PICGEN_HOST="${PICGEN_HOST:-0.0.0.0}"
 export PICGEN_PORT="${PICGEN_PORT:-8000}"
 export PICGEN_LOG_FORMAT="${PICGEN_LOG_FORMAT:-json}"
 export PICGEN_LOG_LEVEL="${PICGEN_LOG_LEVEL:-INFO}"
 
-WORKERS="${PICGEN_WORKERS:-2}"
+WORKERS="${PICGEN_WORKERS:-1}"
 
 exec uv run picgen \
   --host "$PICGEN_HOST" \

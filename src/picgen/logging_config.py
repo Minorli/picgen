@@ -8,18 +8,31 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .redaction import redact_sensitive_text
+
 _SENSITIVE_KEYS = frozenset(
     {
         "authorization",
         "api_key",
+        "api-key",
         "apikey",
+        "cookie",
+        "set-cookie",
         "password",
+        "admin_password",
+        "smtp_password",
+        "default_api_key",
+        "amap_key",
+        "mapbox_token",
         "secret",
         "token",
+        "reset_token",
+        "session_token",
         "proxy_auth_token",
         "x-api-key",
     }
 )
+_RESERVED_LOG_KEYS = frozenset({"ts", "level", "logger", "msg", "request_id", "exc"})
 
 # Query-string parameters whose values must never reach the logs, even when they
 # are embedded in a client-supplied endpoint URL.
@@ -81,14 +94,14 @@ def _scrub_value(key: str, value: Any) -> Any:
 
 def _coerce(value: Any) -> Any:
     if isinstance(value, str):
-        return _redact_url_secrets(value)
+        return redact_sensitive_text(_redact_url_secrets(value))
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple, set)):
         return [_coerce(item) for item in value]
     if isinstance(value, dict):
         return {str(k): _coerce(_scrub_value(str(k), v)) for k, v in value.items()}
-    return repr(value)
+    return redact_sensitive_text(repr(value))
 
 
 class JsonFormatter(logging.Formatter):
@@ -101,11 +114,12 @@ class JsonFormatter(logging.Formatter):
             "request_id": _request_id_var.get(),
         }
         if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
+            payload["exc"] = redact_sensitive_text(self.formatException(record.exc_info))
         fields = getattr(record, "fields", None)
         if isinstance(fields, dict):
             for key, value in fields.items():
-                payload[key] = _coerce(_scrub_value(key, value))
+                target_key = f"field_{key}" if key in _RESERVED_LOG_KEYS else key
+                payload[target_key] = _coerce(_scrub_value(key, value))
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -125,7 +139,7 @@ class ConsoleFormatter(logging.Formatter):
                 message = f"{message} {field_text}"
         line = f"{prefix} {message}"
         if record.exc_info:
-            line = f"{line}\n{self.formatException(record.exc_info)}"
+            line = f"{line}\n{redact_sensitive_text(self.formatException(record.exc_info))}"
         return line
 
 
@@ -161,4 +175,5 @@ def get_logger(name: str) -> logging.Logger:
 def log_event(logger: logging.Logger, level: int, event: str, /, **fields: Any) -> None:
     """Emit an event-style log line with structured fields."""
 
-    logger.log(level, event, extra={"fields": fields})
+    exc_info = fields.pop("exc_info", None)
+    logger.log(level, event, exc_info=exc_info, extra={"fields": fields})

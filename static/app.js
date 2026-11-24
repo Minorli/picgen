@@ -4,7 +4,7 @@ import {
   chooseLogoPlacement,
   createLogoPreservationDiagnostic,
   scaleLogoDetectionPlacements,
-} from "./logo-placement.mjs?v=0.1.69"
+} from "./logo-placement.mjs?v=0.1.78"
 import {
   DEFAULT_RESPONSES_MODEL,
   migrateStoredImageModel,
@@ -12,7 +12,21 @@ import {
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.69"
+} from "./responses-settings.mjs?v=0.1.78"
+import {
+  classifyReviewPanelTone,
+  formatHumanDurationMs,
+  sanitizeDownloadHref,
+} from "./url-safety.mjs?v=0.1.78"
+import {
+  extractSimpleVisibleTextItems,
+  resolveSimpleScenarioBadge,
+} from "./simple-preview.mjs?v=0.1.78"
+import {
+  countPendingPasswordResets,
+  filterAdminUsers,
+  formatAdminUserOptionLabel,
+} from "./admin-console.mjs?v=0.1.78"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -79,7 +93,7 @@ const DEPRECATED_RESPONSES_MODELS = new Set(["gpt-5.4"])
 const DEPRECATED_RESPONSES_URLS = new Set(["https://api.openai.com/v1/responses"])
 const STYLE_TRANSFER_SAMPLE_COUNT = 3
 const CLIENT_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
-const UPSTREAM_RETRY_HINT = "等待上游响应中。后台如遇临时错误会自动重试；后台如遇临时 502/503/504 会自动重试。第几次重试以最终错误详情或服务端日志为准。"
+const UPSTREAM_RETRY_HINT = "等待上游响应中。仅连接建立失败时后台会自动重试；请求已提交后的超时、断流或接口错误不会自动重发，避免重复生成。第几次重试以最终错误详情或服务端日志为准。"
 const DEFAULT_ITINERARY_TITLE = "定制旅行路线图"
 const DEFAULT_ITINERARY_SUBTITLE = ""
 const SANITIZED_ITINERARY_EXAMPLE_TITLE = "全球旅行路线图"
@@ -146,6 +160,289 @@ const FILE_READ_CHANNELS = Object.freeze({
   materialReference: "material-reference",
   generateReference: "generate-reference",
 })
+
+function syncAccountDropdownAlignment() {
+  if (!refs.accountDropdownMenu || !refs.accountMenuTrigger) {
+    return
+  }
+  const triggerRect = refs.accountMenuTrigger.getBoundingClientRect()
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1440
+  const menuWidth = Math.min(244, Math.max(180, viewportWidth - 24))
+  const shouldAlignLeft = triggerRect.right - menuWidth < 12 && triggerRect.left + menuWidth <= viewportWidth - 8
+  refs.accountDropdownMenu.classList.toggle("align-left", shouldAlignLeft)
+}
+
+function closeAccountDropdownMenu() {
+  refs.accountDropdownMenu?.classList.add("hidden")
+  refs.accountMenuTrigger?.setAttribute("aria-expanded", "false")
+}
+
+function toggleAccountDropdownMenu(forceOpen = null) {
+  if (!refs.accountDropdownMenu || !refs.accountMenuTrigger) {
+    return
+  }
+  const currentlyOpen = !refs.accountDropdownMenu.classList.contains("hidden")
+  const shouldOpen = forceOpen === null ? !currentlyOpen : Boolean(forceOpen)
+  if (shouldOpen) {
+    syncAccountDropdownAlignment()
+  }
+  refs.accountDropdownMenu.classList.toggle("hidden", !shouldOpen)
+  refs.accountMenuTrigger.setAttribute("aria-expanded", String(shouldOpen))
+  if (shouldOpen) {
+    refs.accountDropdownMenu.querySelector("button:not(.hidden):not(:disabled)")?.focus()
+  }
+}
+
+function setActiveRailTab(tabName = "gallery") {
+  const normalized = ["gallery", "history", "shared"].includes(tabName) ? tabName : "gallery"
+  state.activeRailTab = normalized
+  refs.railTabButtons?.forEach((button) => {
+    const active = button.dataset.railTab === normalized
+    button.classList.toggle("active", active)
+    button.setAttribute("aria-selected", String(active))
+  })
+  ;["gallery", "history", "shared"].forEach((sectionName) => {
+    const section = document.querySelector(`[data-rail-section="${sectionName}"]`)
+    if (!section) {
+      return
+    }
+    section.classList.toggle("rail-tab-hidden", sectionName !== normalized)
+    if (sectionName === normalized && !window.matchMedia("(max-width: 820px)").matches) {
+      section.classList.remove("collapsed")
+    }
+  })
+}
+
+function mountConnectionSettingsIntoAdminConsole(mountInsideModal) {
+  const settingsEl = refs.connectionSettings
+  if (!settingsEl) {
+    return
+  }
+  if (mountInsideModal && refs.adminModelsMount) {
+    refs.adminModelsMount.append(settingsEl)
+    settingsEl.classList.toggle("hidden", !canManageExecutionSettings())
+    return
+  }
+  if (refs.connectionSettingsAnchor?.parentElement) {
+    refs.connectionSettingsAnchor.insertAdjacentElement("afterend", settingsEl)
+  }
+  settingsEl.classList.toggle("hidden", !canManageExecutionSettings())
+}
+
+function switchAdminConsoleTab(tabName = "users") {
+  const isAdmin = Boolean(state.currentUser?.is_admin || state.currentUser?.role === "admin")
+  const allowedTabs = isAdmin ? ["users", "support", "quality", "models"] : ["models"]
+  const normalized = allowedTabs.includes(tabName) ? tabName : allowedTabs[0]
+  state.adminActiveTab = normalized
+  refs.adminConsoleTabButtons?.forEach((button) => {
+    const tab = button.dataset.adminTab || ""
+    button.classList.toggle("hidden", !allowedTabs.includes(tab))
+    const active = tab === normalized
+    button.classList.toggle("active", active)
+    button.setAttribute("aria-selected", String(active))
+  })
+  refs.adminTabPanes?.forEach((pane) => {
+    pane.classList.toggle("hidden", pane.dataset.adminPane !== normalized)
+  })
+  if (normalized === "models") {
+    mountConnectionSettingsIntoAdminConsole(true)
+  }
+}
+
+async function openAdminConsoleModal(initialTab = "users") {
+  const isAdmin = Boolean(state.currentUser?.is_admin || state.currentUser?.role === "admin")
+  if (!isAdmin && !canManageExecutionSettings()) {
+    return
+  }
+  closeAccountDropdownMenu()
+  refs.adminPanel?.classList.remove("hidden")
+  refs.adminConsoleModal?.classList.remove("hidden")
+  refs.adminConsoleModal?.setAttribute("aria-hidden", "false")
+  document.body.classList.add("modal-open")
+  mountConnectionSettingsIntoAdminConsole(true)
+  switchAdminConsoleTab(isAdmin ? initialTab : "models")
+  if (isAdmin) {
+    await Promise.allSettled([
+      refreshAdminUsers(),
+      refreshAdminOrgContext(),
+      refreshPasswordResetRequests(),
+      refreshBugReports(),
+      refreshFeedbackSummary(),
+    ])
+  }
+}
+
+function closeAdminConsoleModal() {
+  mountConnectionSettingsIntoAdminConsole(false)
+  refs.adminConsoleModal?.classList.add("hidden")
+  refs.adminConsoleModal?.setAttribute("aria-hidden", "true")
+  document.body.classList.remove("modal-open")
+}
+
+function populateAdminOrgUserSelect(users = state.adminUsersCache) {
+  const select = refs.adminOrgUserSelect
+  if (!select) {
+    return
+  }
+  const previousValue = select.value || refs.adminOrgUserIdInput?.value || ""
+  select.replaceChildren()
+  const placeholder = document.createElement("option")
+  placeholder.value = ""
+  placeholder.textContent = "请选择成员"
+  select.append(placeholder)
+  ;(Array.isArray(users) ? users : []).forEach((user) => {
+    if (!user?.id) {
+      return
+    }
+    const option = document.createElement("option")
+    option.value = String(user.id)
+    option.textContent = formatAdminUserOptionLabel(user)
+    select.append(option)
+  })
+  if (previousValue && Array.from(select.options).some((opt) => opt.value === String(previousValue))) {
+    select.value = String(previousValue)
+    if (refs.adminOrgUserIdInput) {
+      refs.adminOrgUserIdInput.value = String(previousValue)
+    }
+  }
+}
+
+function setAdminOrgStatus(message = "", ok = false) {
+  if (!refs.adminOrgStatus) {
+    return
+  }
+  refs.adminOrgStatus.textContent = message
+  refs.adminOrgStatus.classList.toggle("is-ok", Boolean(message && ok))
+}
+
+function selectAdminUserForOrg(userId) {
+  const normalizedId = String(Number(userId || 0) || "")
+  if (!normalizedId) {
+    return
+  }
+  if (refs.adminOrgUserSelect) {
+    refs.adminOrgUserSelect.value = normalizedId
+  }
+  if (refs.adminOrgUserIdInput) {
+    refs.adminOrgUserIdInput.value = normalizedId
+  }
+  const targetUser = (state.adminUsersCache || []).find((user) => String(user.id) === normalizedId)
+  if (targetUser && refs.adminOrgUnitSelect) {
+    const candidateUnit = `${targetUser.company || ""}\n${targetUser.department || ""}`
+    if (Array.from(refs.adminOrgUnitSelect.options).some((opt) => opt.value === candidateUnit)) {
+      refs.adminOrgUnitSelect.value = candidateUnit
+    }
+    refs.adminOrgUnitSelect.focus()
+  }
+  if (targetUser) {
+    setAdminOrgStatus(`已选中成员 ${targetUser.username}，请选择目标组织后点“调整组织”。`, true)
+  }
+}
+
+function updateAdminPendingBadges(resetCount = 0) {
+  const count = Math.max(0, Number(resetCount) || 0)
+  ;[refs.adminPendingBadge, refs.adminMenuBadge, refs.adminTabResetBadge].forEach((badge) => {
+    if (!badge) {
+      return
+    }
+    badge.textContent = String(count)
+    badge.classList.toggle("hidden", count === 0)
+  })
+  if (refs.adminQuickSummary) {
+    refs.adminQuickSummary.textContent = count > 0
+      ? `有 ${count} 条密码找回申请待审批，点击打开独立控制台处理。`
+      : "用户组织、密码审批、满意度看板与模型路由已整合至独立控制台。"
+  }
+}
+
+function renderSimpleInlineTextPreview() {
+  if (!refs.simpleTextPreviewCard || !refs.simpleTextPreviewList) {
+    return
+  }
+  const recipe = simpleSceneRecipe()
+  if (!recipe || state.simpleDraft.view !== "form") {
+    refs.simpleTextPreviewCard.classList.add("hidden")
+    refs.simpleTextPreviewList.replaceChildren()
+    return
+  }
+  const items = extractSimpleVisibleTextItems(recipe, state.simpleDraft.values)
+  refs.simpleTextPreviewList.replaceChildren()
+  if (!items.length) {
+    refs.simpleTextPreviewCard.classList.add("hidden")
+    return
+  }
+  items.forEach((item) => {
+    const chip = document.createElement("span")
+    chip.className = "simple-text-chip"
+    const label = document.createElement("small")
+    label.textContent = `${item.label}：`
+    const text = document.createElement("strong")
+    text.textContent = item.text
+    chip.append(label, text)
+    refs.simpleTextPreviewList.append(chip)
+  })
+  refs.simpleTextPreviewCard.classList.remove("hidden")
+}
+
+function getEditSizeStrategy() {
+  const checked = refs.editSizeStrategyInputs?.find((input) => input.checked)?.value
+  return checked === "preset" ? "preset" : "source"
+}
+
+function updateEditSizeStrategyBadge() {
+  if (!refs.editTargetSizeBadge) {
+    return
+  }
+  const strategy = getEditSizeStrategy()
+  if (strategy === "source") {
+    const resolved = state.editImage ? simpleEditSourceSize(state.editImage) : "auto"
+    refs.editTargetSizeBadge.textContent = resolved === "auto"
+      ? "自适应原图比例"
+      : `原图比例 ${resolved}`
+    return
+  }
+  const presetValue = getSizeSnapshotValue()
+  refs.editTargetSizeBadge.textContent = presetValue === "auto"
+    ? "海报面板 Auto"
+    : `面板预设 ${presetValue}`
+}
+
+function syncEditSizeFromStrategy({ leavingEditMode = false } = {}) {
+  state.editSizeStrategy = getEditSizeStrategy()
+  if (leavingEditMode) {
+    if (state.savedPosterSizeBeforeEdit) {
+      const restored = state.savedPosterSizeBeforeEdit
+      state.savedPosterSizeBeforeEdit = ""
+      setGenerateSize(restored)
+    }
+    updateEditSizeStrategyBadge()
+    return
+  }
+  if (state.activeMode === "edit" && state.editSizeStrategy === "source" && state.editImage) {
+    if (!state.savedPosterSizeBeforeEdit) {
+      const currentSnap = getSizeSnapshotValue()
+      if (currentSnap === "auto" || /^\d+x\d+$/.test(currentSnap)) {
+        state.savedPosterSizeBeforeEdit = currentSnap
+      }
+    }
+    setGenerateSize(simpleEditSourceSize(state.editImage))
+  } else if (state.editSizeStrategy === "preset" && state.savedPosterSizeBeforeEdit) {
+    const restored = state.savedPosterSizeBeforeEdit
+    state.savedPosterSizeBeforeEdit = ""
+    setGenerateSize(restored)
+  }
+  updateEditSizeStrategyBadge()
+}
+
+function applyReviewPanelTone(panel, status, text) {
+  if (!panel) {
+    return
+  }
+  const tone = classifyReviewPanelTone(status, text)
+  panel.classList.toggle("is-pending", tone === "pending")
+  panel.classList.toggle("is-pass", tone === "pass")
+  panel.classList.toggle("is-warn", tone === "warn")
+}
 
 const state = {
   activeMode: "generate",
@@ -232,6 +529,9 @@ const state = {
   gallerySearchTimer: null,
   generatedImageDetailRequestSeq: 0,
   generationJobs: [],
+  generationJobsRequestSeq: 0,
+  generationJobsNextBeforeId: null,
+  generationJobsLoading: false,
   currentGalleryMeta: {
     generatedImageId: null,
     isFavorite: false,
@@ -274,6 +574,11 @@ const state = {
   rerunExecutionSnapshot: null,
   checkedCandidateIndex: null,
   promptConfirmCancel: null,
+  adminUsersCache: [],
+  adminActiveTab: "users",
+  activeRailTab: "gallery",
+  editSizeStrategy: "source",
+  savedPosterSizeBeforeEdit: "",
   adminOrgUnits: [],
   orgUnits: [],
   promptMode: "free",
@@ -329,11 +634,30 @@ const refs = {
   teamChatButton: document.querySelector("#teamChatButton"),
   teamChatUnreadBadge: document.querySelector("#teamChatUnreadBadge"),
   logoutButton: document.querySelector("#logoutButton"),
+  accountMenuWrap: document.querySelector("#accountMenuWrap"),
+  accountMenuTrigger: document.querySelector("#accountMenuTrigger"),
+  accountDropdownMenu: document.querySelector("#accountDropdownMenu"),
+  openAdminConsoleButton: document.querySelector("#openAdminConsoleButton"),
+  adminPendingBadge: document.querySelector("#adminPendingBadge"),
+  adminMenuBadge: document.querySelector("#adminMenuBadge"),
   openProfileButton: document.querySelector("#openProfileButton"),
   currentUsername: document.querySelector("#currentUsername"),
   userAvatar: document.querySelector("#userAvatar"),
   userImageStats: document.querySelector("#userImageStats"),
   userUsageSummary: document.querySelector("#userUsageSummary"),
+  adminQuickEntryCard: document.querySelector("#adminQuickEntryCard"),
+  openAdminQuickButton: document.querySelector("#openAdminQuickButton"),
+  adminQuickSummary: document.querySelector("#adminQuickSummary"),
+  adminConsoleModal: document.querySelector("#adminConsoleModal"),
+  adminConsoleBackdrop: document.querySelector("#adminConsoleBackdrop"),
+  closeAdminConsoleButton: document.querySelector("#closeAdminConsoleButton"),
+  adminConsoleTabButtons: Array.from(document.querySelectorAll("[data-admin-tab]")),
+  adminTabPanes: Array.from(document.querySelectorAll("[data-admin-pane]")),
+  adminTabResetBadge: document.querySelector("#adminTabResetBadge"),
+  adminModelsMount: document.querySelector("#adminModelsMount"),
+  adminUserSearchInput: document.querySelector("#adminUserSearchInput"),
+  adminOrgUserSelect: document.querySelector("#adminOrgUserSelect"),
+  connectionSettingsAnchor: document.querySelector("#connectionSettingsAnchor"),
   adminPanel: document.querySelector("#adminPanel"),
   adminPasswordResetPanel: document.querySelector("#adminPasswordResetPanel"),
   passwordResetRequestsList: document.querySelector("#passwordResetRequestsList"),
@@ -387,6 +711,9 @@ const refs = {
   clearHistoryButton: document.querySelector("#clearHistoryButton"),
   newTaskButton: document.querySelector("#newTaskButton"),
   navModeButtons: Array.from(document.querySelectorAll(".nav-link[data-mode]")),
+  railAssetTabs: document.querySelector("#railAssetTabs"),
+  railTabButtons: Array.from(document.querySelectorAll("[data-rail-tab]")),
+  railSharedBadge: document.querySelector("#railSharedBadge"),
   historyList: document.querySelector("#historyList"),
   historyEmpty: document.querySelector("#historyEmpty"),
   sharedResultsList: document.querySelector("#sharedResultsList"),
@@ -399,6 +726,7 @@ const refs = {
   galleryEmpty: document.querySelector("#galleryEmpty"),
   refreshGalleryButton: document.querySelector("#refreshGalleryButton"),
   refreshJobsButton: document.querySelector("#refreshJobsButton"),
+  loadMoreJobsButton: document.querySelector("#loadMoreJobsButton"),
   jobCenterList: document.querySelector("#jobCenterList"),
   jobCenterEmpty: document.querySelector("#jobCenterEmpty"),
   gallerySearchInput: document.querySelector("#gallerySearchInput"),
@@ -415,6 +743,8 @@ const refs = {
   simpleScenarioTitle: document.querySelector("#simpleScenarioTitle"),
   simpleScenarioSubtitle: document.querySelector("#simpleScenarioSubtitle"),
   simpleScenarioFields: document.querySelector("#simpleScenarioFields"),
+  simpleTextPreviewCard: document.querySelector("#simpleTextPreviewCard"),
+  simpleTextPreviewList: document.querySelector("#simpleTextPreviewList"),
   simpleEditImageInput: document.querySelector("#simpleEditImageInput"),
   simpleBackButton: document.querySelector("#simpleBackButton"),
   simpleGenerateButton: document.querySelector("#simpleGenerateButton"),
@@ -511,6 +841,8 @@ const refs = {
   clearEditMaskButton: document.querySelector("#clearEditMaskButton"),
   editPromptInput: document.querySelector("#editPromptInput"),
   editPromptCount: document.querySelector("#editPromptCount"),
+  editSizeStrategyInputs: Array.from(document.querySelectorAll('input[name="editSizeStrategy"]')),
+  editTargetSizeBadge: document.querySelector("#editTargetSizeBadge"),
   editModelInput: document.querySelector("#editModelInput"),
   clearEditButton: document.querySelector("#clearEditButton"),
   editButton: document.querySelector("#editButton"),
@@ -539,8 +871,13 @@ const refs = {
   generationOverlayTitle: document.querySelector("#generationOverlayTitle"),
   generationOverlaySubtitle: document.querySelector("#generationOverlaySubtitle"),
   generationOverlaySteps: document.querySelector("#generationOverlaySteps"),
+  overlayCancelButton: document.querySelector("#overlayCancelButton"),
   simpleResultSkeleton: document.querySelector("#simpleResultSkeleton"),
   simpleResultEmpty: document.querySelector("#simpleResultEmpty"),
+  simpleResultAlert: document.querySelector("#simpleResultAlert"),
+  simpleResultAlertText: document.querySelector("#simpleResultAlertText"),
+  simpleReviewSummary: document.querySelector("#simpleReviewSummary"),
+  simpleReviewSummaryText: document.querySelector("#simpleReviewSummaryText"),
   resultPrompt: document.querySelector("#resultPrompt"),
   resultMeta: document.querySelector("#resultMeta"),
   resultTiming: document.querySelector("#resultTiming"),
@@ -807,6 +1144,11 @@ function handleSessionExpired() {
   state.persistenceReady = false
   state.lastReadyUserId = null
   stopTeamChatPolling()
+  resetWorkspaceForUserScope()
+  state.savedApiKey = ""
+  if (refs.apiKeyInput) {
+    refs.apiKeyInput.value = ""
+  }
   setCurrentUser(null)
   enterAuthGate("login", "登录已过期，请重新登录。")
 }
@@ -815,6 +1157,8 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
   const registrationEnabled = state.serverConfig?.self_registration_enabled === true
   state.authMode = mode === "register" && registrationEnabled ? "register" : "login"
   cancelPendingPromptConfirmation()
+  closeAccountDropdownMenu()
+  mountConnectionSettingsIntoAdminConsole(false)
   // 会话过期常发生在聊天/资料弹窗打开时；这些弹窗是 .desktop-shell 的
   // 兄弟节点，不随 auth-gate 隐藏，不关掉会盖在登录表单上面。
   ;[
@@ -822,6 +1166,7 @@ function enterAuthGate(mode = state.authMode || "login", message = "") {
     refs.profileModal,
     refs.bugReportModal,
     refs.changePasswordModal,
+    refs.adminConsoleModal,
     refs.promptConfirmModal,
     refs.previewModal,
   ].forEach((modal) => {
@@ -948,6 +1293,11 @@ function enterPasswordResetConfirm(token) {
 
 function invalidateUserContext() {
   state.userContextEpoch += 1
+  window.clearTimeout(state.persistTimer)
+  state.persistTimer = null
+  state.generationJobsNextBeforeId = null
+  state.generationJobsLoading = false
+  renderGenerationJobsPagination()
   invalidateLatestFileReads()
   state.activeRequestCancelled = true
   state.activeRequestController?.abort()
@@ -1127,11 +1477,21 @@ async function refreshImageStats() {
 function updateAdminPanelVisibility() {
   const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
   const canManageExecution = canManageExecutionSettings()
-  refs.adminPanel?.classList.toggle("hidden", !isAdmin)
+  const hasAdminEntry = Boolean(isAdmin || canManageExecution)
+  refs.adminPanel?.classList.toggle("hidden", !hasAdminEntry)
+  refs.openAdminConsoleButton?.classList.toggle("hidden", !hasAdminEntry)
+  refs.adminQuickEntryCard?.classList.toggle("hidden", !hasAdminEntry)
   refs.connectionSettings?.classList.toggle("hidden", !canManageExecution)
   refs.connectionSettingsLink?.classList.toggle("hidden", !canManageExecution)
   refs.debugOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
   refs.rawResponseOutput?.closest("details")?.classList.toggle("hidden", !canManageExecution)
+  if (!isAdmin) {
+    state.adminUsersCache = []
+    updateAdminPendingBadges(0)
+    if (!hasAdminEntry && refs.adminConsoleModal && !refs.adminConsoleModal.classList.contains("hidden")) {
+      closeAdminConsoleModal()
+    }
+  }
   if (!isAdmin && refs.adminUsersList) {
     refs.adminUsersList.innerHTML = ""
   }
@@ -1169,14 +1529,24 @@ function formatAdminBytes(bytes) {
 }
 
 function renderAdminUsers(users) {
+  if (Array.isArray(users)) {
+    state.adminUsersCache = users
+    populateAdminOrgUserSelect(state.adminUsersCache)
+  }
   if (!refs.adminUsersList) {
     return
   }
-  if (!Array.isArray(users) || users.length === 0) {
+  const sourceUsers = Array.isArray(users) ? users : state.adminUsersCache
+  if (!Array.isArray(sourceUsers) || sourceUsers.length === 0) {
     refs.adminUsersList.innerHTML = '<p class="admin-empty">暂无用户。</p>'
     return
   }
-  refs.adminUsersList.innerHTML = users.map((user) => {
+  const filtered = filterAdminUsers(sourceUsers, refs.adminUserSearchInput?.value || "")
+  if (!filtered.length) {
+    refs.adminUsersList.innerHTML = '<p class="admin-empty">没有匹配搜索条件的用户。</p>'
+    return
+  }
+  refs.adminUsersList.innerHTML = filtered.map((user) => {
     const roleLabel = user.role === "admin" ? "管理员" : "普通用户"
     const disabled = user.id === state.currentUser?.id ? "disabled" : ""
     const activeLabel = user.is_active ? "启用" : "停用"
@@ -1192,7 +1562,10 @@ function renderAdminUsers(users) {
           <span>${Number(user.image_count || 0)} 张</span>
           <span>${formatAdminBytes(Number(user.saved_bytes || 0))}</span>
         </div>
-        <button class="ghost-button admin-delete-user-button" type="button" data-user-id="${user.id}" data-username="${escapeHTML(user.username || "")}" ${disabled}>删除</button>
+        <div class="admin-user-actions">
+          <button class="ghost-button admin-select-user-button" type="button" data-select-user-id="${user.id}">调岗</button>
+          <button class="ghost-button admin-delete-user-button" type="button" data-user-id="${user.id}" data-username="${escapeHTML(user.username || "")}" ${disabled}>删除</button>
+        </div>
       </article>
     `
   }).join("")
@@ -1328,13 +1701,13 @@ function renderAdminOrgStats(items) {
   `).join("")
 }
 
-async function refreshAdminOrgContext() {
+async function refreshAdminOrgContext({ preserveStatus = false } = {}) {
   const isAdmin = state.currentUser?.is_admin || state.currentUser?.role === "admin"
   if (!isAdmin || !refs.adminOrgPanel) {
     return
   }
-  if (refs.adminOrgStatus) {
-    refs.adminOrgStatus.textContent = ""
+  if (!preserveStatus) {
+    setAdminOrgStatus("")
   }
   try {
     const [orgResponse, auditResponse, statsResponse] = await Promise.all([
@@ -1354,9 +1727,7 @@ async function refreshAdminOrgContext() {
       renderAdminOrgStats(statsResponse.data.org_stats)
     }
   } catch {
-    if (refs.adminOrgStatus) {
-      refs.adminOrgStatus.textContent = "组织信息暂时不可用。"
-    }
+    setAdminOrgStatus("组织信息暂时不可用。")
   }
 }
 
@@ -1368,7 +1739,7 @@ async function submitAdminOrgUnit(event) {
   const company = refs.adminOrgCompanyInput.value.trim()
   const department = refs.adminOrgDepartmentInput.value.trim()
   if (!company || !department) {
-    refs.adminOrgStatus.textContent = "请填写公司和部门。"
+    setAdminOrgStatus("请填写公司和部门。")
     return
   }
   try {
@@ -1377,24 +1748,28 @@ async function submitAdminOrgUnit(event) {
       body: JSON.stringify({ company, department }),
     })
     if (!response.ok) {
-      refs.adminOrgStatus.textContent = data.error || "组织创建失败"
+      setAdminOrgStatus(data.error || "组织创建失败")
       return
     }
-    refs.adminOrgStatus.textContent = "组织已更新。"
+    setAdminOrgStatus("组织已更新。", true)
     refs.adminOrgDepartmentInput.value = ""
-    await refreshAdminOrgContext()
+    await refreshAdminOrgContext({ preserveStatus: true })
   } catch {
-    refs.adminOrgStatus.textContent = "组织创建失败。"
+    setAdminOrgStatus("组织创建失败。")
   }
 }
 
 async function submitAdminUserOrg(event) {
   event.preventDefault()
-  const userId = Number(refs.adminOrgUserIdInput?.value || 0)
+  const rawUserId = refs.adminOrgUserSelect?.value || refs.adminOrgUserIdInput?.value || 0
+  const userId = Number(rawUserId)
+  if (refs.adminOrgUserIdInput && userId) {
+    refs.adminOrgUserIdInput.value = String(userId)
+  }
   const selected = refs.adminOrgUnitSelect?.value || ""
   const [company = "", department = ""] = selected.split("\n")
   if (!userId || !company || !department) {
-    refs.adminOrgStatus.textContent = "请选择用户和组织。"
+    setAdminOrgStatus("请选择用户和组织。")
     return
   }
   try {
@@ -1407,16 +1782,16 @@ async function submitAdminUserOrg(event) {
       }),
     })
     if (!response.ok) {
-      refs.adminOrgStatus.textContent = data.error || "组织调整失败"
+      setAdminOrgStatus(data.error || "组织调整失败")
       return
     }
-    refs.adminOrgStatus.textContent = "用户组织已调整。"
+    setAdminOrgStatus("用户组织已调整。", true)
     if (refs.adminOrgReasonInput) {
       refs.adminOrgReasonInput.value = ""
     }
-    await Promise.all([refreshAdminOrgContext(), refreshAdminUsers()])
+    await Promise.all([refreshAdminOrgContext({ preserveStatus: true }), refreshAdminUsers()])
   } catch {
-    refs.adminOrgStatus.textContent = "组织调整失败。"
+    setAdminOrgStatus("组织调整失败。")
   }
 }
 
@@ -1426,7 +1801,7 @@ async function submitAdminGroupAnnouncement(event) {
   const [company = "", department = ""] = selected.split("\n")
   const content = refs.adminAnnouncementContentInput?.value.trim() || ""
   if (!company || !department) {
-    refs.adminOrgStatus.textContent = "请选择公告组织。"
+    setAdminOrgStatus("请选择公告组织。")
     return
   }
   try {
@@ -1435,15 +1810,15 @@ async function submitAdminGroupAnnouncement(event) {
       body: JSON.stringify({ company, department, content }),
     })
     if (!response.ok) {
-      refs.adminOrgStatus.textContent = data.error || "群公告保存失败"
+      setAdminOrgStatus(data.error || "群公告保存失败")
       return
     }
-    refs.adminOrgStatus.textContent = content ? "群公告已保存。" : "群公告已清空。"
+    setAdminOrgStatus(content ? "群公告已保存。" : "群公告已清空。", true)
     if (state.teamChatRoom.type === "team") {
       await refreshTeamChatGroupContext()
     }
   } catch {
-    refs.adminOrgStatus.textContent = "群公告保存失败。"
+    setAdminOrgStatus("群公告保存失败。")
   }
 }
 
@@ -1618,6 +1993,7 @@ function createPasswordResetRequestRow(item) {
 }
 
 function renderPasswordResetRequests(requests) {
+  updateAdminPendingBadges(countPendingPasswordResets(requests))
   if (!refs.passwordResetRequestsList) {
     return
   }
@@ -2123,6 +2499,7 @@ function updateSimpleFieldValue(fieldName, nextValue) {
       [fieldName]: Array.isArray(nextValue) ? [...nextValue] : nextValue,
     },
   }
+  renderSimpleInlineTextPreview()
   clearSimpleFormAlert()
   scheduleWorkspacePersist()
 }
@@ -2179,6 +2556,14 @@ function renderSimpleScenarioCards() {
     icon.className = "simple-scenario-icon"
     icon.append(createSpriteIcon(simpleSceneIconName(recipe)))
 
+    const badgeText = resolveSimpleScenarioBadge(recipe)
+    let badge = null
+    if (badgeText) {
+      badge = document.createElement("span")
+      badge.className = "simple-scenario-badge"
+      badge.textContent = badgeText
+    }
+
     const copy = document.createElement("span")
     copy.className = "simple-scenario-copy"
     const title = document.createElement("strong")
@@ -2222,6 +2607,9 @@ function renderSimpleScenarioCards() {
     }
 
     card.append(cover, icon, copy)
+    if (badge) {
+      card.append(badge)
+    }
     if (cardLoadingIcon) {
       card.append(cardLoadingIcon)
     }
@@ -2299,7 +2687,11 @@ function openSimpleScenario(recipeId) {
 function simpleFieldLabel(field) {
   const row = document.createElement("div")
   row.className = "simple-field-label"
-  const label = document.createElement("span")
+  const isTextControl = !field.kind || field.kind === "text" || field.kind === "textarea"
+  const label = document.createElement(isTextControl ? "label" : "span")
+  if (isTextControl) {
+    label.htmlFor = `simple-field-${field.name}`
+  }
   label.textContent = field.label
   if (field.required) {
     const required = document.createElement("span")
@@ -2321,6 +2713,7 @@ function renderSimpleTextField(field, value) {
   shell.className = "simple-input-shell"
   const input = document.createElement(field.kind === "textarea" ? "textarea" : "input")
   input.className = field.kind === "textarea" ? "simple-textarea" : "simple-input"
+  input.id = `simple-field-${field.name}`
   input.dataset.simpleField = field.name
   input.name = field.name
   input.required = Boolean(field.required)
@@ -2637,6 +3030,7 @@ async function useSimpleImageFieldFile(recipe, field, file) {
 
 function renderSimpleImageField(field, recipe) {
   const wrapper = document.createElement("div")
+  wrapper.className = "simple-upload-field"
   const input = document.createElement("input")
   input.type = "file"
   input.accept = "image/*"
@@ -2689,6 +3083,20 @@ function renderSimpleImageField(field, recipe) {
     }
   })
   wrapper.append(dropzone, input)
+  if (!field.required && asset) {
+    const clearButton = document.createElement("button")
+    clearButton.type = "button"
+    clearButton.className = "ux-button ux-button-secondary simple-upload-clear"
+    clearButton.disabled = state.isBusy
+    clearButton.append(createSpriteIcon("delete"), document.createTextNode("移除参考图"))
+    clearButton.addEventListener("click", () => {
+      clearGenerateReferenceImage()
+      updateSimpleFieldValue(field.name, "")
+      renderSimpleScenarioForm()
+      setError("")
+    })
+    wrapper.append(clearButton)
+  }
   return wrapper
 }
 
@@ -2731,6 +3139,7 @@ function renderSimpleScenarioForm() {
     refs.simpleScenarioFields.append(fieldWrap)
   })
   renderSimpleGenerateButton()
+  renderSimpleInlineTextPreview()
   syncSimpleBusyControls(state.isBusy)
   clearSimpleFormAlert()
 }
@@ -2820,9 +3229,32 @@ function validateSimpleScenario(recipe) {
 }
 
 function simpleEditSourceSize(asset = state.editImage) {
-  const width = Math.round(Number(asset?.width || asset?.saved_image_width || 0))
-  const height = Math.round(Number(asset?.height || asset?.saved_image_height || 0))
-  return width > 0 && height > 0 ? `${width}x${height}` : "auto"
+  const rawWidth = Math.round(Number(asset?.width || asset?.saved_image_width || 0))
+  const rawHeight = Math.round(Number(asset?.height || asset?.saved_image_height || 0))
+  if (rawWidth <= 0 || rawHeight <= 0) {
+    return "auto"
+  }
+  const aspectRatio = Math.max(rawWidth / rawHeight, rawHeight / rawWidth)
+  if (aspectRatio > 3) {
+    return "auto"
+  }
+  const maxSide = 3840
+  const maxPixels = 8_294_400
+  const scale = Math.min(
+    1,
+    maxSide / rawWidth,
+    maxSide / rawHeight,
+    Math.sqrt(maxPixels / (rawWidth * rawHeight)),
+  )
+  const clampedWidth = Math.max(256, Math.min(maxSide, Math.floor((rawWidth * scale) / 2) * 2))
+  const clampedHeight = Math.max(256, Math.min(maxSide, Math.floor((rawHeight * scale) / 2) * 2))
+  if (
+    Math.max(clampedWidth / clampedHeight, clampedHeight / clampedWidth) > 3
+    || clampedWidth * clampedHeight > maxPixels
+  ) {
+    return "auto"
+  }
+  return `${clampedWidth}x${clampedHeight}`
 }
 
 function syncSimpleScenarioToProfessional(recipe, prompt, { preserveSceneRecipe = true } = {}) {
@@ -3492,12 +3924,12 @@ function isItineraryInstructionRow(row) {
 
 function cleanItineraryStopName(value) {
   return String(value || "")
-    .replace(/入住[:：]?.*$/, "")
-    .replace(/交通[:：]?.*$/, "")
-    .replace(/当天重点[:：]?.*$/, "")
-    .replace(/重点[:：]?.*$/, "")
-    .replace(/活动[:：]?.*$/, "")
-    .replace(/酒店[:：]?.*$/, "")
+    .replace(/(?:当日|当天)?入住[:：].*$/, "")
+    .replace(/交通(?:方式)?[:：].*$/, "")
+    .replace(/当天重点[:：].*$/, "")
+    .replace(/(?:今日|当日)?重点[:：].*$/, "")
+    .replace(/(?:今日|当日|特色)?活动[:：].*$/, "")
+    .replace(/(?:参考|入住)?酒店[:：].*$/, "")
     .replace(/^[-*]\s*/, "")
     .trim()
 }
@@ -3521,14 +3953,14 @@ function parseItineraryTextStops(description) {
       }
       continue
     }
-    const hasDate = /(?:^|[：:\s])((?:D\d+)|(?:\d{1,2}[/.月-]\d{1,2})|(?:\d{1,2}月\d{1,2}?日?))/.test(row)
+    const hasDate = /(?:^|[：:\s])((?:D\d+)|(?:Day\s*\d+)|(?:第[一二三四五六七八九十百\d]+天)|(?:\d{1,2}[/.月-]\d{1,2})|(?:\d{1,2}月\d{1,2}?日?))/i.test(row)
     if (!inDailySection && !hasDate) {
       continue
     }
     if (isItineraryInstructionRow(row)) {
       continue
     }
-    const dateMatch = row.match(/(?:D\d+)|(?:\d{1,2}\s*[/.月-]\s*\d{1,2}\s*日?)|(?:\d{1,2}\s*月)/)
+    const dateMatch = row.match(/(?:D\d+)|(?:Day\s*\d+)|(?:第[一二三四五六七八九十百\d]+天)|(?:\d{1,2}\s*[/.月-]\s*\d{1,2}\s*日?)|(?:\d{1,2}\s*月)/i)
     const date = dateMatch ? dateMatch[0].replace(/\s+/g, "") : ""
     const withoutNotes = row
       .replace(/（[^）]*）/g, "")
@@ -3748,6 +4180,7 @@ async function submitAIItineraryMap() {
       return
     }
     appendDebugLine("行程路线生成失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.code === "itinerary_coordinates_required") {
       setError(itineraryCoordinateHelpText(), error.details)
     } else {
@@ -4032,6 +4465,10 @@ function sharedResultItemsMarkup(shares, { simple = false } = {}) {
 
 function renderSharedResults(shares) {
   state.sharedResults = Array.isArray(shares) ? [...shares] : []
+  if (refs.railSharedBadge) {
+    refs.railSharedBadge.textContent = String(state.sharedResults.length)
+    refs.railSharedBadge.classList.toggle("hidden", state.sharedResults.length === 0)
+  }
   const targets = [
     { list: refs.sharedResultsList, empty: refs.sharedResultsEmpty, simple: false },
     { list: refs.simpleSharedResultsList, empty: refs.simpleSharedResultsEmpty, simple: true },
@@ -4073,6 +4510,8 @@ async function refreshSharedResults() {
 }
 
 function resetReviewStateForExternalResult() {
+  // Historical/shared images do not carry the current form's replay snapshot.
+  state.lastRegenerationRequest = null
   state.resultGenerationSeq += 1
   state.copyrightRiskRequestSeq += 1
   state.textFidelityRequestSeq += 1
@@ -4414,7 +4853,7 @@ function renderGenerationJobs(jobs = state.generationJobs) {
   }
   refs.jobCenterList.replaceChildren()
   refs.jobCenterEmpty.classList.toggle("hidden", state.generationJobs.length > 0)
-  state.generationJobs.slice(0, 8).forEach((job) => {
+  state.generationJobs.forEach((job) => {
     const item = document.createElement("article")
     item.className = `job-center-item ${job.status === "failed" ? "failed" : ""}`
     const thumb = document.createElement("button")
@@ -4471,21 +4910,71 @@ function renderGenerationJobs(jobs = state.generationJobs) {
   })
 }
 
-async function refreshGenerationJobs() {
+function renderGenerationJobsPagination({ failed = false } = {}) {
+  if (!refs.loadMoreJobsButton) {
+    return
+  }
+  refs.loadMoreJobsButton.classList.toggle("hidden", !state.generationJobsNextBeforeId)
+  refs.loadMoreJobsButton.disabled = Boolean(state.generationJobsLoading)
+  refs.loadMoreJobsButton.textContent = state.generationJobsLoading
+    ? "正在加载…"
+    : failed ? "加载失败，点击重试" : "加载更早任务"
+}
+
+async function refreshGenerationJobs({ append = false } = {}) {
   if (!state.currentUser || !refs.jobCenterList) {
     return
   }
+  if (append && (!state.generationJobsNextBeforeId || state.generationJobsLoading)) {
+    return
+  }
+  const requestUserContextEpoch = state.userContextEpoch
+  const requestSeq = (state.generationJobsRequestSeq || 0) + 1
+  state.generationJobsRequestSeq = requestSeq
+  state.generationJobsLoading = true
+  renderGenerationJobsPagination()
+  const requestIsCurrent = () => (
+    requestSeq === state.generationJobsRequestSeq
+    && requestUserContextEpoch === state.userContextEpoch
+  )
+  const url = append
+    ? `/api/jobs?limit=20&before_id=${encodeURIComponent(state.generationJobsNextBeforeId)}`
+    : "/api/jobs?limit=20"
+  let failed = false
   try {
-    const { response, data } = await fetchJSON("/api/jobs?limit=20", { cache: "no-store" })
-    if (response.ok) {
-      renderGenerationJobs(data.jobs)
+    const { response, data } = await fetchJSON(url, { cache: "no-store" })
+    if (!requestIsCurrent()) {
       return
     }
+    if (response.ok) {
+      const incomingJobs = Array.isArray(data.jobs) ? data.jobs : []
+      const jobs = append ? [...state.generationJobs, ...incomingJobs] : incomingJobs
+      const seenIds = new Set()
+      const uniqueJobs = jobs.filter((job) => {
+        if (seenIds.has(job.id)) return false
+        seenIds.add(job.id)
+        return true
+      })
+      const nextBeforeId = Number(data.next_before_id)
+      state.generationJobsNextBeforeId = Number.isSafeInteger(nextBeforeId) && nextBeforeId > 0
+        ? nextBeforeId : null
+      renderGenerationJobs(uniqueJobs)
+      return
+    }
+    failed = true
   } catch (error) {
     if (error?.staleUserContext) {
       return
     }
-    // handled below
+    failed = true
+  } finally {
+    if (requestIsCurrent()) {
+      state.generationJobsLoading = false
+      renderGenerationJobsPagination({ failed })
+    }
+  }
+  if (!requestIsCurrent() || append) {
+    return
   }
   refs.jobCenterList.innerHTML = '<p class="empty-history">任务中心暂时不可用。</p>'
   refs.jobCenterEmpty?.classList.add("hidden")
@@ -5104,6 +5593,16 @@ function resetTeamChatState() {
   refs.teamChatModal?.classList.add("hidden")
   refs.teamChatModal?.setAttribute("aria-hidden", "true")
   document.body.classList.remove("chat-open")
+  const hasOtherOpenModal = [
+    refs.profileModal,
+    refs.bugReportModal,
+    refs.changePasswordModal,
+    refs.promptConfirmModal,
+    refs.previewModal,
+  ].some((modal) => modal && !modal.classList.contains("hidden"))
+  if (!hasOtherOpenModal) {
+    document.body.classList.remove("modal-open")
+  }
 }
 
 function renderTeamChatMemberAvatar(container, member) {
@@ -6251,8 +6750,9 @@ async function submitAuthForm(event) {
     }
     setCurrentUser(data.user)
     refs.authPasswordInput.value = ""
-    await startAuthenticatedApp()
-    enterAppShell()
+    if (await startAuthenticatedApp()) {
+      enterAppShell()
+    }
   } catch {
     refs.authError.textContent = "网络连接错误"
   } finally {
@@ -6395,6 +6895,9 @@ async function logout() {
     state.simpleDraft = { scenarioId: "", view: "picker", values: {} }
     state.simpleFirstRunEligible = null
     state.savedApiKey = ""
+    if (refs.apiKeyInput) {
+      refs.apiKeyInput.value = ""
+    }
     renderSimpleGalleryItems([])
     renderGalleryItems([])
     renderSharedResults([])
@@ -6402,6 +6905,7 @@ async function logout() {
     clearResult()
     clearGenerateForm()
     clearEditForm()
+    resetItineraryMapExample()
     setCurrentUser(null)
     enterAuthGate("login")
     if (refs.userUsageSummary) {
@@ -6430,6 +6934,11 @@ function resetWorkspaceForUserScope() {
   state.rerunExecutionSnapshot = null
   state.galleryRequestSeq = (state.galleryRequestSeq || 0) + 1
   state.generatedImageDetailRequestSeq += 1
+  state.generationJobsRequestSeq = (state.generationJobsRequestSeq || 0) + 1
+  state.generationJobsNextBeforeId = null
+  state.generationJobsLoading = false
+  renderGenerationJobs([])
+  renderGenerationJobsPagination()
   state.galleryItems = []
   state.sharedResults = []
   renderGalleryItems([])
@@ -6663,12 +7172,19 @@ function scheduleWorkspacePersist() {
     return
   }
 
+  const persistUserContextEpoch = state.userContextEpoch
+  const storageKey = workspaceStorageKey()
   window.clearTimeout(state.persistTimer)
   state.persistTimer = window.setTimeout(() => {
-    if (state.suppressSettingsPersist) {
+    state.persistTimer = null
+    if (
+      !state.persistenceReady
+      || state.suppressSettingsPersist
+      || !userContextIsCurrent(persistUserContextEpoch)
+    ) {
       return
     }
-    saveWorkspaceSnapshot(createWorkspaceSnapshot()).catch((error) => {
+    saveWorkspaceSnapshot(createWorkspaceSnapshot(), storageKey).catch((error) => {
       console.error("Persist workspace failed", error)
     })
   }, 180)
@@ -7547,6 +8063,9 @@ function openPromptConfirmModal({ title, description, text }) {
 }
 
 async function confirmPromptBeforeRun(kind, text) {
+  if (state.uiMode === "simple") {
+    return String(text || "").trim()
+  }
   const labels = {
     generate: {
       title: "生成海报前确认提示词",
@@ -7663,6 +8182,9 @@ function setGenerateSize(size) {
     refs.generateHeightInput.value = ""
     refs.generateSizePreset.value = "auto"
     updateVisualSizePicker("auto")
+    if (typeof updateEditSizeStrategyBadge === "function") {
+      updateEditSizeStrategyBadge()
+    }
     return
   }
   const parsed = parseSizeValue(size) || { width: 1024, height: 1024 }
@@ -7672,6 +8194,9 @@ function setGenerateSize(size) {
     ? formatSizeValue(parsed.width, parsed.height)
     : "custom"
   updateVisualSizePicker(refs.generateSizePreset.value)
+  if (typeof updateEditSizeStrategyBadge === "function") {
+    updateEditSizeStrategyBadge()
+  }
 }
 
 function syncSizePresetFromInputs() {
@@ -8171,6 +8696,9 @@ function setBusy(isBusy, label, options = {}) {
   if (!isBusy) {
     state.activeRequestController = null
     refs.cancelRequestButton.textContent = "中断生成"
+    if (refs.overlayCancelButton) {
+      refs.overlayCancelButton.textContent = "中断生成"
+    }
   }
   refs.generateButton.disabled = isBusy
   refs.editButton.disabled = isBusy
@@ -8179,6 +8707,9 @@ function setBusy(isBusy, label, options = {}) {
   if (refs.itineraryTab) {
     refs.itineraryTab.disabled = isBusy
   }
+  refs.navModeButtons?.forEach((button) => {
+    button.disabled = isBusy
+  })
   if (refs.renderItineraryMapButton) {
     refs.renderItineraryMapButton.disabled = isBusy
   }
@@ -8190,6 +8721,10 @@ function setBusy(isBusy, label, options = {}) {
   syncLatestFileReadControls()
   refs.cancelRequestButton?.classList.toggle("hidden", !isBusy)
   refs.cancelRequestButton.disabled = !isBusy
+  refs.overlayCancelButton?.classList.toggle("hidden", !isBusy)
+  if (refs.overlayCancelButton) {
+    refs.overlayCancelButton.disabled = !isBusy
+  }
   refs.requestStatus.textContent = label
   refs.requestBadge.textContent = label
   refs.requestBadge.className = `status-badge ${isBusy ? "working" : "idle"}`
@@ -8212,6 +8747,10 @@ function cancelActiveRequest() {
   setProgressPhase("receiving", "正在中断生成")
   refs.cancelRequestButton.disabled = true
   refs.cancelRequestButton.textContent = "正在中断"
+  if (refs.overlayCancelButton) {
+    refs.overlayCancelButton.disabled = true
+    refs.overlayCancelButton.textContent = "正在中断"
+  }
   state.activeRequestController?.abort()
 }
 
@@ -8227,6 +8766,10 @@ function ensureRequestNotCancelled() {
 function setError(message = "", details = "") {
   refs.errorMessage.classList.remove("neutral")
   refs.errorMessage.textContent = message
+  if (refs.simpleResultAlertText) {
+    refs.simpleResultAlertText.textContent = message
+  }
+  refs.simpleResultAlert?.classList.toggle("hidden", !message)
   // Keep the alert to one plain-language sentence; technical details (raw
   // upstream JSON, stack-ish text) go into a collapsed panel so non-technical
   // users aren't faced with a scary wall of text, while a helper can still
@@ -8366,18 +8909,42 @@ function renderReviewCopyForMode() {
       state.textFidelity?.text || "",
     )
   }
+  if (refs.simpleReviewSummary && refs.simpleReviewSummaryText) {
+    const visibleReviews = [
+      state.copyrightRisk?.hidden === false ? { kind: "copyright", ...state.copyrightRisk } : null,
+      state.textFidelity?.hidden === false ? { kind: "text", ...state.textFidelity } : null,
+    ].filter(Boolean)
+    if (!visibleReviews.length || visibleReviews.every((item) => item.status === "等待检查")) {
+      refs.simpleReviewSummaryText.textContent = ""
+      refs.simpleReviewSummary.classList.add("hidden")
+    } else if (visibleReviews.some((item) => ["检查中", "等待检查"].includes(item.status))) {
+      refs.simpleReviewSummary.className = "ux-alert ux-alert-info simple-review-summary"
+      refs.simpleReviewSummaryText.textContent = "正在自动检查文字准确性与版权风险…"
+    } else {
+      const hasAttention = visibleReviews.some((item) =>
+        /高风险|中风险|不通过|不一致|缺失|疑似错误|错字|漏字|失败|未检查/.test(`${item.status} ${item.text}`),
+      )
+      refs.simpleReviewSummary.className = hasAttention
+        ? "ux-alert ux-alert-warning simple-review-summary"
+        : "ux-alert ux-alert-success simple-review-summary"
+      refs.simpleReviewSummaryText.textContent = visibleReviews
+        .map((item) => simpleReviewText(item.kind, item.status || "", item.text || ""))
+        .join(" ")
+    }
+  }
 }
 
 function setRiskPanel(status, text, { hidden = false, candidateIndex = null } = {}) {
   state.copyrightRisk = { status, text, hidden }
   rememberCandidateReview(candidateIndex, "copyrightRisk", state.copyrightRisk)
   refs.copyrightRiskPanel?.classList.toggle("hidden", hidden)
+  if (typeof applyReviewPanelTone === "function") {
+    applyReviewPanelTone(refs.copyrightRiskPanel, status, text)
+  }
   if (refs.copyrightRiskStatus) {
     refs.copyrightRiskStatus.textContent = status
   }
-  if (refs.copyrightRiskText) {
-    refs.copyrightRiskText.textContent = simpleReviewText("copyright", status, text)
-  }
+  renderReviewCopyForMode()
   scheduleWorkspacePersist()
 }
 
@@ -8385,12 +8952,13 @@ function setTextFidelityPanel(status, text, { hidden = false, candidateIndex = n
   state.textFidelity = { status, text, hidden }
   rememberCandidateReview(candidateIndex, "textFidelity", state.textFidelity)
   refs.textFidelityPanel?.classList.toggle("hidden", hidden)
+  if (typeof applyReviewPanelTone === "function") {
+    applyReviewPanelTone(refs.textFidelityPanel, status, text)
+  }
   if (refs.textFidelityStatus) {
     refs.textFidelityStatus.textContent = status
   }
-  if (refs.textFidelityText) {
-    refs.textFidelityText.textContent = simpleReviewText("text", status, text)
-  }
+  renderReviewCopyForMode()
   scheduleWorkspacePersist()
 }
 
@@ -8601,6 +9169,11 @@ function setEditImage(
   }
   state.editImage = cloneImageAsset(asset)
   updateEditSourceUI()
+  if (state.activeMode === "edit" && typeof syncEditSizeFromStrategy === "function") {
+    syncEditSizeFromStrategy()
+  } else if (typeof updateEditSizeStrategyBadge === "function") {
+    updateEditSizeStrategyBadge()
+  }
 
   if (showPreview) {
     applySourcePreview(state.editImage, previewLabel)
@@ -8699,6 +9272,9 @@ function setMode(mode, options = {}) {
   if (mode === "edit" && !state.displayedSourceImage && getAssetDisplaySrc(state.editImage)) {
     applySourcePreview(state.editImage, "输入图")
   }
+  if (typeof syncEditSizeFromStrategy === "function") {
+    syncEditSizeFromStrategy({ leavingEditMode: previousMode === "edit" && mode !== "edit" })
+  }
   updateGenerateIntentUI()
   updateEditSourceUI()
   updatePreviewAvailability()
@@ -8756,10 +9332,12 @@ function applyPreviewZoom() {
   if (!refs.previewSingleImage) {
     return
   }
+  const isZoomed = zoom.scale > 1.01
   refs.previewSingleImage.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`
-  refs.previewSingleImage.classList.toggle("is-zoomed", zoom.scale > 1.01)
-  refs.previewZoomOutButton.disabled = zoom.scale <= 1.01
-  refs.previewZoomResetButton.disabled = zoom.scale <= 1.01 && zoom.x === 0 && zoom.y === 0
+  refs.previewSingleImage.classList.toggle("is-zoomed", isZoomed)
+  refs.previewSinglePane?.querySelector?.(".preview-modal-single-wrap")?.classList.toggle("is-zoomed", isZoomed)
+  refs.previewZoomOutButton.disabled = !isZoomed
+  refs.previewZoomResetButton.disabled = !isZoomed && zoom.x === 0 && zoom.y === 0
 }
 
 function isLikelyLongImageAsset(asset = state.lastResultImage) {
@@ -8785,6 +9363,7 @@ function changePreviewZoom(delta) {
 function stopPreviewDrag() {
   state.previewZoom.dragging = false
   refs.previewSinglePane?.classList.remove("is-dragging")
+  refs.previewSinglePane?.querySelector?.(".preview-modal-single-wrap")?.classList.remove("is-dragging")
 }
 
 function startPreviewDrag(event) {
@@ -8798,6 +9377,7 @@ function startPreviewDrag(event) {
   state.previewZoom.startX = state.previewZoom.x
   state.previewZoom.startY = state.previewZoom.y
   refs.previewSinglePane?.classList.add("is-dragging")
+  refs.previewSinglePane?.querySelector?.(".preview-modal-single-wrap")?.classList.add("is-dragging")
 }
 
 function movePreviewDrag(event) {
@@ -9208,7 +9788,12 @@ function setDownloadAvailable(href, filename, options = {}) {
   if (!refs.downloadButton) {
     return
   }
-  refs.downloadButton.href = href
+  const safeHref = sanitizeDownloadHref(href)
+  if (!safeHref) {
+    setDownloadDisabled()
+    return
+  }
+  refs.downloadButton.href = safeHref
   refs.downloadButton.classList.remove("disabled-link")
   refs.downloadButton.setAttribute("aria-disabled", "false")
   refs.downloadButton.classList.toggle("download-ready-logo", Boolean(options.logoReady))
@@ -9420,7 +10005,7 @@ function applyPrimaryResultCandidate(firstCandidate, payload, imageSource, durat
     mode: payload.mode || null,
   }
   state.lastResultImage = cloneImageAsset(firstCandidate.asset)
-  refs.resultTiming.textContent = `请求耗时 ${durationMs.toFixed(1)} ms`
+  refs.resultTiming.textContent = `请求耗时 ${formatHumanDurationMs(durationMs)}`
   if (firstCandidate.logo_preserved) {
     refs.resultStorage.textContent = firstCandidate.saved_image_path
       ? `已有官方 LOGO 已保留 · 已落盘到 ${firstCandidate.saved_image_path}${actualSize ? ` · 实际尺寸 ${actualSize}` : ""}`
@@ -9472,6 +10057,9 @@ async function composeLogoOverlayAfterDisplay(payload, durationMs, resultGenerat
       : selectedCandidate.logo_final_persisted
         ? "成品已保存"
         : "本地已贴图"
+    if (selectedCandidate.logo_final_persisted && state.currentUser) {
+      void refreshGallery()
+    }
     scheduleWorkspacePersist()
   } catch (error) {
     if (resultGenerationSeq !== state.resultGenerationSeq) {
@@ -10658,7 +11246,10 @@ async function ensureAssetDataUrl(asset) {
     throw new Error("当前没有可编辑图片。先生成一张图，或手动上传一张图片。")
   }
 
-  const response = await fetch(assetSource)
+  const response = await fetch(assetSource, {
+    credentials: "same-origin",
+    headers: typeof proxyTokenHeaders === "function" ? proxyTokenHeaders() : {},
+  })
   if (!response.ok) {
     throw new Error("无法读取已保存的图片文件。")
   }
@@ -10898,6 +11489,7 @@ async function submitVariantGenerate({ resetLog = true } = {}) {
       return
     }
     appendDebugLine("延展请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11127,6 +11719,7 @@ async function submitGenerate() {
       return
     }
     appendDebugLine("生成请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11278,6 +11871,7 @@ async function submitEdit() {
       return
     }
     appendDebugLine("编辑请求失败", { error: error.message })
+    void refreshGenerationJobs()
     if (error.cancelled && restorePendingResultAfterCancellation()) {
       setStatusMessage("已中断生成，上一张结果已保留。")
     } else {
@@ -11567,18 +12161,81 @@ function bindEvents() {
   refs.passwordResetRequestForm?.addEventListener("submit", submitPasswordResetRequest)
   refs.cancelPasswordResetRequestButton?.addEventListener("click", leavePasswordResetRequest)
   refs.passwordResetConfirmForm?.addEventListener("submit", submitPasswordResetConfirm)
-  refs.cancelPasswordResetConfirmButton?.addEventListener("click", () => enterAuthGate("login"))
-  refs.logoutButton?.addEventListener("click", logout)
+  refs.cancelPasswordResetConfirmButton?.addEventListener("click", () => {
+    state.passwordResetToken = ""
+    try {
+      const cleanUrl = new URL(window.location.href)
+      if (cleanUrl.searchParams.has("reset_token")) {
+        cleanUrl.searchParams.delete("reset_token")
+        window.history.replaceState(null, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`)
+      }
+    } catch {
+      // Ignore malformed location URLs in non-standard environments.
+    }
+    enterAuthGate("login")
+  })
+  refs.logoutButton?.addEventListener("click", () => {
+    closeAccountDropdownMenu()
+    void logout()
+  })
+  refs.accountMenuTrigger?.addEventListener("click", (event) => {
+    event.stopPropagation()
+    toggleAccountDropdownMenu()
+  })
+  refs.openAdminConsoleButton?.addEventListener("click", () => {
+    void openAdminConsoleModal("users")
+  })
+  refs.openAdminQuickButton?.addEventListener("click", () => {
+    void openAdminConsoleModal("users")
+  })
+  refs.connectionSettingsLink?.addEventListener("click", (event) => {
+    event.preventDefault()
+    void openAdminConsoleModal("models")
+  })
+  refs.closeAdminConsoleButton?.addEventListener("click", closeAdminConsoleModal)
+  refs.adminConsoleBackdrop?.addEventListener("click", closeAdminConsoleModal)
+  refs.adminConsoleTabButtons?.forEach((button) => {
+    button.addEventListener("click", () => {
+      switchAdminConsoleTab(button.dataset.adminTab || "users")
+    })
+  })
+  refs.adminUserSearchInput?.addEventListener("input", () => {
+    renderAdminUsers(state.adminUsersCache)
+  })
+  refs.adminOrgUserSelect?.addEventListener("change", () => {
+    if (refs.adminOrgUserIdInput) {
+      refs.adminOrgUserIdInput.value = refs.adminOrgUserSelect.value || ""
+    }
+  })
+  refs.railTabButtons?.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveRailTab(button.dataset.railTab || "gallery")
+    })
+  })
+  refs.editSizeStrategyInputs?.forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        syncEditSizeFromStrategy()
+      }
+    })
+  })
   refs.adminCreateUserForm?.addEventListener("submit", submitAdminCreateUser)
   refs.refreshAdminUsersButton?.addEventListener("click", refreshAdminUsers)
   refs.adminOrgCreateForm?.addEventListener("submit", submitAdminOrgUnit)
   refs.adminUserOrgForm?.addEventListener("submit", submitAdminUserOrg)
   refs.adminGroupAnnouncementForm?.addEventListener("submit", submitAdminGroupAnnouncement)
-  refs.refreshAdminOrgButton?.addEventListener("click", refreshAdminOrgContext)
+  refs.refreshAdminOrgButton?.addEventListener("click", () => {
+    void refreshAdminOrgContext()
+  })
   refs.refreshFeedbackSummaryButton?.addEventListener("click", refreshFeedbackSummary)
   refs.refreshPasswordResetRequestsButton?.addEventListener("click", refreshPasswordResetRequests)
   refs.adminUsersList?.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null
+    const selectButton = target?.closest(".admin-select-user-button")
+    if (selectButton) {
+      selectAdminUserForOrg(selectButton.dataset.selectUserId)
+      return
+    }
     const button = target?.closest(".admin-delete-user-button")
     if (!button) {
       return
@@ -11689,6 +12346,7 @@ function bindEvents() {
   refs.generateButton.addEventListener("click", submitGenerate)
   refs.editButton.addEventListener("click", submitEdit)
   refs.cancelRequestButton?.addEventListener("click", cancelActiveRequest)
+  refs.overlayCancelButton?.addEventListener("click", cancelActiveRequest)
   refs.clearGenerateButton.addEventListener("click", confirmClearGenerateForm)
   refs.clearEditButton.addEventListener("click", confirmClearEditForm)
   refs.continueEditButton.addEventListener("click", continueEditingFromResult)
@@ -11754,9 +12412,12 @@ function bindEvents() {
     if (!event.target.closest?.(".simple-more-actions")) {
       closeSimpleMoreActions()
     }
+    if (!event.target.closest?.(".account-menu-wrap")) {
+      closeAccountDropdownMenu()
+    }
   })
   refs.downloadOriginalButton?.addEventListener("click", () => {
-    const href = refs.downloadOriginalButton.dataset.href || ""
+    const href = sanitizeDownloadHref(refs.downloadOriginalButton.dataset.href || "")
     if (!href) {
       setStatusMessage("当前没有可下载的原始底图。")
       return
@@ -11788,7 +12449,8 @@ function bindEvents() {
   bindSharedResultsList(refs.sharedResultsList)
   bindSharedResultsList(refs.simpleSharedResultsList)
   refs.refreshGalleryButton?.addEventListener("click", refreshGallery)
-  refs.refreshJobsButton?.addEventListener("click", refreshGenerationJobs)
+  refs.refreshJobsButton?.addEventListener("click", () => void refreshGenerationJobs())
+  refs.loadMoreJobsButton?.addEventListener("click", () => void refreshGenerationJobs({ append: true }))
   refs.gallerySearchInput?.addEventListener("input", () => {
     window.clearTimeout(state.gallerySearchTimer)
     state.gallerySearchTimer = window.setTimeout(refreshGallery, 250)
@@ -11810,11 +12472,17 @@ function bindEvents() {
     void refreshGallery()
   })
   refs.saveGalleryMetaButton?.addEventListener("click", saveGalleryMeta)
-  refs.changePasswordButton?.addEventListener("click", openChangePasswordModal)
+  refs.changePasswordButton?.addEventListener("click", () => {
+    closeAccountDropdownMenu()
+    openChangePasswordModal()
+  })
   refs.closeChangePasswordButton?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordBackdrop?.addEventListener("click", closeChangePasswordModal)
   refs.changePasswordForm?.addEventListener("submit", submitChangePassword)
-  refs.openProfileButton?.addEventListener("click", openProfileModal)
+  refs.openProfileButton?.addEventListener("click", () => {
+    closeAccountDropdownMenu()
+    openProfileModal()
+  })
   refs.closeProfileButton?.addEventListener("click", closeProfileModal)
   refs.profileBackdrop?.addEventListener("click", closeProfileModal)
   refs.profileForm?.addEventListener("submit", submitProfile)
@@ -11855,7 +12523,10 @@ function bindEvents() {
       closeTeamChatMessageMenu()
     }
   })
-  refs.bugReportButton?.addEventListener("click", openBugReportModal)
+  refs.bugReportButton?.addEventListener("click", () => {
+    closeAccountDropdownMenu()
+    openBugReportModal()
+  })
   refs.closeBugReportButton?.addEventListener("click", closeBugReportModal)
   refs.bugReportBackdrop?.addEventListener("click", closeBugReportModal)
   refs.bugReportForm?.addEventListener("submit", submitBugReport)
@@ -12225,6 +12896,12 @@ function bindEvents() {
     }
   })
 
+  window.addEventListener("resize", () => {
+    if (refs.accountDropdownMenu && !refs.accountDropdownMenu.classList.contains("hidden")) {
+      syncAccountDropdownAlignment()
+    }
+  })
+
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && refs.profileModal && !refs.profileModal.classList.contains("hidden")) {
       closeProfileModal()
@@ -12249,6 +12926,15 @@ function bindEvents() {
       closeBugReportModal()
       return
     }
+    if (event.key === "Escape" && refs.adminConsoleModal && !refs.adminConsoleModal.classList.contains("hidden")) {
+      closeAdminConsoleModal()
+      return
+    }
+    if (event.key === "Escape" && refs.accountDropdownMenu && !refs.accountDropdownMenu.classList.contains("hidden")) {
+      closeAccountDropdownMenu()
+      refs.accountMenuTrigger?.focus()
+      return
+    }
     if (event.key === "Escape" && refs.promptConfirmModal && !refs.promptConfirmModal.classList.contains("hidden")) {
       cancelPendingPromptConfirmation()
       return
@@ -12259,23 +12945,33 @@ function bindEvents() {
       return
     }
 
+    if (event.key === "Escape" && refs.simpleMoreActionsMenu && !refs.simpleMoreActionsMenu.classList.contains("hidden")) {
+      closeSimpleMoreActions()
+      refs.simpleMoreActionsButton?.focus()
+      return
+    }
+
+    if (document.body.classList.contains("auth-gate") || document.body.classList.contains("modal-open")) {
+      return
+    }
+
     // macOS 上 Option+数字输出 "¡/™/£"，event.key 永远不等于数字，
     // 用物理键位 event.code 判断两个平台才都能命中。
-    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit1") {
+    if (!isTypingElement(document.activeElement) && state.uiMode !== "simple" && event.altKey && event.code === "Digit1") {
       event.preventDefault()
       setMode("generate")
       refs.generatePromptInput.focus()
       return
     }
 
-    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit2") {
+    if (!isTypingElement(document.activeElement) && state.uiMode !== "simple" && event.altKey && event.code === "Digit2") {
       event.preventDefault()
       setMode("edit")
       refs.editPromptInput.focus()
       return
     }
 
-    if (!isTypingElement(document.activeElement) && event.altKey && event.code === "Digit3") {
+    if (!isTypingElement(document.activeElement) && state.uiMode !== "simple" && event.altKey && event.code === "Digit3") {
       event.preventDefault()
       setMode("itinerary")
       refs.itineraryDescriptionInput?.focus()
@@ -12299,7 +12995,11 @@ function bindEvents() {
 
     if (event.key === "/") {
       event.preventDefault()
-      focusActivePrompt()
+      if (state.uiMode === "simple") {
+        refs.simpleScenarioFields?.querySelector("input:not([type='hidden']):not(.hidden), textarea")?.focus()
+      } else {
+        focusActivePrompt()
+      }
     }
   })
 
@@ -12340,6 +13040,7 @@ async function init() {
   }
 
   bindEvents()
+  setActiveRailTab("gallery")
   initializeRailDisclosure()
   const resetToken = getPasswordResetTokenFromUrl()
   if (resetToken) {
@@ -12351,22 +13052,34 @@ async function init() {
     return
   }
 
-  await startAuthenticatedApp()
-  enterAppShell()
+  if (await startAuthenticatedApp()) {
+    enterAppShell()
+  }
 }
 
 async function startAuthenticatedApp() {
-  // Fast path only when the SAME user is still active. A 401 sends the user to the
-  // auth gate without resetting appReady, so without the id check a different user
-  // logging in on a shared browser would inherit the previous user's API key,
-  // history and workspace (the per-user loaders below would be skipped).
+  const userContextEpoch = state.userContextEpoch
+  // Every asynchronous startup stage can outlive a logout or account switch.
+  // Stop before loading or persisting data under the next user's identity.
   if (state.appReady && state.lastReadyUserId === (state.currentUser?.id ?? null)) {
     await refreshUsageSummary()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     await refreshImageStats()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     await refreshGenerationJobs()
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
     startTeamChatPolling()
     await refreshTeamChatUnread()
-    return
+    if (!userContextIsCurrent(userContextEpoch)) {
+      return false
+    }
+    return true
   }
 
   resetWorkspaceForUserScope()
@@ -12378,15 +13091,30 @@ async function startAuthenticatedApp() {
   loadTeamChatRecentDms()
   renderHistory()
   await loadUserPreferences()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshOrgUnits()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   loadSettings()
   await loadPromptRecipes()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshImageStats()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   updateLogoControlUI()
   updatePromptCounters()
   updatePromptModeUI()
   updateGenerateIntentUI()
   const restored = await restoreWorkspaceState()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
 
   if (!restored) {
     updateEditSourceUI()
@@ -12405,9 +13133,19 @@ async function startAuthenticatedApp() {
   updateWorkflowStatus()
   startTeamChatPolling()
   await refreshTeamChatUnread()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshUsageSummary()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   await refreshGenerationJobs()
+  if (!userContextIsCurrent(userContextEpoch)) {
+    return false
+  }
   scheduleWorkspacePersist()
+  return true
 }
 
 init()

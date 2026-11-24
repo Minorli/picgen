@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -15,7 +16,9 @@ async def _build_client(transport: httpx.MockTransport, **kwargs) -> HttpxAsyncC
     client = HttpxAsyncClient(**kwargs)
     # Swap the underlying client to use the mock transport while preserving config.
     await client._client.aclose()
-    client._client = httpx.AsyncClient(transport=transport, timeout=client._client.timeout)
+    client._client = httpx.AsyncClient(
+        transport=transport, timeout=client._client.timeout, follow_redirects=client._client.follow_redirects
+    )
     return client
 
 
@@ -137,7 +140,7 @@ async def test_run_multipart_explicit_content_policy_code_is_still_classified() 
         await client.aclose()
 
 
-async def test_run_json_translates_timeout() -> None:
+async def test_run_json_translates_timeout(caplog) -> None:
     calls = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -145,13 +148,19 @@ async def test_run_json_translates_timeout() -> None:
         raise httpx.ConnectTimeout("timeout", request=request)
 
     transport = httpx.MockTransport(handler)
-    client = await _build_client(transport, max_retries=2, retry_backoff=0.0)
+    client = await _build_client(
+        transport, max_retries=2, retry_backoff=0.0, connect_timeout=15.0, total_timeout=1200.0
+    )
     try:
-        with pytest.raises(APIError) as info:
+        with caplog.at_level(logging.WARNING), pytest.raises(APIError) as info:
             await client.run_json("https://upstream.test/generate", "sk-test", {"prompt": "hi"}, "UA")
         assert info.value.status == 504
         assert info.value.code == "upstream_timeout"
-        assert calls["count"] == 1
+        assert calls["count"] == 3
+        assert "连接" in info.value.message
+        assert "1200" not in (info.value.details or "")
+        record = next(record for record in caplog.records if record.getMessage() == "upstream_timeout")
+        assert record.fields["timeout_s"] == 15.0
     finally:
         await client.aclose()
 
@@ -406,5 +415,164 @@ async def test_upstream_http_error_status_and_details_are_sanitized() -> None:
         assert "org-BOvpEHVcDPTe8h4lZnwMO5Ly" not in (info.value.details or "")
         assert "sk-secret123456" not in (info.value.details or "")
         assert "rate_limit_error" in (info.value.details or "")
+    finally:
+        await client.aclose()
+
+
+async def _run_generation(client: HttpxAsyncClient, method: str) -> dict:
+    url = "https://upstream.test/generate"
+    if method == "run_multipart":
+        return await client.run_multipart(url, "sk-test", {"prompt": "测试图片"}, [], "UA")
+    if method == "run_responses":
+        return await client.run_responses(url, "sk-test", {"stream": True, "input": "测试图片"}, "UA")
+    return await client.run_json(url, "sk-test", {"prompt": "测试图片"}, "UA")
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+@pytest.mark.parametrize("error_type", [httpx.ConnectTimeout, httpx.ConnectError])
+async def test_generation_recovers_from_initial_connection_failure(method, error_type) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise error_type("connection failed", request=request)
+        return httpx.Response(200, json={"data": [{"b64_json": "image-result"}]})
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=2, retry_backoff=0.0)
+    try:
+        result = await _run_generation(client, method)
+        assert result["data"] == [{"b64_json": "image-result"}]
+        assert len(requests) == 2
+        assert requests[0].content == requests[1].content
+        assert requests[0].headers == requests[1].headers
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+@pytest.mark.parametrize("error_type", [httpx.ConnectTimeout, httpx.ConnectError])
+@pytest.mark.parametrize("max_retries", [0, 2])
+async def test_generation_connection_retries_are_bounded(method, error_type, max_retries) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise error_type("connection failed", request=request)
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=max_retries, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError) as info:
+            await _run_generation(client, method)
+        expected_code = "upstream_timeout" if error_type is httpx.ConnectTimeout else "upstream_network_error"
+        assert info.value.code == expected_code
+        assert calls == max_retries + 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ],
+)
+async def test_generation_does_not_retry_ambiguous_send_failures(method, error_type) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise error_type("request failed", request=request)
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=2, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError):
+            await _run_generation(client, method)
+        assert calls == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+async def test_generation_does_not_retry_http_service_unavailable(method) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": {"message": "unavailable"}})
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=2, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError) as info:
+            await _run_generation(client, method)
+        assert info.value.status == 503
+        assert calls == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+@pytest.mark.parametrize("error_type", [httpx.ConnectTimeout, httpx.ConnectError])
+@pytest.mark.parametrize("redirect_path", ["/redirected", "/generate"])
+async def test_generation_does_not_restart_post_after_redirect_connection_failure(
+    method, error_type, redirect_path
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(307, headers={"Location": redirect_path})
+        raise error_type("redirect connection failed", request=request)
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=2, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError):
+            await _run_generation(client, method)
+        assert len(requests) == 2
+        assert requests[0].url.path == "/generate"
+        assert requests[1].url.path == redirect_path
+        assert all(request.method == "POST" for request in requests)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("method", ["run_json", "run_multipart", "run_responses"])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError, httpx.ConnectError])
+async def test_generation_does_not_retry_response_body_failure_and_closes_stream(method, error_type) -> None:
+    calls = 0
+
+    class FailingBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'{"data": ['
+            raise error_type("response body interrupted")
+
+        async def aclose(self):
+            self.closed = True
+
+    body = FailingBody()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=body, headers={"Content-Type": "application/json"})
+
+    client = await _build_client(httpx.MockTransport(handler), max_retries=2, retry_backoff=0.0)
+    try:
+        with pytest.raises(APIError):
+            await _run_generation(client, method)
+        assert calls == 1
+        assert body.closed
     finally:
         await client.aclose()
