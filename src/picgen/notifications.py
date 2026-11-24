@@ -7,6 +7,7 @@ import smtplib
 import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Any
 
 import httpx
@@ -218,6 +219,11 @@ def send_password_reset_email(
     recipient = to_email.strip()
     if not recipient:
         return NotificationResult(configured=True, sent=False, status="missing_recipient")
+    if (
+        any(ch.isspace() or ord(ch) < 32 or ch in {",", ";", "<", ">", '"'} for ch in recipient)
+        or recipient.count("@") != 1
+    ):
+        return NotificationResult(configured=True, sent=False, status="failed", error="invalid recipient email")
 
     try:
         # Build the message inside the try: a stored address with CR/LF (from
@@ -226,7 +232,7 @@ def send_password_reset_email(
         message = EmailMessage()
         from_name = settings.smtp_from_name.strip() or "PicGen"
         from_email = settings.smtp_from_email.strip()
-        message["From"] = f"{from_name} <{from_email}>"
+        message["From"] = formataddr((from_name, from_email))
         message["To"] = recipient
         message["Subject"] = "PicGen 密码重置"
         message.set_content(
@@ -599,10 +605,10 @@ def build_password_reset_request_telegram_text(request_info: dict[str, Any]) -> 
 
 
 def _build_bug_report_content(report: dict[str, Any], username: str) -> str:
-    title = _escape_markdown_text(str(report.get("title") or "PicGen Bug 反馈"))
-    description = _escape_markdown_text(str(report.get("description") or ""))
-    contact = _escape_markdown_text(str(report.get("contact") or ""))
-    page_url = _escape_markdown_text(str(report.get("page_url") or ""))
+    title = _escape_markdown_text(redact_sensitive_text(str(report.get("title") or "PicGen Bug 反馈"), limit=160))
+    description = _escape_markdown_text(redact_sensitive_text(str(report.get("description") or ""), limit=1800))
+    contact = _escape_markdown_text(redact_sensitive_text(str(report.get("contact") or ""), limit=256))
+    page_url = _escape_markdown_text(redact_sensitive_text(str(report.get("page_url") or ""), limit=300))
     created_at = _escape_markdown_text(str(report.get("created_at") or ""))
     report_id = _escape_markdown_text(str(report.get("id") or ""))
     user_text = _escape_markdown_text(username)

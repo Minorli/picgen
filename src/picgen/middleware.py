@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import re
 import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -23,6 +26,8 @@ from .logging_config import (
 from .redaction import redact_sensitive_text
 
 logger = get_logger("picgen.middleware")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
+_MAX_RATE_LIMIT_CLIENTS = 10_000
 
 RequestHandler = Callable[[Request], Awaitable[Response]]
 
@@ -60,7 +65,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
         incoming = request.headers.get(self.header_name, "").strip()
-        request_id = incoming if 8 <= len(incoming) <= 64 else uuid.uuid4().hex[:12]
+        request_id = incoming if _REQUEST_ID_RE.fullmatch(incoming) else uuid.uuid4().hex[:12]
         request.scope["picgen_request_id"] = request_id
         token = set_request_id(request_id)
         started_at = time.perf_counter()
@@ -143,6 +148,14 @@ class BodySizeLimitMiddleware:
             try:
                 declared = int(content_length)
             except ValueError:
+                response = _error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "无效的 Content-Length",
+                    code="bad_request",
+                )
+                await response(scope, receive, send)
+                return
+            if declared < 0:
                 response = _error_response(
                     HTTPStatus.BAD_REQUEST,
                     "无效的 Content-Length",
@@ -250,9 +263,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         uses_burst_limit = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
         now = time.monotonic()
         async with self._lock:
-            if now - self._last_sweep >= 60.0:
+            if now - self._last_sweep >= 60.0 or len(self._minute_buckets) >= _MAX_RATE_LIMIT_CLIENTS:
                 self._sweep_idle(now)
                 self._last_sweep = now
+                while len(self._minute_buckets) >= _MAX_RATE_LIMIT_CLIENTS:
+                    oldest_key = next(iter(self._minute_buckets))
+                    self._minute_buckets.pop(oldest_key, None)
+                    self._burst_buckets.pop(oldest_key, None)
             minute_bucket = self._minute_buckets.setdefault(client_key, deque())
             burst_bucket = self._burst_buckets.setdefault(client_key, deque())
             self._evict(minute_bucket, now - 60.0)
@@ -308,7 +325,7 @@ class ProxyAuthMiddleware(BaseHTTPMiddleware):
                 # a blind [1] would 500 on that malformed-but-common header.
                 parts = auth.split(None, 1)
                 provided = parts[1].strip() if len(parts) == 2 else ""
-        if provided != self.token:
+        if not hmac.compare_digest(provided.encode("utf-8"), self.token.encode("utf-8")):
             log_event(
                 logger,
                 logging.WARNING,
@@ -322,6 +339,73 @@ class ProxyAuthMiddleware(BaseHTTPMiddleware):
                 code="unauthorized",
             )
         return await call_next(request)
+
+
+class SameOriginCsrfMiddleware(BaseHTTPMiddleware):
+    """Reject cross-origin browser mutations carrying a session cookie."""
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        allowed_origins: tuple[str, ...] = (),
+        public_base_url: str = "",
+        cookie_name: str = "picgen_session",
+    ) -> None:
+        super().__init__(app)
+        normalized: set[str] = set()
+        for item in (*allowed_origins, public_base_url):
+            cleaned = (item or "").strip().rstrip("/")
+            if cleaned and cleaned != "*":
+                parsed = urlsplit(cleaned)
+                if parsed.scheme and parsed.netloc:
+                    normalized.add(f"{parsed.scheme.lower()}://{parsed.netloc.lower()}")
+        self.allowed_origins = frozenset(normalized)
+        self.cookie_name = cookie_name
+
+    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
+        if (
+            request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}
+            or not request.url.path.startswith("/api/")
+            or self.cookie_name not in request.cookies
+        ):
+            return await call_next(request)
+
+        origin = request.headers.get("origin", "").strip().rstrip("/")
+        if not origin:
+            return await call_next(request)
+        if origin.lower() == "null":
+            return _error_response(
+                HTTPStatus.FORBIDDEN,
+                "跨站请求已被安全策略拦截",
+                code="csrf_rejected",
+            )
+        parsed_origin = urlsplit(origin)
+        origin_key = f"{parsed_origin.scheme.lower()}://{parsed_origin.netloc.lower()}"
+        if origin_key in self.allowed_origins:
+            return await call_next(request)
+
+        host = (
+            request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+            or request.headers.get("host", "").strip()
+            or request.url.netloc
+        ).lower()
+        if parsed_origin.netloc.lower() == host:
+            return await call_next(request)
+
+        log_event(
+            logger,
+            logging.WARNING,
+            "csrf_origin_rejected",
+            path=request.url.path,
+            origin=origin_key,
+            host=host,
+        )
+        return _error_response(
+            HTTPStatus.FORBIDDEN,
+            "跨站请求已被安全策略拦截",
+            code="csrf_rejected",
+        )
 
 
 def _error_response(

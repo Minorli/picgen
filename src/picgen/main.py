@@ -22,6 +22,7 @@ from .middleware import (
     ProxyAuthMiddleware,
     RateLimitMiddleware,
     RequestIdMiddleware,
+    SameOriginCsrfMiddleware,
     SecurityHeadersMiddleware,
     api_error_response,
     api_error_response_with,
@@ -179,6 +180,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #   requests that rate-limiting or proxy auth would reject anyway.
     # - RateLimit stays outside ProxyAuth so token guessing burns rate budget.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=resolved_settings.max_request_body_bytes)
+    app.add_middleware(
+        SameOriginCsrfMiddleware,
+        allowed_origins=tuple(resolved_settings.cors_allow_origins or ()),
+        public_base_url=resolved_settings.public_base_url,
+    )
 
     if resolved_settings.proxy_auth_token:
         app.add_middleware(ProxyAuthMiddleware, token=resolved_settings.proxy_auth_token)
@@ -197,7 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=resolved_settings.cors_allow_origins,
             allow_credentials=resolved_settings.cors_allow_credentials,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             allow_headers=["*"],
             expose_headers=["X-Request-ID"],
         )
@@ -239,6 +245,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger,
             logging.ERROR,
             "unhandled_exception",
+            exc_info=exc,
             method=request.method,
             path=request.url.path,
             error=type(exc).__name__,
@@ -345,7 +352,7 @@ def _base_operational_message(exc: APIError) -> str:
 def _is_content_policy_error(exc: APIError) -> bool:
     if exc.code == "upstream_content_policy":
         return True
-    if exc.code.startswith("upstream_"):
+    if exc.code == "internal_error" or exc.status >= 500 or exc.code.startswith("upstream_"):
         return False
     haystack = f"{exc.message}\n{exc.details or ''}".lower()
     return any(

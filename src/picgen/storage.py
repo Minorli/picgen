@@ -7,7 +7,6 @@ import shutil
 import stat
 import tempfile
 import uuid
-import warnings
 from contextlib import ExitStack
 from datetime import datetime, timedelta
 from http import HTTPStatus
@@ -88,15 +87,21 @@ _FORBIDDEN_FILENAME_CHARS = frozenset({'"', "\r", "\n", "\\", "/", "\x00", "?", 
 
 
 def _sanitize_filename_core(name: str) -> str:
-    cleaned = "".join(char for char in name if char not in _FORBIDDEN_FILENAME_CHARS).strip()
+    cleaned = "".join(
+        char
+        for char in name
+        if char not in _FORBIDDEN_FILENAME_CHARS and ord(char) >= 32 and ord(char) != 127
+    ).strip()
     cleaned = "-".join(cleaned.split())
-    cleaned = cleaned.replace("..", "")
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", "")
     cleaned = cleaned.replace(":", "-")
     return cleaned
 
 
 def sanitize_filename(name: str) -> str:
-    return _sanitize_filename_core(name) or "image.png"
+    cleaned = _sanitize_filename_core(name)
+    return cleaned if cleaned.strip(".") else "image.png"
 
 
 def sanitize_filename_prefix(value: str) -> str:
@@ -204,28 +209,33 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
 
 
 def is_decodable_image(image_bytes: bytes) -> bool:
+    header_dimensions = detect_image_dimensions(image_bytes)
+    if header_dimensions is not None and (
+        header_dimensions[0] <= 0
+        or header_dimensions[1] <= 0
+        or header_dimensions[0] * header_dimensions[1] > MAX_EXACT_IMAGE_PIXELS
+    ):
+        return False
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(BytesIO(image_bytes)) as source:
-                width, height = source.size
-                if width <= 0 or height <= 0 or width * height > MAX_EXACT_IMAGE_PIXELS:
-                    return False
-                if source.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
-                    return False
-                source.verify()
+        with Image.open(BytesIO(image_bytes)) as source:
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > MAX_EXACT_IMAGE_PIXELS:
+                return False
+            if source.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                return False
+            source.verify()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, TypeError, ValueError):
         return False
     return True
 
 
 def _jpeg_display_dimensions(image_bytes: bytes, dimensions: tuple[int, int]) -> tuple[int, int]:
+    if dimensions[0] * dimensions[1] > MAX_EXACT_IMAGE_PIXELS:
+        return dimensions
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            with Image.open(BytesIO(image_bytes)) as source:
-                orientation = int(source.getexif().get(274, 1))
-    except (Image.DecompressionBombError, OSError, TypeError, ValueError):
+        with Image.open(BytesIO(image_bytes)) as source:
+            orientation = int(source.getexif().get(274, 1))
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, TypeError, ValueError):
         return dimensions
     if orientation in {5, 6, 7, 8}:
         return dimensions[1], dimensions[0]

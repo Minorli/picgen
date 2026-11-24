@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
 import logging
 import re
@@ -54,11 +55,61 @@ def decode_base64_blob(blob: str) -> bytes:
         ) from exc
 
 
+_BLOCKED_METADATA_HOSTS = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata.goog",
+        "100.100.100.200",
+        "169.254.169.254",
+    }
+)
+
+
+def _is_forbidden_metadata_or_special_ip(host: str) -> bool:
+    lowered = host.strip().strip("[]").lower()
+    if not lowered:
+        return True
+    if lowered in _BLOCKED_METADATA_HOSTS:
+        return True
+    try:
+        addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+    return bool(
+        addr.is_unspecified
+        or addr.is_link_local
+        or addr.is_multicast
+    )
+
+
+def is_private_or_local_host(host: str) -> bool:
+    lowered = host.strip().strip("[]").lower()
+    if not lowered:
+        return True
+    if lowered in {"localhost", "localhost.localdomain", *_BLOCKED_METADATA_HOSTS} or lowered.endswith(".localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+    return bool(
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr.is_multicast
+        or addr.is_reserved
+    )
+
+
 def validate_url(url: str, field_name: str) -> str:
     cleaned = (url or "").strip()
     parsed = parse.urlparse(cleaned)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    hostname = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname:
         raise APIError(HTTPStatus.BAD_REQUEST, f"{field_name} 不是有效的 URL", code="invalid_url")
+    if _is_forbidden_metadata_or_special_ip(hostname):
+        raise APIError(HTTPStatus.BAD_REQUEST, f"{field_name} 目标地址受安全策略限制", code="invalid_url")
     return cleaned
 
 

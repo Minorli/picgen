@@ -516,3 +516,24 @@
 - 首次切换检查发现参考图任务608正在运行，部署在修改配置/重启前退出。等其自然结束并超过30秒收尾窗口后再次检查active=0才切换，未中断用户任务。
 - 在线备份`/vol1/data1/picgen/backups/auth-20261105T103228Z-pre-0.1.76.sqlite3`，SHA256`bb5b9fc70f92ed6392a6ca935312534f76c664273f68cac6558af91327c2807f`；Compose备份`/vol1/data1/picgen/docker-compose.yml.bak-20261105T103228Z-pre-0.1.76`。生产前后17用户/525任务/502图片，quick_check=ok。
 - 生产于2026-11-05T10:32:29Z启动0.1.76，healthy、重启0；generation/editing两个恢复开关均true，xhigh与注册保持。实际部署容器内验证generate预选images-generate，reference/edit/variant预选images-edit；本地验收容器已清理。行程图独立链路仍不在恢复范围。
+
+## 0.1.77 全栈代码审查修复、性能安全加固与双模式 UI/UE 重构（2026-11-24）
+
+### 后端安全、正确性与性能升级
+
+- **纵深安全防护**：`upstream/payload.py` 与 `upstream/client.py` 补齐云元数据及链路本地地址 SSRF 拦截（`169.254.169.254`、`100.100.100.200`、`metadata.google.internal`、`0.0.0.0`、`fe80::/10`）与跨主机内网重定向拒绝；`middleware.py` 新增 `SameOriginCsrfMiddleware`，拒绝带会话 Cookie 的跨源写请求（`403 csrf_rejected`）；`storage.py` 强化删除路径祖先符号链接校验；`routes.py` 团队聊天历史对非管理员收紧为仅本部门房间可见，密码重置邮件与 SMTP 投递移出 SQLite 锁并避免 SMTP AUTH 明文回退。
+- **并发与流式性能**：`itinerary_map.py` 行程参考底图改用 Pillow `ImageDraw` C 层光栅化（`1792x1792` 耗时降至约 126 ms），并采用最大经度圆弧间隙算法正确解缠跨日界线航线（如伦敦 → 东京 → 檀香山保持自西向东顺序）；`upstream/responses.py` 引入增量 SSE 聚合器丢弃中间 `partial_image_b64` 大块预览内存；`auth.py` 将创建账号的 PBKDF2 哈希移出全局锁，并对 `last_seen_at` 采用首次落库后 60 秒节流更新。
+- **可观测性与脚本健壮性**：补齐 Bearer / Basic / `sk-` / Telegram bot token 日志脱敏；健康日志过滤器精确匹配 `/api/health` 与 `/api/ready`；所有启动检查脚本支持路径空格安全引用并纳入全部 `.mjs` 模块语法校验。
+
+### 前端架构模块化与双模式 UI/UE 升级
+
+- **原生 ES 模块化与样式统一**：抽离 `static/url-safety.mjs`、`static/simple-preview.mjs`、`static/admin-console.mjs`，清洗历史遗留 CSS 变量至 `--ux-*` 令牌体系，补充弹窗 `Escape` 关闭、Tab 焦点环与 SVG 缺失 symbol。
+- **简洁模式免弹窗直出**：5 张场景卡增加毛玻璃画幅徽章；表单底部新增“画面文字实时核对”芯片预览，点击生成直接发起请求，不再弹出 14 行强制二次确认窗；专业模式完整保留送出前确认弹窗。
+- **顶栏减负与独立管理员控制台**：顶栏精简为模式切换、Team Chat、个人账号下拉菜单（收纳统计、资料、管理员入口及待审批角标、改密、反馈、退出）与运行状态 4 项；管理员面板独立为宽屏四标签模态框（用户与组织 / 密码审批与反馈 / 满意度看板 / 模型与通道配置），支持实时搜索成员、下拉选择成员及一键“调岗”，并修复组织更新/调岗成功后状态提示被后续刷新清空的问题。
+- **专业工作台优化与编辑比例守护**：桌面左轨使用“作品库 / 记录 / 分享”分段切换并隐藏重复侧栏导航；海报尺寸预设扩至 9 项（含 2K/4K）；编辑面板新增“按输入原图比例（默认）/ 沿用海报面板尺寸”双策略，上传横图自动锁定源图宽高；请求耗时改为秒/分钟可读展示，版权与文字核对通过态采用柔和绿面板。
+
+### 验证与发布
+
+- 新增 `tests/test_audit_fixes.py` 共 15 项全栈回归；完整 `./scripts/check.sh`（Ruff、Mypy、6 个 JS/MJS 语法检查及全量 Pytest **696 passed**）与 `uv lock --check`、`git diff --check` 全部通过。
+- 使用真实 Google Chrome + Playwright 在 `1440x900`、`1120x800`、`375x812` 三档视口完成简洁模式免弹窗生图、内联文字核对、账号菜单、独立管理员控制台建部门与搜人调岗、专业模式三标签左轨、1600x1000 横图编辑比例自动守护及移动端响应式实测，0 控制台错误、0 页面异常、0 横向溢出。
+- 构建并部署 `minorli/picgen:0.1.77` 容器验证 `/api/ready` 与前端 `0.1.77` 资源一致，推送 Docker Hub 镜像、GitHub 分支提交（PR #46）与 Release `v0.1.77`。

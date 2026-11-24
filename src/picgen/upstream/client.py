@@ -22,8 +22,17 @@ from .errors import (
     public_upstream_error_message,
     raise_for_response_error,
 )
-from .payload import ensure_json_object, normalize_responses_image_payload
-from .responses import parse_sse_json_events, stream_events_to_image_payload
+from .payload import (
+    ensure_json_object,
+    is_private_or_local_host,
+    normalize_responses_image_payload,
+    validate_url,
+)
+from .responses import (
+    consume_sse_stream_to_image_payload,
+    parse_sse_json_events,
+    stream_events_to_image_payload,
+)
 from .transport import ascii_multipart_filename, encode_multipart, upstream_headers
 
 logger = get_logger("picgen.upstream.client")
@@ -304,8 +313,15 @@ class HttpxAsyncClient:
                         attempt=attempts - 1,
                     )
                 content_type = response.headers.get("content-type", "")
+                if "text/event-stream" in content_type.lower():
+                    return await consume_sse_stream_to_image_payload(
+                        response.aiter_bytes(),
+                        url=url,
+                        started_at=started_at,
+                        expect_image=expect_image,
+                    )
                 body_text = (await response.aread()).decode("utf-8", errors="replace")
-                if "text/event-stream" in content_type or body_text.lstrip().startswith(("event:", "data:")):
+                if body_text.lstrip().startswith(("event:", "data:")):
                     return stream_events_to_image_payload(
                         parse_sse_json_events(body_text),
                         url=url,
@@ -407,7 +423,17 @@ class HttpxAsyncClient:
                 code="upstream_image_too_large",
             )
 
+        validate_url(url, "上游图片 URL")
+        initial_host = httpx.URL(url).host or ""
+        initial_was_private = is_private_or_local_host(initial_host)
         async with self._client.stream("GET", url, headers=headers) as response:
+            final_host = response.url.host or ""
+            if not initial_was_private and is_private_or_local_host(final_host):
+                raise APIError(
+                    HTTPStatus.BAD_GATEWAY,
+                    "上游图片重定向目标受安全策略限制",
+                    code="upstream_error",
+                )
             if response.status_code >= 400:
                 body_text = (await response.aread()).decode("utf-8", errors="replace")
                 self._raise_for_status(
@@ -647,6 +673,8 @@ class HttpxAsyncClient:
 
 
 def _action_from_event_prefix(event_prefix: str) -> str:
+    if "file_upload" in event_prefix:
+        return "Files 上传接口"
     if "multipart" in event_prefix:
         return "编辑接口"
     if "responses" in event_prefix:

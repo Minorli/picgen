@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import anyio
 from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import Path as FastAPIPath
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
@@ -75,6 +76,7 @@ from .restricted_destinations import (
     values_contain_restricted_destination,
 )
 from .schemas import (
+    _SQLITE_MAX_INT,
     AdminCreateUserRequest,
     AdminResetPasswordRequest,
     AdminUpdateUserOrgRequest,
@@ -136,9 +138,10 @@ from .upstream.errors import response_image_diagnostics, sanitize_image_diagnost
 
 logger = get_logger("picgen.routes")
 _TEAM_CHAT_BOT_TASKS: set[asyncio.Task[dict[str, Any]]] = set()
+SqliteIdPath = Annotated[int, FastAPIPath(ge=1, le=_SQLITE_MAX_INT)]
 _ITINERARY_ID_RE = re.compile(
-    r"(?i)(?:行程\s*id|行程\s*ID|itinerary\s*id|trip\s*id|(?<![A-Za-z])id)"
-    r"\s*[:：#-]?\s*([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
+    r"(?i)(?:(?:行程|itinerary|trip)\s*id\s*[:：#-]?\s*|(?<![A-Za-z0-9])id\b\s*[:：#]\s*)"
+    r"([A-Za-z0-9][A-Za-z0-9._-]{1,31})"
 )
 
 
@@ -1378,8 +1381,16 @@ async def _generate_itinerary_artwork(
     output_size: str,
     composition: dict[str, Any],
 ) -> dict[str, Any]:
-    endpoint_url = validate_url(settings.default_responses_url, "Responses 图像接口 URL")
-    api_key = (parsed.api_key or settings.default_api_key).strip()
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 图像接口 URL",
+    )
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
     if not api_key:
         return {}
     model = _normalize_responses_model(
@@ -1679,10 +1690,18 @@ async def _complete_itinerary_plan_with_ai_coordinates(
 ) -> dict[str, Any]:
     if plan.get("status") == "ready":
         return plan
-    endpoint_url = validate_url(settings.default_responses_url, "Responses 文本接口 URL")
-    api_key = (parsed.api_key or settings.default_api_key).strip()
-    if not api_key:
+    endpoint_url = validate_url(
+        parsed.endpoint_url or settings.default_responses_url,
+        "Responses 文本接口 URL",
+    )
+    if not (parsed.api_key or settings.default_api_key).strip():
         return plan
+    api_key = _resolve_execution_api_key(
+        requested_key=parsed.api_key,
+        endpoint_url=endpoint_url,
+        default_endpoint_url=settings.default_responses_url,
+        default_api_key=settings.default_api_key,
+    )
 
     model = _normalize_responses_model(
         parsed.model,
@@ -2769,7 +2788,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/generated-images/{generated_image_id}")
     async def generated_image_detail(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
@@ -2787,7 +2806,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/generated-images/{generated_image_id}/versions")
     async def generated_image_versions(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         limit: int = 200,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2811,7 +2830,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/gallery/{generated_image_id}")
     async def update_gallery_item(
-        generated_image_id: int,
+        generated_image_id: SqliteIdPath,
         body: Any = JSON_BODY,
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2835,13 +2854,20 @@ def create_router() -> APIRouter:
 
     @router.get("/api/usage")
     async def usage(
+        settings: Settings = Depends(get_settings),
         user: AuthUser | None = Depends(require_current_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
-        target_user_id = None if user is None or user.is_admin else user.id
+        if not settings.auth_enabled or user is None:
+            return {
+                "current_user": None,
+                "scope": "self",
+                "users": [],
+            }
+        target_user_id = None if user.is_admin else user.id
         users = await anyio.to_thread.run_sync(lambda: auth_store.usage_summary(target_user_id))
         return {
-            "current_user": user.public_dict() if user else None,
+            "current_user": user.public_dict(),
             "scope": "all" if target_user_id is None else "self",
             "users": users,
         }
@@ -2883,7 +2909,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/admin/users/{user_id}/org")
     async def admin_update_user_org(
-        user_id: int,
+        user_id: SqliteIdPath,
         body: Any = JSON_BODY,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2953,7 +2979,7 @@ def create_router() -> APIRouter:
 
     @router.put("/api/admin/users/{user_id}/password")
     async def admin_reset_user_password(
-        user_id: int,
+        user_id: SqliteIdPath,
         body: Any = JSON_BODY,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
@@ -2973,7 +2999,7 @@ def create_router() -> APIRouter:
 
     @router.delete("/api/admin/users/{user_id}")
     async def admin_delete_user(
-        user_id: int,
+        user_id: SqliteIdPath,
         admin: AuthUser = Depends(require_admin_user),
         auth_store: AuthStore = Depends(get_auth_store),
     ) -> dict[str, Any]:
@@ -3255,7 +3281,7 @@ def create_router() -> APIRouter:
         settings: Settings = Depends(get_settings),
         user: AuthUser | None = Depends(require_current_user),
     ) -> dict[str, Any]:
-        if user is None:
+        if settings.auth_enabled and user is None:
             raise APIError(HTTPStatus.UNAUTHORIZED, "请先登录", code="unauthorized")
         payload = _ensure_dict(body)
         parsed = _validate_request(ItineraryMapPlanRequest, payload)
@@ -3576,12 +3602,9 @@ def _text_fidelity_passed(text: str) -> bool:
     normalized = re.sub(r"\s+", "", text or "")
     if not normalized:
         return False
-    if "结论：通过" in normalized or "结论:通过" in normalized:
-        return True
-    failure_markers = ("结论：不通过", "结论:不通过", "不通过", "缺失", "疑似错误", "残留旧文字", "错字", "漏字")
-    if any(marker in normalized for marker in failure_markers):
+    if "结论：不通过" in normalized or "结论:不通过" in normalized:
         return False
-    return False
+    return "结论：通过" in normalized or "结论:通过" in normalized
 
 
 def _parse_team_chat_mentions(content: str) -> list[str]:
@@ -5079,8 +5102,19 @@ async def handle_responses_image(
     )
     reasoning_effort = reasoning_options.get("reasoning", {}).get("effort", "")
 
-    _ensure_no_restricted_destination_text(parsed.prompt)
-    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=parsed.prompt)
+    original_prompt = (parsed.original_prompt or parsed.prompt).strip()
+    prompt_mode = parsed.prompt_mode
+    recipe_id = parsed.recipe_id or ""
+    recipe_version = parsed.recipe_version or ""
+    recipe = recipe_public_dict(recipe_id) if recipe_id else None
+    _ensure_no_restricted_destination_text(parsed.prompt, original_prompt)
+    _ensure_not_legacy_program_layout_background_prompt(parsed.prompt, original_prompt)
+    if prompt_mode == "recipe" and recipe is None:
+        raise APIError(HTTPStatus.BAD_REQUEST, "请选择有效的创作配方", code="validation_error")
+    if prompt_mode != "recipe":
+        recipe_id = ""
+        recipe_version = ""
+    itinerary_id = _resolve_itinerary_id(explicit_id=parsed.itinerary_id, prompt=original_prompt)
     effective_prompt = _append_itinerary_id_badge_prompt(parsed.prompt, itinerary_id)
     if not api_key:
         raise APIError(HTTPStatus.BAD_REQUEST, "缺少 API Key", code="bad_request")
@@ -5184,9 +5218,17 @@ async def handle_responses_image(
 
     metadata = request_metadata({**payload, **image_options}, size=size)
     metadata["image_model"] = str(tool["model"])
+    metadata["original_prompt"] = original_prompt
+    metadata["effective_prompt"] = effective_prompt
+    metadata["prompt_mode"] = prompt_mode
+    if recipe_id:
+        metadata["recipe_id"] = recipe_id
+    if recipe_version:
+        metadata["recipe_version"] = recipe_version
+    if recipe is not None:
+        metadata["recipe_title"] = recipe["title"]
     if itinerary_id:
         metadata["itinerary_id"] = itinerary_id
-        metadata["effective_prompt"] = effective_prompt
     mode = (parsed.mode or ("reference" if image_parts else "responses")).strip() or "responses"
     image_metadata = _image_reference_metadata(image_parts)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from typing import Any
 
 RESTRICTED_DESTINATION_CODE = "restricted_destination"
@@ -38,9 +39,15 @@ _RESTRICTED_COORDINATE_BOXES: tuple[tuple[float, float, float, float], ...] = (
     (41.8985, 41.9088, 12.4440, 12.4598),
 )
 
+_RESTRICTED_EXCLUSION_VERB_RE = re.compile(
+    r"(?:不得出现|不得包含|不能出现|不能包含|不要出现|不要画出|不要标注|禁止出现|禁止包含|"
+    r"完全排除|必须完全排除|必须排除)",
+    re.IGNORECASE,
+)
+
 _RESTRICTED_EXCLUSION_SENTENCE_PATTERN = re.compile(
-    r"[^。！？.!?\n]*(?:不得出现|不得包含|不能出现|不能包含|不要出现|不要画出|不要标注|禁止出现|禁止包含|"
-    r"完全排除|必须完全排除|必须排除)[^。！？.!?\n]*(?:[。！？.!?]|\n|$)",
+    r"[^。！？.!?\n，,；;]*(?:不得出现|不得包含|不能出现|不能包含|不要出现|不要画出|不要标注|禁止出现|禁止包含|"
+    r"完全排除|必须完全排除|必须排除)[^。！？.!?\n，,；;]*(?:[。！？.!?\n，,；;]|$)",
     re.IGNORECASE,
 )
 
@@ -52,8 +59,16 @@ RESTRICTED_DESTINATION_GUARD_TEXT = (
 )
 
 
+def _normalize_restricted_scan_text(value: Any) -> str:
+    raw = str(value or "")
+    if not raw:
+        return ""
+    normalized = unicodedata.normalize("NFKC", raw)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Cf")
+
+
 def restricted_destination_matches_text(value: Any) -> list[str]:
-    text = str(value or "")
+    text = _normalize_restricted_scan_text(value)
     if not text:
         return []
     return [pattern.pattern for pattern in _RESTRICTED_TEXT_PATTERNS if pattern.search(text)]
@@ -102,25 +117,25 @@ def append_restricted_destination_guard(prompt: str) -> str:
 
 
 def _without_restricted_destination_guard(value: Any) -> str:
-    text = str(value or "")
+    text = _normalize_restricted_scan_text(value)
     if not text:
         return ""
-    cleaned = text.replace(RESTRICTED_DESTINATION_GUARD_TEXT, "")
-    cleaned = re.sub(
-        r"硬性目的地限制[:：].*?(?:。|$)",
-        "",
-        cleaned,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    normalized_guard = _normalize_restricted_scan_text(RESTRICTED_DESTINATION_GUARD_TEXT)
+    cleaned = text.replace(normalized_guard, "")
     cleaned = _RESTRICTED_EXCLUSION_SENTENCE_PATTERN.sub(_remove_restricted_exclusion_sentence, cleaned)
     return cleaned
 
 
 def _remove_restricted_exclusion_sentence(match: re.Match[str]) -> str:
-    sentence = match.group(0)
-    if contains_restricted_destination_text(sentence):
+    clause = match.group(0)
+    verb_match = _RESTRICTED_EXCLUSION_VERB_RE.search(clause)
+    if verb_match is None:
+        return clause
+    prefix = clause[: verb_match.start()]
+    suffix = clause[verb_match.end() :]
+    if not contains_restricted_destination_text(prefix) and contains_restricted_destination_text(suffix):
         return ""
-    return sentence
+    return clause
 
 
 def _float_or_none(value: Any) -> float | None:

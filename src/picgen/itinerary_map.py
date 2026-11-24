@@ -23,6 +23,7 @@ from urllib import parse
 import httpx
 from fontTools import subset as font_subset
 from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw
 
 from .config import Settings
 from .restricted_destinations import stop_has_restricted_destination
@@ -688,11 +689,31 @@ def _project_stops(
     if not coords:
         return []
 
-    # Unwrap longitudes for antimeridian-crossing routes (e.g. Tokyo↔Honolulu) so the
-    # route takes the short Pacific path instead of wrapping the wrong way around the map.
-    lngs = [lng for _, lng, _ in coords]
-    if max(lngs) - min(lngs) > 180.0:
-        coords = [(lat, lng + 360.0 if lng < 0 else lng, stop) for lat, lng, stop in coords]
+    # Unwrap longitudes across whichever circular gap is largest so trans-Pacific
+    # routes (e.g. Tokyo↔Honolulu or London→Tokyo→Honolulu) stay compact without
+    # scrambling Europe/Americas stops that merely span >180° overall.
+    normalized_coords = [
+        (lat, ((lng + 180.0) % 360.0) - 180.0, stop) for lat, lng, stop in coords
+    ]
+    unique_lngs = sorted({lng for _, lng, _ in normalized_coords})
+    if len(unique_lngs) >= 2:
+        wrap_gap = (unique_lngs[0] + 360.0) - unique_lngs[-1]
+        best_gap = wrap_gap
+        cut_after_lng: float | None = None
+        for idx in range(len(unique_lngs) - 1):
+            gap = unique_lngs[idx + 1] - unique_lngs[idx]
+            if gap > best_gap + 1e-6:
+                best_gap = gap
+                cut_after_lng = unique_lngs[idx]
+        if cut_after_lng is not None:
+            coords = [
+                (lat, lng + 360.0 if lng <= cut_after_lng else lng, stop)
+                for lat, lng, stop in normalized_coords
+            ]
+        else:
+            coords = normalized_coords
+    else:
+        coords = normalized_coords
 
     projected = []
     for lat, lng, stop in coords:
@@ -1255,17 +1276,14 @@ def _cubic_point(
     return x, y
 
 
-def _draw_curved_segment(
-    pixels: bytearray,
+def _curved_segment_points(
     width: int,
     height: int,
     start: dict[str, Any],
     end: dict[str, Any],
     *,
     index: int,
-    radius: float,
-    color: RGBColor,
-) -> None:
+) -> list[tuple[float, float]]:
     sx = float(start["x"])
     sy = float(start["y"])
     ex = float(end["x"])
@@ -1287,12 +1305,39 @@ def _draw_curved_segment(
     p1 = (sx + dx * 0.32 + normal_x * bend, sy + dy * 0.32 + normal_y * bend)
     p2 = (sx + dx * 0.68 + normal_x * bend, sy + dy * 0.68 + normal_y * bend)
     p3 = (ex, ey)
-    previous = p0
-    steps = max(8, int(distance / 7.0))
-    for step in range(1, steps + 1):
-        point = _cubic_point(p0, p1, p2, p3, step / steps)
-        _draw_line(pixels, width, height, previous[0], previous[1], point[0], point[1], radius=radius, color=color)
-        previous = point
+    steps = max(12, int(distance / 6.0))
+    return [_cubic_point(p0, p1, p2, p3, step / steps) for step in range(steps + 1)]
+
+
+def _draw_pil_digit_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    center_x: float,
+    center_y: float,
+    *,
+    scale: int,
+    color: RGBColor,
+) -> None:
+    glyphs = [_DIGIT_FONT[char] for char in text if char in _DIGIT_FONT]
+    if not glyphs:
+        return
+    glyph_width = 3 * scale
+    gap = max(1, scale)
+    total_width = len(glyphs) * glyph_width + (len(glyphs) - 1) * gap
+    total_height = 5 * scale
+    x = round(center_x - total_width / 2)
+    y = round(center_y - total_height / 2)
+    for glyph in glyphs:
+        for row_index, row in enumerate(glyph):
+            for col_index, value in enumerate(row):
+                if value == "1":
+                    left = x + col_index * scale
+                    top = y + row_index * scale
+                    draw.rectangle(
+                        [left, top, left + scale - 1, top + scale - 1],
+                        fill=color,
+                    )
+        x += glyph_width + gap
 
 
 def render_itinerary_control_png(
@@ -1312,66 +1357,56 @@ def render_itinerary_control_png(
     dot: RGBColor = (33, 43, 54)
     marker_fill: RGBColor = (255, 247, 198)
     logo_hint: RGBColor = (236, 232, 214)
-    # bytes(bg) * n repeats at the C level; bg * n would first build a 3*n-element
-    # pointer tuple (~77 MB at 1792², ~400 MB at 4096²) before the bytearray copy.
-    pixels = bytearray(bytes(bg) * (width * height))
+
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
 
     safe_w = max(220, int(width * 0.18))
     safe_h = max(90, int(height * 0.09))
-    _fill_rect(pixels, width, height, 44, 44, safe_w, safe_h, logo_hint)
+    draw.rectangle([44, 44, min(width - 1, 44 + safe_w - 1), min(height - 1, 44 + safe_h - 1)], fill=logo_hint)
 
     min_x = max(0, int(min(float(point["x"]) for point in points) - width * 0.12))
     max_x = min(width - 1, int(max(float(point["x"]) for point in points) + width * 0.12))
     min_y = max(0, int(min(float(point["y"]) for point in points) - height * 0.10))
     max_y = min(height - 1, int(max(float(point["y"]) for point in points) + height * 0.10))
-    for y in range(min_y, max_y + 1):
-        for x in range(min_x, max_x + 1):
-            if ((x - (min_x + max_x) / 2.0) / max(1, (max_x - min_x) / 2.0)) ** 2 + (
-                (y - (min_y + max_y) / 2.0) / max(1, (max_y - min_y) / 2.0)
-            ) ** 2 <= 1.04:
-                _set_pixel(pixels, width, height, x, y, land)
+    cx = (min_x + max_x) / 2.0
+    cy = (min_y + max_y) / 2.0
+    rx = max(1.0, (max_x - min_x) / 2.0) * math.sqrt(1.04)
+    ry = max(1.0, (max_y - min_y) / 2.0) * math.sqrt(1.04)
+    draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=land)
 
-    for index, point in enumerate(points[:-1]):
-        _draw_curved_segment(
-            pixels,
-            width,
-            height,
-            point,
-            points[index + 1],
-            index=index,
-            radius=6.5,
-            color=route_shadow,
-        )
-    for index, point in enumerate(points[:-1]):
-        _draw_curved_segment(
-            pixels,
-            width,
-            height,
-            point,
-            points[index + 1],
-            index=index,
-            radius=2.8,
-            color=route,
-        )
+    curves = [
+        _curved_segment_points(width, height, point, points[index + 1], index=index)
+        for index, point in enumerate(points[:-1])
+    ]
+    for curve_points in curves:
+        draw.line(curve_points, fill=route_shadow, width=13, joint="curve")
+    for curve_points in curves:
+        draw.line(curve_points, fill=route, width=6, joint="curve")
+
     marker_radius = max(10.0, min(16.0, width * 0.0086))
     digit_scale = max(2, round(marker_radius / 6.0))
     for index, point in enumerate(points, start=1):
         point_x = float(point["x"])
         point_y = float(point["y"])
-        _draw_circle(pixels, width, height, point_x, point_y, marker_radius + 7.0, route_shadow)
-        _draw_circle(pixels, width, height, point_x, point_y, marker_radius + 3.0, route)
-        _draw_circle(pixels, width, height, point_x, point_y, marker_radius, marker_fill)
-        _draw_digit_text(
-            pixels,
-            width,
-            height,
+        for r, fill_color in (
+            (marker_radius + 7.0, route_shadow),
+            (marker_radius + 3.0, route),
+            (marker_radius, marker_fill),
+        ):
+            draw.ellipse([point_x - r, point_y - r, point_x + r, point_y + r], fill=fill_color)
+        _draw_pil_digit_text(
+            draw,
             f"{index:02d}",
             point_x,
             point_y,
             scale=digit_scale,
             color=dot,
         )
-    return _encode_rgb_png(width, height, pixels)
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", compress_level=6)
+    return buffer.getvalue()
 
 
 def _short_text(value: Any, *, limit: int) -> str:
