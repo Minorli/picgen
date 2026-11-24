@@ -488,3 +488,12 @@ def test_ui_ux_phase2_dom_and_simple_mode_inline_preview_contracts() -> None:
     assert ".account-dropdown-menu" in styles_css
     assert ".simple-text-preview" in styles_css
 
+    topbar_block = re.search(r"(?m)^\.app-topbar\s*\{([^}]+)\}", styles_css)
+    assert topbar_block is not None
+    topbar_body = topbar_block.group(1)
+    assert "position: relative;" in topbar_body
+    topbar_z = re.search(r"z-index:\s*(\d+)\s*;", topbar_body)
+    assert topbar_z is not None and 20 <= int(topbar_z.group(1)) < 50
+    assert ".account-dropdown-menu.align-left" in styles_css
+    assert "syncAccountDropdownAlignment" in app_js
+

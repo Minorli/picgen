@@ -4,7 +4,7 @@ import {
   chooseLogoPlacement,
   createLogoPreservationDiagnostic,
   scaleLogoDetectionPlacements,
-} from "./logo-placement.mjs?v=0.1.77"
+} from "./logo-placement.mjs?v=0.1.78"
 import {
   DEFAULT_RESPONSES_MODEL,
   migrateStoredImageModel,
@@ -12,21 +12,21 @@ import {
   RESPONSES_REASONING_STORAGE_VERSION,
   migrateStoredResponsesReasoningSettings,
   migrateStoredResponsesSettings,
-} from "./responses-settings.mjs?v=0.1.77"
+} from "./responses-settings.mjs?v=0.1.78"
 import {
   classifyReviewPanelTone,
   formatHumanDurationMs,
   sanitizeDownloadHref,
-} from "./url-safety.mjs?v=0.1.77"
+} from "./url-safety.mjs?v=0.1.78"
 import {
   extractSimpleVisibleTextItems,
   resolveSimpleScenarioBadge,
-} from "./simple-preview.mjs?v=0.1.77"
+} from "./simple-preview.mjs?v=0.1.78"
 import {
   countPendingPasswordResets,
   filterAdminUsers,
   formatAdminUserOptionLabel,
-} from "./admin-console.mjs?v=0.1.77"
+} from "./admin-console.mjs?v=0.1.78"
 
 const RESPONSES_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"])
 const DEFAULT_RESPONSES_REASONING_EFFORT = "xhigh"
@@ -161,6 +161,17 @@ const FILE_READ_CHANNELS = Object.freeze({
   generateReference: "generate-reference",
 })
 
+function syncAccountDropdownAlignment() {
+  if (!refs.accountDropdownMenu || !refs.accountMenuTrigger) {
+    return
+  }
+  const triggerRect = refs.accountMenuTrigger.getBoundingClientRect()
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1440
+  const menuWidth = Math.min(244, Math.max(180, viewportWidth - 24))
+  const shouldAlignLeft = triggerRect.right - menuWidth < 12 && triggerRect.left + menuWidth <= viewportWidth - 8
+  refs.accountDropdownMenu.classList.toggle("align-left", shouldAlignLeft)
+}
+
 function closeAccountDropdownMenu() {
   refs.accountDropdownMenu?.classList.add("hidden")
   refs.accountMenuTrigger?.setAttribute("aria-expanded", "false")
@@ -172,6 +183,9 @@ function toggleAccountDropdownMenu(forceOpen = null) {
   }
   const currentlyOpen = !refs.accountDropdownMenu.classList.contains("hidden")
   const shouldOpen = forceOpen === null ? !currentlyOpen : Boolean(forceOpen)
+  if (shouldOpen) {
+    syncAccountDropdownAlignment()
+  }
   refs.accountDropdownMenu.classList.toggle("hidden", !shouldOpen)
   refs.accountMenuTrigger.setAttribute("aria-expanded", String(shouldOpen))
   if (shouldOpen) {
@@ -12879,6 +12893,12 @@ function bindEvents() {
   refs.previewModal.addEventListener("click", (event) => {
     if (event.target === refs.previewModal) {
       closePreview()
+    }
+  })
+
+  window.addEventListener("resize", () => {
+    if (refs.accountDropdownMenu && !refs.accountDropdownMenu.classList.contains("hidden")) {
+      syncAccountDropdownAlignment()
     }
   })
 

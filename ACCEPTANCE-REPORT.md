@@ -537,3 +537,9 @@
 - 新增 `tests/test_audit_fixes.py` 共 15 项全栈回归；完整 `./scripts/check.sh`（Ruff、Mypy、6 个 JS/MJS 语法检查及全量 Pytest **696 passed**）与 `uv lock --check`、`git diff --check` 全部通过。
 - 使用真实 Google Chrome + Playwright 在 `1440x900`、`1120x800`、`375x812` 三档视口完成简洁模式免弹窗生图、内联文字核对、账号菜单、独立管理员控制台建部门与搜人调岗、专业模式三标签左轨、1600x1000 横图编辑比例自动守护及移动端响应式实测，0 控制台错误、0 页面异常、0 横向溢出。
 - 构建并部署 `minorli/picgen:0.1.77` 容器验证 `/api/ready` 与前端 `0.1.77` 资源一致，推送 Docker Hub 镜像、GitHub 分支提交（PR #46）与 Release `v0.1.77`。
+
+## 0.1.78 专业模式顶栏账号下拉菜单层叠遮挡修复（2026-11-24）
+
+- **根因定位**：专业模式下 `.app-topbar` 启用了 `backdrop-filter: blur(18px)` 但未声明 `position` 与 `z-index`，浏览器为其创建了 `z-index: auto` 的局部层叠上下文，导致内部 `.account-dropdown-menu`（`z-index: 45`）被困在顶栏上下文中，在 DOM 顺序上被后续 `<main class="app-grid">` 中的 `#resultPanel` / `.mode-tabs` 遮挡；此前浏览器走查仅在简洁模式（`backdrop-filter: none`）下打开了账号菜单，遗漏了专业模式下的真实像素命中校验。
+- **修复方案**：为 `.app-topbar` 显式设置 `position: relative; z-index: 40`（高于主工作区全部卡片与粘性标签栏 `z-index <= 8`，低于全屏模态框 `z-index: 50–62` 及全局 Toast `z-index: 80`）；同时为 `#accountDropdownMenu` 增加窄屏/移动端折行时的视口左右边界自适应对齐（`syncAccountDropdownAlignment` + `.align-left`）。
+- **回归加固**：`tests/test_audit_fixes.py` 新增顶栏层叠上下文契约断言；Playwright 真实 Chrome 走查新增 `document.elementFromPoint` 逐菜单项像素级无遮挡命中断言，同时覆盖专业模式与简洁模式下的 `1440x900`、`1120x800`、`375x812` 全视口。

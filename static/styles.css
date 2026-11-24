@@ -377,6 +377,8 @@ body.app-shell .auth-page {
 }
 
 .app-topbar {
+  position: relative;
+  z-index: 40;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4287,7 +4289,9 @@ button:disabled {
   z-index: 45;
   top: calc(100% + 8px);
   right: 0;
+  left: auto;
   width: 244px;
+  max-width: calc(100vw - 24px);
   padding: 6px;
   display: grid;
   gap: 2px;
@@ -4295,6 +4299,11 @@ button:disabled {
   border-radius: 10px;
   background: var(--ux-bg-1);
   box-shadow: 0 16px 38px rgba(15, 23, 42, 0.14);
+}
+
+.account-dropdown-menu.align-left {
+  left: 0;
+  right: auto;
 }
 
 .account-stats-banner {
@@ -6879,7 +6888,8 @@ body.ui-simple-mode .toast-message .ux-icon {
   }
 
   .account-dropdown-menu {
-    right: 0;
+    left: 0;
+    right: auto;
     width: min(244px, calc(100vw - 24px));
   }
 
